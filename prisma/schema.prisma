@@ -1,3 +1,17 @@
+// prisma/schema.prisma
+//
+// DAY 1 — full domain schema.
+//
+// The existing User / RefreshToken models are UNCHANGED; everything below is
+// additive, so your current data and auth flow keep working.
+//
+// After editing:
+//   npx prisma migrate dev --name domain --create-only
+//   (paste prisma/day1-constraints.sql at the END of the generated migration)
+//   npx prisma migrate dev
+//   npx prisma generate
+//   npm run seed
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,10 +21,149 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ===========================================================================
+// ENUMS
+// ===========================================================================
+
+// USER and ADMIN keep their existing positions so current rows stay valid.
+// Postgres only allows APPENDING enum values, never reordering.
 enum Role {
   USER
   ADMIN
+  DRIVER
+  OPS
+  FINANCE
+  FLEET
+  SUPPORT
 }
+
+enum AccountType {
+  RETAIL
+  CORPORATE
+}
+
+enum TripType {
+  ONE_WAY
+  ROUND_TRIP
+}
+
+// How much is collected at the moment of booking
+enum PaymentMode {
+  ZERO
+  PARTIAL
+  FULL
+}
+
+enum PaymentMethod {
+  UPI
+  CARD
+  NETBANKING
+  WALLET
+  CASH
+}
+
+// Forward-only. Out-of-order events affect zero rows and are safely ignored.
+enum BookingStatus {
+  ATTEMPTED
+  PENDING
+  CONFIRMED
+  ALLOCATED
+  EN_ROUTE
+  ONGOING
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+enum AttemptOutcome {
+  COMPLETED
+  PENDING
+  ABANDONED
+  FAILED
+}
+
+enum CancelledBy {
+  CUSTOMER
+  DRIVER
+  ADMIN
+  SYSTEM
+}
+
+enum PaymentStatus {
+  CREATED
+  AUTHORISED
+  CAPTURED
+  PARTIALLY_PAID
+  FAILED
+  REFUNDED
+}
+
+enum InvoiceType {
+  TAX
+  NON_TAX
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  CANCELLED
+}
+
+enum VehicleStatus {
+  AVAILABLE
+  ASSIGNED
+  ON_TRIP
+  MAINTENANCE
+  INACTIVE
+}
+
+enum KycStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum AllocationStatus {
+  ACTIVE
+  RELEASED
+  CANCELLED
+}
+
+enum LedgerDirection {
+  CREDIT
+  DEBIT
+}
+
+enum LedgerEntryType {
+  FARE_CHARGED
+  ADVANCE_RECEIVED
+  BALANCE_RECEIVED
+  DRIVER_CREDIT
+  COMMISSION
+  WELFARE_FEE
+  CANCELLATION_FEE
+  REFUND
+  PAYOUT
+  ADJUSTMENT
+}
+
+enum IdempotencyStatus {
+  IN_FLIGHT
+  COMPLETED
+  FAILED
+}
+
+enum BillingCycle {
+  PER_TRIP
+  WEEKLY
+  MONTHLY
+}
+
+// ===========================================================================
+// IDENTITY  (existing — unchanged)
+// ===========================================================================
 
 model User {
   id        String   @id @default(uuid()) @db.Uuid
@@ -26,8 +179,17 @@ model User {
 
   refreshTokens RefreshToken[]
 
+  // --- new relations ---
+  customer         Customer?
+  driver           Driver?
+  ledgerEntries    LedgerEntry[]
+  auditLogs        AuditLog[]
+  idempotencyKeys  IdempotencyKey[]
+  cancelledBookings Booking[]      @relation("BookingCancelledBy")
+
   @@index([role])
   @@index([createdAt])
+  @@index([phone])
   @@map("users")
 }
 
@@ -50,4 +212,650 @@ model RefreshToken {
   @@index([userId])
   @@index([expiresAt])
   @@map("refresh_tokens")
+}
+
+// ===========================================================================
+// RBAC  (Day 2 uses this; the table exists from Day 1)
+// ===========================================================================
+
+model RolePermission {
+  id         Int    @id @default(autoincrement())
+  role       Role
+  permission String @db.VarChar(48)
+
+  @@unique([role, permission])
+  @@index([role])
+  @@map("role_permissions")
+}
+
+// ===========================================================================
+// GEOGRAPHY & PRICING
+// ===========================================================================
+
+model City {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(80)
+  state     String   @db.VarChar(80)
+  country   String   @default("IN") @db.Char(2)
+
+  // Service area. Bookings outside this are rejected BEFORE any maps API call
+  // is made — the cheapest possible validation.
+  centreLat Decimal  @map("centre_lat") @db.Decimal(10, 7)
+  centreLng Decimal  @map("centre_lng") @db.Decimal(10, 7)
+  radiusKm  Int      @default(50) @map("radius_km")
+
+  timezone  String   @default("Asia/Kolkata") @db.VarChar(48)
+  languages Json     @default("[\"en\",\"hi\"]")
+
+  // Karnataka gig-worker welfare levy (1–5%). Varies by state, so it lives here.
+  welfareFeePct Decimal @default(0) @map("welfare_fee_pct") @db.Decimal(4, 2)
+
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  fareConfigs FareConfig[]
+  vehicles    Vehicle[]
+  bookings    Booking[]
+
+  @@unique([name, state])
+  @@index([isActive])
+  @@map("cities")
+}
+
+model FareConfig {
+  id           Int      @id @default(autoincrement())
+  cityId       Int      @map("city_id")
+  vehicleClass String   @map("vehicle_class") @db.VarChar(24)
+  tripType     TripType @map("trip_type")
+
+  // --- shared components ---
+  baseFare        Decimal @map("base_fare") @db.Decimal(10, 2)
+  perKm           Decimal @map("per_km") @db.Decimal(10, 2)
+  perMinute       Decimal @default(0) @map("per_minute") @db.Decimal(10, 2)
+  minimumFare     Decimal @map("minimum_fare") @db.Decimal(10, 2)
+  cancellationFee Decimal @default(0) @map("cancellation_fee") @db.Decimal(10, 2)
+
+  // --- ONE_WAY only ---
+  // Outstation one-way: the driver returns empty, so a share of the return
+  // distance may be charged. 0 = disabled.
+  returnEmptyPct  Decimal @default(0) @map("return_empty_pct") @db.Decimal(5, 2)
+
+  // --- ROUND_TRIP only ---
+  minKmPerDay     Int     @default(0) @map("min_km_per_day")
+  driverAllowance Decimal @default(0) @map("driver_allowance") @db.Decimal(10, 2) // bata, per day
+  waitingPerHour  Decimal @default(0) @map("waiting_per_hour") @db.Decimal(10, 2)
+  freeWaitingMin  Int     @default(0) @map("free_waiting_min")
+
+  // --- night charge ---
+  nightChargePct  Decimal @default(0) @map("night_charge_pct") @db.Decimal(5, 2)
+  nightStartHour  Int     @default(22) @map("night_start_hour")
+  nightEndHour    Int     @default(6) @map("night_end_hour")
+
+  // --- surge bounds (MVAG caps dynamic pricing) ---
+  maxSurge        Decimal @default(2.00) @map("max_surge") @db.Decimal(4, 2)
+  minSurge        Decimal @default(0.50) @map("min_surge") @db.Decimal(4, 2)
+
+  effectiveFrom   DateTime @default(now()) @map("effective_from")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  city City @relation(fields: [cityId], references: [id])
+
+  @@unique([cityId, vehicleClass, tripType, effectiveFrom])
+  @@index([cityId, isActive])
+  @@map("fare_configs")
+}
+
+// ===========================================================================
+// CUSTOMERS
+// ===========================================================================
+
+model Customer {
+  userId      String      @id @map("user_id") @db.Uuid
+
+  // Decides Tax vs Non-Tax invoice. Admin-settable ONLY, audit-logged —
+  // a customer flipping their own account to CORPORATE is a tax problem.
+  accountType AccountType @default(RETAIL) @map("account_type")
+
+  corporateAccountId String? @map("corporate_account_id") @db.Uuid
+
+  alternatePhone String?  @map("alternate_phone") @db.VarChar(20)
+  gstin          String?  @db.VarChar(15)   // retail customers may still supply one
+  loyaltyPoints  Int      @default(0) @map("loyalty_points")
+  totalBookings  Int      @default(0) @map("total_bookings")
+  notes          String?
+  meta           Json     @default("{}")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  corporate CorporateAccount? @relation(fields: [corporateAccountId], references: [id])
+  addresses Address[]
+  bookings  Booking[]
+  attempts  BookingAttempt[]
+
+  @@index([accountType])
+  @@index([corporateAccountId])
+  @@map("customers")
+}
+
+model CorporateAccount {
+  id           String       @id @default(uuid()) @db.Uuid
+  companyName  String       @map("company_name") @db.VarChar(180)
+  gstin        String       @unique @db.VarChar(15)
+  pan          String?      @db.VarChar(10)
+
+  billingEmail   String     @map("billing_email") @db.VarChar(180)
+  billingPhone   String?    @map("billing_phone") @db.VarChar(20)
+  billingAddress String     @map("billing_address")
+  billingCity    String     @map("billing_city") @db.VarChar(80)
+  billingState   String     @map("billing_state") @db.VarChar(80)
+  billingPincode String     @map("billing_pincode") @db.VarChar(10)
+
+  // PER_TRIP issues an invoice per booking; WEEKLY/MONTHLY consolidates many
+  // bookings onto one invoice via invoice_lines.
+  billingCycle BillingCycle @default(PER_TRIP) @map("billing_cycle")
+  creditLimit  Decimal      @default(0) @map("credit_limit") @db.Decimal(12, 2)
+  creditUsed   Decimal      @default(0) @map("credit_used") @db.Decimal(12, 2)
+
+  isActive     Boolean      @default(true) @map("is_active")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  customers Customer[]
+  bookings  Booking[]
+  invoices  Invoice[]
+
+  @@index([isActive])
+  @@map("corporate_accounts")
+}
+
+model Address {
+  id         String   @id @default(uuid()) @db.Uuid
+  customerId String   @map("customer_id") @db.Uuid
+
+  label      String   @db.VarChar(40)   // Home, Office, ...
+  line1      String   @db.VarChar(255)
+  line2      String?  @db.VarChar(255)
+  landmark   String?  @db.VarChar(120)
+  city       String   @db.VarChar(80)
+  state      String   @db.VarChar(80)
+  pincode    String   @db.VarChar(10)
+
+  lat        Decimal? @db.Decimal(10, 7)
+  lng        Decimal? @db.Decimal(10, 7)
+
+  isDefault  Boolean  @default(false) @map("is_default")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  customer   Customer @relation(fields: [customerId], references: [userId], onDelete: Cascade)
+
+  @@index([customerId])
+  @@map("addresses")
+}
+
+// ===========================================================================
+// FLEET
+// ===========================================================================
+
+model Vehicle {
+  id                String        @id @default(uuid()) @db.Uuid
+  registrationNumber String       @unique @map("registration_number") @db.VarChar(16)
+  vehicleClass      String        @map("vehicle_class") @db.VarChar(24)
+  makeModel         String?       @map("make_model") @db.VarChar(80)
+  year              Int?
+  colour            String?       @db.VarChar(40)
+  seatingCapacity   Int           @default(4) @map("seating_capacity")
+
+  status            VehicleStatus @default(AVAILABLE)
+  cityId            Int?          @map("city_id")
+
+  // Compliance documents (MVAG requires these to be current)
+  insuranceExpiry   DateTime?     @map("insurance_expiry") @db.Date
+  fitnessExpiry     DateTime?     @map("fitness_expiry") @db.Date
+  permitExpiry      DateTime?     @map("permit_expiry") @db.Date
+  pucExpiry         DateTime?     @map("puc_expiry") @db.Date
+  documents         Json          @default("{}")
+
+  odometerKm        Int           @default(0) @map("odometer_km")
+  isActive          Boolean       @default(true) @map("is_active")
+
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  city              City?         @relation(fields: [cityId], references: [id])
+  allocations       Allocation[]
+  drivers           Driver[]
+
+  @@index([status])
+  @@index([vehicleClass, status])
+  @@index([cityId])
+  @@map("vehicles")
+}
+
+model Driver {
+  userId           String    @id @map("user_id") @db.Uuid
+
+  licenceNumber    String    @unique @map("licence_number") @db.VarChar(32)
+  licenceExpiry    DateTime? @map("licence_expiry") @db.Date
+  aadhaarLast4     String?   @map("aadhaar_last4") @db.Char(4)  // never store the full number
+
+  // MVAG requires records of identity, police, medical and psychological checks
+  kycStatus        KycStatus @default(PENDING) @map("kyc_status")
+  kycVerifiedAt    DateTime? @map("kyc_verified_at")
+  policeVerifiedAt DateTime? @map("police_verified_at")
+  medicalCheckedAt DateTime? @map("medical_checked_at")
+  inductedAt       DateTime? @map("inducted_at")
+  documents        Json      @default("{}")   // Cloudinary refs + metadata
+
+  assignedVehicleId String?  @map("assigned_vehicle_id") @db.Uuid
+
+  ratingAvg        Decimal   @default(5.00) @map("rating_avg") @db.Decimal(3, 2)
+  ratingCount      Int       @default(0) @map("rating_count")
+  isOnline         Boolean   @default(false) @map("is_online")
+  lastPingAt       DateTime? @map("last_ping_at")
+
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedVehicle  Vehicle?  @relation(fields: [assignedVehicleId], references: [id])
+  allocations      Allocation[]
+
+  @@index([kycStatus])
+  @@index([isOnline])
+  @@map("drivers")
+}
+
+// ===========================================================================
+// BOOKINGS
+// ===========================================================================
+
+model Booking {
+  id            String        @id @default(uuid()) @db.Uuid
+
+  // Human-readable reference shown to customers and used in support calls.
+  bookingNumber String        @unique @map("booking_number") @db.VarChar(20)
+
+  customerId    String        @map("customer_id") @db.Uuid
+  corporateAccountId String?  @map("corporate_account_id") @db.Uuid
+  cityId        Int           @map("city_id")
+
+  tripType      TripType      @map("trip_type")
+  status        BookingStatus @default(PENDING)
+  vehicleClass  String        @map("vehicle_class") @db.VarChar(24)
+
+  // --- itinerary ---
+  pickupAddress String        @map("pickup_address")
+  pickupLat     Decimal       @map("pickup_lat") @db.Decimal(10, 7)
+  pickupLng     Decimal       @map("pickup_lng") @db.Decimal(10, 7)
+  dropAddress   String        @map("drop_address")
+  dropLat       Decimal       @map("drop_lat") @db.Decimal(10, 7)
+  dropLng       Decimal       @map("drop_lng") @db.Decimal(10, 7)
+  stops         Json          @default("[]")   // intermediate stops for round trips
+
+  pickupAt      DateTime      @map("pickup_at")
+  returnAt      DateTime?     @map("return_at")   // required for ROUND_TRIP
+
+  // --- computed trip metrics ---
+  distanceKm      Decimal?    @map("distance_km") @db.Decimal(10, 2)
+  durationMinutes Int?        @map("duration_minutes")
+
+  // --- money (NUMERIC, never float) ---
+  estimatedFare   Decimal     @map("estimated_fare") @db.Decimal(12, 2)
+  finalFare       Decimal?    @map("final_fare") @db.Decimal(12, 2)
+  advancePaid     Decimal     @default(0) @map("advance_paid") @db.Decimal(12, 2)
+  balanceDue      Decimal     @default(0) @map("balance_due") @db.Decimal(12, 2)
+  cancellationFee Decimal     @default(0) @map("cancellation_fee") @db.Decimal(12, 2)
+  refundAmount    Decimal     @default(0) @map("refund_amount") @db.Decimal(12, 2)
+
+  paymentMode     PaymentMode @map("payment_mode")
+  paymentMethod   PaymentMethod? @map("payment_method")
+
+  // The full fare breakdown FROZEN at booking time. A later fare-config change
+  // must never retroactively alter a committed booking.
+  fareBasis       Json        @map("fare_basis")
+  surgeMultiplier Decimal     @default(1.00) @map("surge_multiplier") @db.Decimal(4, 2)
+  driverSharePct  Decimal     @default(80.00) @map("driver_share_pct") @db.Decimal(5, 2)
+
+  // --- cancellation ---
+  cancelledAt     DateTime?   @map("cancelled_at")
+  cancelledById   String?     @map("cancelled_by_id") @db.Uuid
+  cancelledByType CancelledBy? @map("cancelled_by_type")
+  cancellationReason String?  @map("cancellation_reason")
+
+  specialRequests String?     @map("special_requests")
+  meta            Json        @default("{}")
+
+  confirmedAt     DateTime?   @map("confirmed_at")
+  startedAt       DateTime?   @map("started_at")
+  completedAt     DateTime?   @map("completed_at")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+
+  customer        Customer          @relation(fields: [customerId], references: [userId], onDelete: Restrict)
+  corporate       CorporateAccount? @relation(fields: [corporateAccountId], references: [id])
+  city            City              @relation(fields: [cityId], references: [id])
+  cancelledBy     User?             @relation("BookingCancelledBy", fields: [cancelledById], references: [id])
+
+  allocations     Allocation[]
+  payments        Payment[]
+  invoiceLines    InvoiceLine[]
+  ledgerEntries   LedgerEntry[]
+  tripEvents      TripEvent[]
+  attempt         BookingAttempt?
+
+  @@index([customerId, createdAt])
+  @@index([status])
+  @@index([pickupAt])
+  @@index([cityId, status])
+  @@index([corporateAccountId])
+  @@map("bookings")
+}
+
+/// Every booking INITIATION is recorded here — completed, pending, or
+/// abandoned — because the admin must be notified of all of them. This is a
+/// separate table from `bookings` so a failed attempt never pollutes real
+/// booking data or booking numbering.
+model BookingAttempt {
+  id           String         @id @default(uuid()) @db.Uuid
+  customerId   String?        @map("customer_id") @db.Uuid  // null = not signed in
+  bookingId    String?        @unique @map("booking_id") @db.Uuid
+
+  outcome      AttemptOutcome @default(PENDING)
+
+  tripType     TripType?      @map("trip_type")
+  vehicleClass String?        @map("vehicle_class") @db.VarChar(24)
+  pickupAddress String?       @map("pickup_address")
+  dropAddress   String?       @map("drop_address")
+  pickupAt      DateTime?     @map("pickup_at")
+  estimatedFare Decimal?      @map("estimated_fare") @db.Decimal(12, 2)
+
+  failureReason String?       @map("failure_reason") @db.VarChar(255)
+  source        String?       @db.VarChar(24)   // web | android | ios | admin
+  ip            String?       @db.VarChar(45)
+  userAgent     String?       @map("user_agent") @db.VarChar(255)
+  payload       Json          @default("{}")
+
+  notifiedAt    DateTime?     @map("notified_at")
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  customer      Customer?     @relation(fields: [customerId], references: [userId], onDelete: SetNull)
+  booking       Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([outcome, createdAt])
+  @@index([customerId])
+  @@index([createdAt])
+  @@map("booking_attempts")
+}
+
+/// Vehicle + driver committed to a booking for a time window.
+///
+/// The overlap guard lives in raw SQL (see day1-constraints.sql) as a GiST
+/// EXCLUDE constraint: the same vehicle cannot hold two ACTIVE allocations with
+/// overlapping time ranges. A plain unique index cannot express that, and a
+/// fleet company legitimately has the same vehicle booked on Monday AND Tuesday.
+model Allocation {
+  id        String           @id @default(uuid()) @db.Uuid
+  bookingId String           @map("booking_id") @db.Uuid
+  vehicleId String           @map("vehicle_id") @db.Uuid
+  driverId  String?          @map("driver_id") @db.Uuid
+
+  status    AllocationStatus @default(ACTIVE)
+
+  // The window the vehicle is held for. For a round trip this spans the whole
+  // journey, so the vehicle is not offered to an overlapping booking.
+  startsAt  DateTime         @map("starts_at")
+  endsAt    DateTime         @map("ends_at")
+
+  assignedById String?       @map("assigned_by_id") @db.Uuid
+  acceptedAt   DateTime?     @map("accepted_at")
+  declinedAt   DateTime?     @map("declined_at")
+  releasedAt   DateTime?     @map("released_at")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  booking   Booking          @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  vehicle   Vehicle          @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  driver    Driver?          @relation(fields: [driverId], references: [userId], onDelete: SetNull)
+
+  @@index([bookingId])
+  @@index([vehicleId, status])
+  @@index([driverId, status])
+  @@index([startsAt, endsAt])
+  @@map("allocations")
+}
+
+/// M4 — trip milestones and GPS checkpoints. Continuous driver pings live in
+/// Redis GEO and NEVER reach this table; only start/end and periodic
+/// checkpoints are persisted.
+model TripEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  bookingId String   @map("booking_id") @db.Uuid
+
+  eventType String   @map("event_type") @db.VarChar(40)  // started, checkpoint, arrived, completed
+  lat       Decimal? @db.Decimal(10, 7)
+  lng       Decimal? @db.Decimal(10, 7)
+  odometerKm Int?    @map("odometer_km")
+  note      String?
+  meta      Json     @default("{}")
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, occurredAt])
+  @@map("trip_events")
+}
+
+// ===========================================================================
+// PAYMENTS & MONEY
+// ===========================================================================
+
+model Payment {
+  id        String        @id @default(uuid()) @db.Uuid
+  bookingId String        @map("booking_id") @db.Uuid
+
+  provider          String  @db.VarChar(24)    // mock | razorpay | cashfree
+  providerOrderId   String? @map("provider_order_id") @db.VarChar(120)
+  providerPaymentId String? @map("provider_payment_id") @db.VarChar(120)
+
+  amount    Decimal       @db.Decimal(12, 2)
+  currency  String        @default("INR") @db.Char(3)
+  method    PaymentMethod?
+  status    PaymentStatus @default(CREATED)
+
+  // ADVANCE / BALANCE / FULL / REFUND — a booking may have several payments
+  // (advance at booking, balance at completion), so this is NOT unique per
+  // booking; the unique constraint is on (provider, providerOrderId).
+  purpose   String        @db.VarChar(20)
+
+  rawResponse Json        @default("{}") @map("raw_response")
+  failureReason String?   @map("failure_reason") @db.VarChar(255)
+
+  paidAt    DateTime?     @map("paid_at")
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+
+  booking   Booking       @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  @@unique([provider, providerOrderId])
+  @@index([bookingId])
+  @@index([status, createdAt])
+  @@map("payments")
+}
+
+/// Gateway webhooks are AT-LEAST-ONCE. Insert the event id BEFORE doing any
+/// work; a unique violation means "already handled" → return 200 and stop.
+model WebhookEvent {
+  id          String    @id @default(uuid()) @db.Uuid
+  provider    String    @db.VarChar(24)
+  eventId     String    @map("event_id") @db.VarChar(160)
+  eventType   String    @map("event_type") @db.VarChar(80)
+  payload     Json
+  signature   String?   @db.VarChar(255)
+
+  processedAt DateTime? @map("processed_at")
+  failedAt    DateTime? @map("failed_at")
+  error       String?
+  attempts    Int       @default(0)
+  receivedAt  DateTime  @default(now()) @map("received_at")
+
+  @@unique([provider, eventId])
+  @@index([processedAt])
+  @@map("webhook_events")
+}
+
+/// Append-only. Balances are DERIVED by summing entries — never a mutable
+/// balance column, which is the lost-update race with real money attached.
+model LedgerEntry {
+  id        String          @id @default(uuid()) @db.Uuid
+  userId    String?         @map("user_id") @db.Uuid
+  bookingId String?         @map("booking_id") @db.Uuid
+
+  entryType LedgerEntryType @map("entry_type")
+  direction LedgerDirection
+  amount    Decimal         @db.Decimal(12, 2)
+  currency  String          @default("INR") @db.Char(3)
+
+  // Unique reference to the causing event. Makes a duplicate entry impossible
+  // rather than merely unlikely.
+  reference String          @unique @db.VarChar(160)
+  note      String?
+  meta      Json            @default("{}")
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  user      User?           @relation(fields: [userId], references: [id], onDelete: Restrict)
+  booking   Booking?        @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  @@index([userId, createdAt])
+  @@index([bookingId])
+  @@index([entryType, createdAt])
+  @@map("ledger_entries")
+}
+
+// ===========================================================================
+// INVOICING
+// ===========================================================================
+
+/// One invoice covers one booking (PER_TRIP) or many (consolidated corporate
+/// billing) via invoice_lines — which is why lines exist rather than a direct
+/// booking foreign key.
+model Invoice {
+  id            String        @id @default(uuid()) @db.Uuid
+
+  // GST requires a GAP-FREE sequential series. Generated from a DB sequence,
+  // never from a row count.
+  invoiceNumber String        @unique @map("invoice_number") @db.VarChar(40)
+  series        String        @default("A") @db.VarChar(8)
+  financialYear String        @map("financial_year") @db.VarChar(9)  // 2026-2027
+
+  type          InvoiceType
+  status        InvoiceStatus @default(ISSUED)
+
+  customerId    String?       @map("customer_id") @db.Uuid
+  corporateAccountId String?  @map("corporate_account_id") @db.Uuid
+
+  // Snapshot of the billed party AT ISSUE TIME. If the customer later changes
+  // their address, an issued invoice must not change.
+  billToName    String        @map("bill_to_name") @db.VarChar(180)
+  billToAddress String?       @map("bill_to_address")
+  billToGstin   String?       @map("bill_to_gstin") @db.VarChar(15)
+
+  subtotal      Decimal       @db.Decimal(12, 2)
+  discount      Decimal       @default(0) @db.Decimal(12, 2)
+  taxableValue  Decimal       @map("taxable_value") @db.Decimal(12, 2)
+  cgst          Decimal       @default(0) @db.Decimal(12, 2)
+  sgst          Decimal       @default(0) @db.Decimal(12, 2)
+  igst          Decimal       @default(0) @db.Decimal(12, 2)
+  totalAmount   Decimal       @map("total_amount") @db.Decimal(12, 2)
+
+  placeOfSupply String?       @map("place_of_supply") @db.VarChar(80)
+  hsnSac        String?       @map("hsn_sac") @db.VarChar(10)
+  notes         String?
+  pdfUrl        String?       @map("pdf_url")   // populated later; JSON payload first
+
+  issuedAt      DateTime      @default(now()) @map("issued_at")
+  dueAt         DateTime?     @map("due_at")
+  paidAt        DateTime?     @map("paid_at")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  corporate     CorporateAccount? @relation(fields: [corporateAccountId], references: [id])
+  lines         InvoiceLine[]
+
+  @@index([customerId])
+  @@index([corporateAccountId])
+  @@index([issuedAt])
+  @@index([type, status])
+  @@map("invoices")
+}
+
+model InvoiceLine {
+  id          String   @id @default(uuid()) @db.Uuid
+  invoiceId   String   @map("invoice_id") @db.Uuid
+  bookingId   String?  @map("booking_id") @db.Uuid
+
+  description String
+  quantity    Decimal  @default(1) @db.Decimal(10, 2)
+  unitPrice   Decimal  @map("unit_price") @db.Decimal(12, 2)
+  amount      Decimal  @db.Decimal(12, 2)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  booking     Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId])
+  @@index([bookingId])
+  @@map("invoice_lines")
+}
+
+// ===========================================================================
+// INFRASTRUCTURE
+// ===========================================================================
+
+/// Duplicate-request guard. Claim the key BEFORE acting; a retry returns the
+/// ORIGINAL response rather than creating a second booking or charge.
+model IdempotencyKey {
+  key          String            @id @db.VarChar(120)
+  userId       String?           @map("user_id") @db.Uuid
+  endpoint     String            @db.VarChar(120)
+
+  // Same key + different body = client bug or key reuse. Reject, do not replay.
+  requestHash  String            @map("request_hash") @db.Char(64)
+
+  status       IdempotencyStatus @default(IN_FLIGHT)
+  responseCode Int?              @map("response_code")
+  responseBody Json?             @map("response_body")
+
+  createdAt    DateTime          @default(now()) @map("created_at")
+  expiresAt    DateTime          @map("expires_at")
+
+  user         User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+/// Immutable record of privileged actions. Insider misuse is a real risk once
+/// you have ops staff.
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String   @db.VarChar(80)
+  entityType String   @map("entity_type") @db.VarChar(48)
+  entityId   String?  @map("entity_id") @db.VarChar(64)
+  before     Json?
+  after      Json?
+  ip         String?  @db.VarChar(45)
+  userAgent  String?  @map("user_agent") @db.VarChar(255)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
 }
