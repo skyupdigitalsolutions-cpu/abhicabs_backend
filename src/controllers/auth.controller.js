@@ -1,10 +1,10 @@
 'use strict';
 
 /**
- * src/controllers/auth.controller.js
+ * src/controllers/auth.controller.js   — UPDATED for Day 2
  *
- * Controllers stay thin: read the request, call the service, shape the
- * response. No business logic lives here.
+ * Only `me` changed: it now returns the caller's permission list alongside the
+ * user, so the admin UI knows which controls to render.
  */
 
 const authService = require('../services/auth.service');
@@ -42,7 +42,15 @@ exports.logoutAll = asyncHandler(async (req, res) => {
 });
 
 exports.me = asyncHandler(async (req, res) => {
-  res.json({ success: true, data: { user: req.user } });
+  res.json({
+    success: true,
+    data: {
+      user: req.user,
+      // Populated by attachPermissions. For the client's benefit only —
+      // never treated as a security boundary.
+      permissions: req.permissions || [],
+    },
+  });
 });
 
 exports.changePassword = asyncHandler(async (req, res) => {

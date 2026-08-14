@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * src/config/env.js
+ * src/config/env.js   — UPDATED for Day 2 (Redis + OTP)
  *
  * Loads and validates environment variables ONCE at boot.
  * Failing loudly here is far better than a confusing runtime error later.
@@ -40,6 +40,41 @@ const env = {
     .map((o) => o.trim())
     .filter(Boolean),
 
+  /* ---------------- Redis ---------------- */
+  redis: {
+    // Upstash gives a rediss:// URL. ioredis enables TLS from the scheme.
+    cacheUrl: required('REDIS_URL'),
+
+    // A SECOND Upstash database, with eviction DISABLED. Optional today;
+    // required before BullMQ jobs go in on Day 12, because the cache database
+    // uses allkeys-lru and would evict pending jobs under memory pressure.
+    queueUrl: process.env.REDIS_QUEUE_URL || '',
+
+    prefix: process.env.REDIS_PREFIX || 'abhi:',
+  },
+
+  /* ---------------- OTP ---------------- */
+  otp: {
+    length: Number(process.env.OTP_LENGTH || 6),
+    ttlSeconds: Number(process.env.OTP_TTL_SECONDS || 300),
+    maxAttempts: Number(process.env.OTP_MAX_ATTEMPTS || 5),
+    resendCooldownSeconds: Number(process.env.OTP_RESEND_COOLDOWN || 30),
+
+    // SMS pumping fraud: attackers trigger OTPs to premium-rate numbers and
+    // take a cut of the carrier revenue. This cap bounds the damage.
+    maxPerDay: Number(process.env.OTP_MAX_PER_DAY || 10),
+
+    // true = print the code to the server console instead of sending it.
+    devMode: process.env.OTP_DEV_MODE !== 'false',
+  },
+
+  /* ---------------- MSG91 (unused until DLT approval) ---------------- */
+  msg91: {
+    authKey: process.env.MSG91_AUTH_KEY || '',
+    templateId: process.env.MSG91_OTP_TEMPLATE_ID || '',
+    senderId: process.env.MSG91_SENDER_ID || '',
+  },
+
   seedAdmin: {
     name: process.env.SEED_ADMIN_NAME || 'Super Admin',
     email: process.env.SEED_ADMIN_EMAIL || 'admin@example.com',
@@ -49,6 +84,13 @@ const env = {
 
 if (env.accessSecret === env.refreshSecret) {
   throw new Error('[env] JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different');
+}
+
+if (env.isProd && env.otp.devMode) {
+  throw new Error(
+    '[env] OTP_DEV_MODE must be "false" in production — otherwise codes are ' +
+    'only printed to the server console and nobody can log in.'
+  );
 }
 
 module.exports = env;
