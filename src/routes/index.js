@@ -1,9 +1,7 @@
 'use strict';
 
 /**
- * src/routes/index.js   — UPDATED for Day 3
- *
- * Single mount point for the versioned API.
+ * src/routes/index.js   — UPDATED for Day 5
  */
 
 const express = require('express');
@@ -20,21 +18,24 @@ router.get('/', (req, res) => {
       users: '/api/v1/users',
       customers: '/api/v1/customers',
       fares: '/api/v1/fares',
+      bookings: '/api/v1/bookings',
       admin: '/api/v1/admin',
     },
   });
 });
 
-// /auth has its own tighter limiters (login, OTP), so the general ceiling is
-// applied only to the authenticated surfaces.
+// /auth has its own tighter limiters (login, OTP).
 router.use('/auth', require('./auth.routes'));
+
 router.use('/users', apiLimiter, require('./user.routes'));
 router.use('/customers', apiLimiter, require('./customer.routes'));
 router.use('/fares', apiLimiter, require('./fare.routes'));
+router.use('/bookings', apiLimiter, require('./booking.routes'));
 
 router.use('/admin', apiLimiter, require('./admin.routes'));
 router.use('/admin/customers', apiLimiter, require('./adminCustomer.routes'));
 router.use('/admin/corporate', apiLimiter, require('./corporate.routes'));
+router.use('/admin/bookings', apiLimiter, require('./adminBooking.routes'));
 router.use('/admin/audit', apiLimiter, require('./audit.routes'));
 
 module.exports = router;
