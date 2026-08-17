@@ -22,7 +22,7 @@
  * that can reject the request.
  */
 
-const { prisma, isUniqueViolation } = require('../config/prisma');
+const { prisma } = require('../config/prisma');
 const { ApiError, paginated } = require('../utils/helpers');
 const quoteService = require('./quote.service');
 const customerService = require('./customer.service');
@@ -168,8 +168,21 @@ function validateTiming({ pickupAt, returnAt, tripType, scheduled }) {
     throw ApiError.badRequest('Invalid pickup time', 'INVALID_PICKUP_TIME');
   }
 
-  // An immediate booking is "now"; a scheduled one needs enough lead time for a
-  // vehicle to actually reach the pickup point.
+  // Checked FIRST, for scheduled and immediate bookings alike.
+  //
+  // This used to live in the `else` branch below, which meant a SCHEDULED
+  // pickup dated in the past produced a hugely negative lead time and tripped
+  // INSUFFICIENT_LEAD_TIME instead — telling a customer that their 2020 date
+  // "needs 15 minutes' notice". A pickup in the past is a different mistake
+  // from one booked with too little notice, and the client has to tell them
+  // apart to route the user to the right correction.
+  //
+  // The 5-minute grace absorbs clock skew between a phone and the server.
+  if (pickup < now - 5 * 60000) {
+    throw ApiError.badRequest('Pickup time is in the past', 'PICKUP_IN_PAST');
+  }
+
+  // A scheduled pickup needs enough lead time for a vehicle to reach it.
   if (scheduled) {
     const leadMinutes = (pickup - now) / 60000;
     if (leadMinutes < MIN_LEAD_MINUTES) {
@@ -184,8 +197,6 @@ function validateTiming({ pickupAt, returnAt, tripType, scheduled }) {
         'TOO_FAR_AHEAD'
       );
     }
-  } else if (pickup < now - 5 * 60000) {
-    throw ApiError.badRequest('Pickup time is in the past', 'PICKUP_IN_PAST');
   }
 
   if (tripType === 'ROUND_TRIP') {
@@ -232,7 +243,7 @@ async function create(input, actor, meta = {}) {
     /* ---- 2. the customer must exist ---- */
     // findOrCreate rather than findById: an OTP-signup user may not have a
     // customer row yet, and a booking is a perfectly good moment to create one.
-    const customer = await customerService.findOrCreate(customerId);
+    await customerService.findOrCreate(customerId);
 
     /* ---- 3. timing ---- */
     validateTiming({
