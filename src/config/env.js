@@ -68,6 +68,30 @@ const env = {
     devMode: process.env.OTP_DEV_MODE !== 'false',
   },
 
+  /* ---------------- Maps ---------------- */
+  maps: {
+    // mock | google | ola
+    //
+    // Defaults to mock: no API key, no network, no cost. Distances come from
+    // the haversine formula times a road-detour factor, which is close enough
+    // to develop and test the fare engine, booking flow and dispatch against.
+    //
+    // Falls back to mock automatically if a real provider is selected without
+    // a key — a missing key should degrade fare accuracy, not take the app down.
+    provider: process.env.MAPS_PROVIDER || 'mock',
+    apiKey: process.env.MAPS_API_KEY || '',
+
+    // A slow maps provider must not become a slow API. On timeout the request
+    // falls back to an arithmetic estimate rather than failing.
+    timeoutMs: Number(process.env.MAPS_TIMEOUT_MS || 5000),
+
+    // Circuit breaker: after N consecutive failures, stop calling the provider
+    // and use estimates for the cooldown. Retrying a dead API on every request
+    // just adds latency to a failure you already know about.
+    breakerThreshold: Number(process.env.MAPS_BREAKER_THRESHOLD || 5),
+    breakerCooldownMs: Number(process.env.MAPS_BREAKER_COOLDOWN_MS || 30000),
+  },
+
   /* ---------------- MSG91 (unused until DLT approval) ---------------- */
   msg91: {
     authKey: process.env.MSG91_AUTH_KEY || '',

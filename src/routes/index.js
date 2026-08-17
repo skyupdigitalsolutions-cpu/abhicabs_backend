@@ -19,6 +19,7 @@ router.get('/', (req, res) => {
       auth: '/api/v1/auth',
       users: '/api/v1/users',
       customers: '/api/v1/customers',
+      fares: '/api/v1/fares',
       admin: '/api/v1/admin',
     },
   });
@@ -29,6 +30,7 @@ router.get('/', (req, res) => {
 router.use('/auth', require('./auth.routes'));
 router.use('/users', apiLimiter, require('./user.routes'));
 router.use('/customers', apiLimiter, require('./customer.routes'));
+router.use('/fares', apiLimiter, require('./fare.routes'));
 
 router.use('/admin', apiLimiter, require('./admin.routes'));
 router.use('/admin/customers', apiLimiter, require('./adminCustomer.routes'));
