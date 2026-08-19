@@ -1,32 +1,36 @@
 'use strict';
 
 /**
- * src/routes/adminBooking.routes.js   ->  /api/v1/admin/bookings
+ * src/routes/adminBooking.routes.js   — UPDATED for Day 6
+ *   -> /api/v1/admin/bookings
  *
- * Staff view. Guarded per route by capability, so OPS and SUPPORT can work
- * bookings without being granted full admin.
+ * Operations view plus every forward transition. Guarded per route by
+ * capability, so dispatch staff can move trips along without holding the
+ * permissions that let them edit customers or issue refunds.
  */
 
 const express = require('express');
 
 const ctrl = require('../controllers/booking.controller');
+const life = require('../controllers/lifecycle.controller');
 const { validate } = require('../middlewares/validate');
 const { requireAuth, requirePermission, attachPermissions } = require('../middlewares/auth');
 const { idempotent } = require('../middlewares/idempotency');
 const s = require('../validators/booking.schemas');
+const ls = require('../validators/lifecycle.schemas');
 
 const router = express.Router();
 
 router.use(requireAuth);
 
+/* ---------------- read ---------------- */
+
 router.get('/stats', requirePermission('REPORT_VIEW'),
   validate({ query: s.statsQuerySchema }), ctrl.stats);
 
 /**
- * Every booking initiation, including abandoned and failed ones.
- *
- * This is the client's "notify the admin on every booking attempt" requirement.
- * The rows exist because the attempt is logged before validation can reject it.
+ * Every booking initiation, including abandoned and failed ones. The rows exist
+ * because the attempt is logged before validation can reject it.
  */
 router.get('/attempts', requirePermission('BOOKING_MANAGE'),
   validate({ query: s.listAttemptsQuerySchema }), ctrl.listAttempts);
@@ -34,11 +38,56 @@ router.get('/attempts', requirePermission('BOOKING_MANAGE'),
 router.get('/', requirePermission('BOOKING_MANAGE'),
   validate({ query: s.listBookingsQuerySchema }), ctrl.list);
 
-// Ops creating a booking over the phone, on the customer's behalf.
 router.post('/', requirePermission('BOOKING_CREATE'), attachPermissions,
   idempotent('POST /admin/bookings'), validate({ body: s.createBookingSchema }), ctrl.create);
 
 router.get('/:id', requirePermission('BOOKING_MANAGE'),
   validate({ params: s.idParamSchema }), ctrl.getOne);
+
+router.get('/:id/actions', requirePermission('BOOKING_MANAGE'),
+  validate({ params: ls.idParamSchema }), life.actions);
+
+/* ------------------------------------------------------------------ *
+ * Forward transitions
+ *
+ * Each is a separate endpoint rather than one "set status" route. That way the
+ * permitted source statuses are fixed by the transition table and a client
+ * cannot name an arbitrary destination.
+ * ------------------------------------------------------------------ */
+
+/** PENDING -> CONFIRMED. Day 7 makes this the payment-success callback. */
+router.patch('/:id/confirm', requirePermission('BOOKING_MANAGE'),
+  validate({ params: ls.idParamSchema, body: ls.transitionSchema }), life.confirm);
+
+/** CONFIRMED -> ALLOCATED. Day 9 writes the allocation row alongside this. */
+router.patch('/:id/allocate', requirePermission('DISPATCH_MANAGE'),
+  validate({ params: ls.idParamSchema, body: ls.transitionSchema }), life.allocate);
+
+router.patch('/:id/en-route', requirePermission('DISPATCH_MANAGE'),
+  validate({ params: ls.idParamSchema, body: ls.transitionSchema }), life.enRoute);
+
+router.patch('/:id/start', requirePermission('DISPATCH_MANAGE'),
+  validate({ params: ls.idParamSchema, body: ls.transitionSchema }), life.start);
+
+/** ONGOING -> COMPLETED. Freezes finalFare and recomputes the balance. */
+router.patch('/:id/complete', requirePermission('DISPATCH_MANAGE'),
+  validate({ params: ls.idParamSchema, body: ls.completeSchema }), life.complete);
+
+/**
+ * PENDING -> EXPIRED. For the Day 12 sweeper: an unpaid booking whose pickup
+ * has passed. Deliberately NOT a cancellation — nobody chose it, so no fee
+ * applies and it stays out of cancellation reporting.
+ */
+router.patch('/:id/expire', requirePermission('BOOKING_MANAGE'),
+  validate({ params: ls.idParamSchema, body: ls.transitionSchema }), life.expire);
+
+/* ---------------- cancellation ---------------- */
+
+router.get('/:id/cancellation-quote', requirePermission('BOOKING_CANCEL'),
+  validate({ params: ls.idParamSchema }), life.quoteCancellation);
+
+router.post('/:id/cancel', requirePermission('BOOKING_CANCEL'),
+  idempotent('POST /admin/bookings/:id/cancel'),
+  validate({ params: ls.idParamSchema, body: ls.cancelSchema }), life.cancel);
 
 module.exports = router;

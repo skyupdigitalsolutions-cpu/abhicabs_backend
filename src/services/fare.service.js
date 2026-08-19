@@ -487,8 +487,13 @@ function computeCancellationFee({
     };
   }
 
-  // Between the two thresholds. Currently free; flagged so the open decision is
-  // visible in the response rather than buried in code.
+  // Between the two thresholds.
+  //
+  // ABHICABS policy (confirmed): this window is FREE, the same as cancelling
+  // well ahead. cancellation.service passes the same value for both thresholds
+  // so the bands collapse to two — free at 30+ minutes, full fee under 30 —
+  // but the band name is kept distinct so reporting can still answer "how many
+  // cancellations landed in the 30-60 minute window".
   return {
     fee: '0.00',
     band: 'INTERMEDIATE',
