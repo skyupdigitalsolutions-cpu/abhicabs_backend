@@ -41,6 +41,12 @@ router.get('/', requirePermission('BOOKING_MANAGE'),
 router.post('/', requirePermission('BOOKING_CREATE'), attachPermissions,
   idempotent('POST /admin/bookings'), validate({ body: s.createBookingSchema }), ctrl.create);
 
+// Static segments must precede /:id or they are captured as a uuid parameter.
+// Without this the request falls through to GET /:id, which validates
+// "cancellation-policy" as a booking id and 400s with "Invalid id".
+router.get('/cancellation-policy', requirePermission('BOOKING_MANAGE'),
+  validate({ query: ls.policyQuerySchema }), life.policy);
+
 router.get('/:id', requirePermission('BOOKING_MANAGE'),
   validate({ params: s.idParamSchema }), ctrl.getOne);
 

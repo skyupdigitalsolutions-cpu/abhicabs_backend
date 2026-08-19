@@ -42,6 +42,19 @@ app.use(
 app.use(compression());
 app.use(cookieParser());
 
+/* ---------------- Gateway webhooks (RAW body) ---------------- */
+
+// MUST come before express.json(). A gateway signs the exact bytes it sends;
+// once express.json() parses and re-serialises the body those bytes change and
+// the HMAC no longer matches. Mounting the raw parser only on this path keeps
+// the raw body available for signature verification while every other route
+// still gets parsed JSON. type:()=>true so an odd Content-Type still captures.
+app.use(
+  '/api/v1/webhooks',
+  express.raw({ type: () => true, limit: '1mb' }),
+  require('./routes/webhook.routes')
+);
+
 // Bounded body — an unbounded body is a DoS vector.
 app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: false, limit: '100kb' }));

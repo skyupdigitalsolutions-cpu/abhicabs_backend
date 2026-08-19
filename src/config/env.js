@@ -92,6 +92,28 @@ const env = {
     breakerCooldownMs: Number(process.env.MAPS_BREAKER_COOLDOWN_MS || 30000),
   },
 
+  /* ---------------- Payments ---------------- */
+  payment: {
+    // 'mock' (default, offline) or 'razorpay'. The factory falls back to mock
+    // if a real provider is named but its keys are missing.
+    provider: (process.env.PAYMENT_PROVIDER || 'mock').toLowerCase(),
+
+    // HMAC secret the gateway signs webhooks with. Distinct from the API key
+    // secret. Required for any non-mock provider; without it every webhook is
+    // rejected, which is the safe default.
+    webhookSecret: process.env.PAYMENT_WEBHOOK_SECRET || '',
+
+    // What fraction of the fare is taken as advance for PARTIAL bookings.
+    // Still an open business decision (see the Day 8 list); read from config so
+    // confirming it is not a code change. 25% until told otherwise.
+    advancePercent: Number(process.env.PAYMENT_ADVANCE_PERCENT || 25),
+
+    razorpay: {
+      keyId: process.env.RAZORPAY_KEY_ID || '',
+      keySecret: process.env.RAZORPAY_KEY_SECRET || '',
+    },
+  },
+
   /* ---------------- MSG91 (unused until DLT approval) ---------------- */
   msg91: {
     authKey: process.env.MSG91_AUTH_KEY || '',
@@ -108,6 +130,13 @@ const env = {
 
 if (env.accessSecret === env.refreshSecret) {
   throw new Error('[env] JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different');
+}
+
+if (env.isProd && env.payment.provider === 'mock') {
+  throw new Error(
+    '[env] PAYMENT_PROVIDER must not be "mock" in production — the mock gateway ' +
+    'never actually charges anyone. Set a real provider and its keys.'
+  );
 }
 
 if (env.isProd && env.otp.devMode) {

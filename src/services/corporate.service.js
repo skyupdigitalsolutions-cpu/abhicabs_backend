@@ -387,9 +387,26 @@ async function assertCreditAvailable(corporateAccountId, amount) {
  * never make a refund decision from it.
  */
 async function adjustCreditUsed(corporateAccountId, delta, tx = prisma) {
-  return tx.corporateAccount.update({
+  // Atomic AND floored at zero. A release (negative delta) must never drive the
+  // counter below zero: that trips chk_corporate_credit (credit_used >= 0), and
+  // Prisma surfaces the rejected write as an unhandled error — a 500 that also
+  // rolls back the surrounding cancel transaction, so the booking never actually
+  // cancels.
+  //
+  // Because creditUsed is a cache reconciled against the ledger on a schedule
+  // (see the note above — it is never the source of a refund decision), it can
+  // legitimately hold less than a cancellation tries to release. GREATEST(0, ..)
+  // is therefore correct behaviour, not a workaround. A single raw statement
+  // keeps it atomic and avoids the read-modify-write race that a JS-side clamp
+  // would reintroduce.
+  await tx.$executeRaw`
+    UPDATE "corporate_accounts"
+    SET "credit_used" = GREATEST(0, "credit_used" + ${delta}::numeric),
+        "updated_at"  = NOW()
+    WHERE "id" = ${corporateAccountId}::uuid
+  `;
+  return tx.corporateAccount.findUnique({
     where: { id: corporateAccountId },
-    data: { creditUsed: { increment: delta } },
     select: { id: true, creditLimit: true, creditUsed: true },
   });
 }

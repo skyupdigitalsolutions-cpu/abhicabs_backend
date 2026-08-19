@@ -19,6 +19,8 @@ router.get('/', (req, res) => {
       customers: '/api/v1/customers',
       fares: '/api/v1/fares',
       bookings: '/api/v1/bookings',
+      payments: '/api/v1/payments',
+      webhooks: '/api/v1/webhooks/:provider',
       admin: '/api/v1/admin',
     },
   });
@@ -31,6 +33,7 @@ router.use('/users', apiLimiter, require('./user.routes'));
 router.use('/customers', apiLimiter, require('./customer.routes'));
 router.use('/fares', apiLimiter, require('./fare.routes'));
 router.use('/bookings', apiLimiter, require('./booking.routes'));
+router.use('/payments', apiLimiter, require('./payment.routes'));
 
 router.use('/admin', apiLimiter, require('./admin.routes'));
 router.use('/admin/customers', apiLimiter, require('./adminCustomer.routes'));

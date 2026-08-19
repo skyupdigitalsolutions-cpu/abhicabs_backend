@@ -356,12 +356,17 @@ function computeFare(input, config) {
 
   const minimumFare = M.dec(config.minimumFare ?? 0);
   const belowMinimum = afterSurge.lessThan(minimumFare);
+  // The top-up that lifts a sub-floor fare to the minimum. Held as a named
+  // amount so the components reconcile:
+  //   subtotal + surgeAmount + minimumFareAdjustment + roundingAdjustment = total.
+  // Without it, subtotal (710.40) plus the named parts does not reach total (800).
+  const minimumFareAdjustment = belowMinimum ? M.sub(minimumFare, afterSurge) : M.dec(0);
   const beforeRounding = belowMinimum ? minimumFare : afterSurge;
 
   if (belowMinimum) {
     breakdown.push({
       label: 'Minimum fare adjustment',
-      amount: M.toStr(M.sub(minimumFare, afterSurge)),
+      amount: M.toStr(minimumFareAdjustment),
       note: `Minimum fare for this vehicle class is ${M.toStr(minimumFare)}`,
     });
   }
@@ -397,12 +402,15 @@ function computeFare(input, config) {
     night: M.toStr(nightCharge),
     surgeAmount: M.toStr(surgeAmount),
     subtotal: M.toStr(subtotal),
+    minimumFareAdjustment: M.toStr(minimumFareAdjustment),
     total: total.toFixed(2),
 
     meta: {
       actualKm: M.toStr(actualKm),
       billableKm: M.toStr(billableKm),
-      usedMinimumGuarantee: usedGuarantee,
+      // The minimum-km-per-day distance floor (round trips only). Distinct from
+      // belowMinimumFare below, which is the minimum-FARE floor.
+      usedMinimumKmGuarantee: usedGuarantee,
       durationMin: Number(durationMin),
       days,
       chargeableWaitMin,
