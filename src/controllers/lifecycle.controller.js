@@ -5,6 +5,7 @@
  */
 
 const lifecycle = require('../services/lifecycle.service');
+const allocationService = require('../services/allocation.service');
 const cancellation = require('../services/cancellation.service');
 const { asyncHandler } = require('../utils/helpers');
 
@@ -22,6 +23,20 @@ exports.confirm = asyncHandler(async (req, res) => {
 });
 
 exports.allocate = asyncHandler(async (req, res) => {
+  // Day 9: if a vehicle is named, create a real allocation (holds the vehicle,
+  // enforces the overlap constraint) rather than only flipping the status. With
+  // no vehicleId this stays the plain status move for backward compatibility.
+  if (req.body && req.body.vehicleId) {
+    const alloc = await allocationService.assignManually(
+      req.params.id,
+      { vehicleId: req.body.vehicleId, driverId: req.body.driverId || null },
+      req.user,
+      meta(req)
+    );
+    return res
+      .status(201)
+      .json({ success: true, message: 'Vehicle allocated', data: { allocation: alloc } });
+  }
   const booking = await lifecycle.markAllocated(req.params.id, req.user, meta(req));
   res.json({ success: true, message: 'Vehicle allocated', data: { booking } });
 });

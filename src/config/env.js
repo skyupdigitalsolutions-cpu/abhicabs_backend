@@ -92,6 +92,21 @@ const env = {
     breakerCooldownMs: Number(process.env.MAPS_BREAKER_COOLDOWN_MS || 30000),
   },
 
+  /* ---------------- Dispatch / allocation ---------------- */
+  dispatch: {
+    // A one-way hold runs from pickup to pickup + trip duration + this buffer,
+    // covering pre-pickup positioning and post-drop wrap-up so the vehicle is
+    // not offered to a back-to-back booking it cannot physically make.
+    holdBufferMinutes: Number(process.env.DISPATCH_HOLD_BUFFER_MIN || 60),
+
+    // Fallback trip length when a booking has no computed duration yet.
+    defaultTripMinutes: Number(process.env.DISPATCH_DEFAULT_TRIP_MIN || 120),
+
+    // How long a driver has to accept before the offer expires and the hold is
+    // released for reallocation.
+    offerTimeoutMinutes: Number(process.env.DISPATCH_OFFER_TIMEOUT_MIN || 3),
+  },
+
   /* ---------------- Billing / GST ---------------- */
   billing: {
     // Invoice series letter, part of the gap-free number (e.g. "A/2026-2027/42").

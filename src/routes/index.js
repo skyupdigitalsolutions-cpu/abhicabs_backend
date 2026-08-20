@@ -21,6 +21,7 @@ router.get('/', (req, res) => {
       bookings: '/api/v1/bookings',
       payments: '/api/v1/payments',
       invoices: '/api/v1/admin/invoices',
+      dispatch: '/api/v1/admin/dispatch',
       webhooks: '/api/v1/webhooks/:provider',
       admin: '/api/v1/admin',
     },
@@ -41,6 +42,10 @@ router.use('/admin/customers', apiLimiter, require('./adminCustomer.routes'));
 router.use('/admin/corporate', apiLimiter, require('./corporate.routes'));
 router.use('/admin/bookings', apiLimiter, require('./adminBooking.routes'));
 router.use('/admin/invoices', apiLimiter, require('./invoice.routes'));
+
+const dispatchRoutes = require('./dispatch.routes');
+router.use('/admin/dispatch', apiLimiter, dispatchRoutes.ops);
+router.use('/driver/offers', apiLimiter, dispatchRoutes.driver);
 router.use('/admin/audit', apiLimiter, require('./audit.routes'));
 
 module.exports = router;

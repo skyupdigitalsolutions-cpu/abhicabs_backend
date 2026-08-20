@@ -35,6 +35,10 @@ const completeSchema = z.object({
 
 const transitionSchema = z.object({
   note: z.string().trim().max(500).optional().nullable(),
+  // Day 9: /allocate may name a vehicle (and optionally a driver) to create a
+  // real hold. Optional so other transitions using this schema are unaffected.
+  vehicleId: z.string().uuid('Invalid vehicleId').optional(),
+  driverId: z.string().uuid('Invalid driverId').optional(),
 });
 
 const policyQuerySchema = z.object({

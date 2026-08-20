@@ -106,22 +106,14 @@ router.post(
 /* ------------------------------------------------------------------ *
  * Capability probes
  *
- * Three placeholder routes that exist purely to demonstrate — and let you TEST
- * — that the permission split works. Replace the handlers with the real ones on
- * Days 5-9; keep the requirePermission calls.
+ * Two placeholder routes remain purely to demonstrate — and let you TEST — that
+ * the permission split works. The dispatch board is now real and lives on its
+ * own router (/admin/dispatch, Day 9); the finance/fleet stubs stay until those
+ * days land. Keep the requirePermission calls.
  *
- *   /dispatch/board  DISPATCH_MANAGE  -> OPS yes, FINANCE no
  *   /finance/refunds PAYMENT_REFUND   -> FINANCE yes, OPS no
  *   /fleet/pending   DRIVER_APPROVE   -> FLEET yes, OPS no
  * ------------------------------------------------------------------ */
-
-router.get('/dispatch/board', requirePermission('DISPATCH_MANAGE'), (req, res) => {
-  res.json({
-    success: true,
-    message: 'Dispatch board — you hold DISPATCH_MANAGE',
-    data: { role: req.user.role, placeholder: true },
-  });
-});
 
 router.get('/finance/refunds', requirePermission('PAYMENT_REFUND'), (req, res) => {
   res.json({
