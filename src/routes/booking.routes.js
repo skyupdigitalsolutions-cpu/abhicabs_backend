@@ -13,6 +13,7 @@ const express = require('express');
 
 const ctrl = require('../controllers/booking.controller');
 const life = require('../controllers/lifecycle.controller');
+const invoiceCtrl = require('../controllers/invoice.controller');
 const { validate } = require('../middlewares/validate');
 const { requireAuth, attachPermissions } = require('../middlewares/auth');
 const { idempotent } = require('../middlewares/idempotency');
@@ -54,6 +55,9 @@ router.get('/:id', validate({ params: s.idParamSchema }), ctrl.getOne);
 
 /** What can happen next — lets the app render only buttons that would work. */
 router.get('/:id/actions', validate({ params: ls.idParamSchema }), life.actions);
+
+/** The customer's tax/non-tax invoice for a completed booking. */
+router.get('/:id/invoice', validate({ params: ls.idParamSchema }), invoiceCtrl.myInvoice);
 
 /* ---------------- cancellation ---------------- */
 

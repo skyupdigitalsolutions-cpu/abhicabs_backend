@@ -33,6 +33,7 @@ const { prisma } = require('../config/prisma');
 const { ApiError } = require('../utils/helpers');
 const audit = require('./audit.service');
 const { emit, EVENTS } = require('../lib/events');
+const billing = require('./billing.service');
 const { BOOKING_SELECT, STATUS_FLOW, ACTIVE_STATUSES } = require('../models/booking.model');
 
 /* ------------------------------------------------------------------ *
@@ -125,7 +126,7 @@ async function transition(bookingId, target, actor, opts = {}) {
   const rule = TRANSITIONS[target];
   if (!rule) throw new Error(`[lifecycle] Unknown target status: ${target}`);
 
-  const { extraData = {}, meta = {}, reason = null } = opts;
+  const { extraData = {}, meta = {}, reason = null, hook = null } = opts;
 
   return prisma.$transaction(async (tx) => {
     // ONE statement that both checks and writes. `from` is a list because some
@@ -170,6 +171,13 @@ async function transition(bookingId, target, actor, opts = {}) {
       after: { status: target, ...(reason ? { reason } : {}) },
       meta,
     });
+
+    // Optional post-transition work that MUST commit atomically with the status
+    // change — e.g. Day 8 invoice + ledger generation on COMPLETED. Runs inside
+    // this same transaction, so a booking is never COMPLETED without its books.
+    if (typeof hook === 'function') {
+      await hook(tx, booking);
+    }
 
     return booking;
   });
@@ -242,6 +250,8 @@ async function completeTrip(bookingId, actor, meta, { finalFare = null } = {}) {
       finalFare: settled,
       balanceDue: balance > 0 ? balance.toFixed(2) : '0.00',
     },
+    // Invoice + balanced ledger set, atomic with the COMPLETED write.
+    hook: (tx) => billing.finaliseBooking(tx, bookingId, actor, meta),
   });
 
   emit(EVENTS.BOOKING_STATUS_CHANGED, {

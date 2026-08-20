@@ -92,6 +92,20 @@ const env = {
     breakerCooldownMs: Number(process.env.MAPS_BREAKER_COOLDOWN_MS || 30000),
   },
 
+  /* ---------------- Billing / GST ---------------- */
+  billing: {
+    // Invoice series letter, part of the gap-free number (e.g. "A/2026-2027/42").
+    invoiceSeries: process.env.INVOICE_SERIES || 'A',
+
+    // GST rate for cab services. 5% (no input tax credit) is the common cab
+    // rate; 12% (with ITC) is the alternative. Still an open decision — read
+    // from config so confirming it is not a code change.
+    gstRatePct: Number(process.env.GST_RATE_PCT || 5),
+
+    // SAC for "passenger transport by road". Printed on the tax invoice.
+    sacCode: process.env.INVOICE_SAC_CODE || '996412',
+  },
+
   /* ---------------- Payments ---------------- */
   payment: {
     // 'mock' (default, offline) or 'razorpay'. The factory falls back to mock
