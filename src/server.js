@@ -13,6 +13,8 @@ const env = require('./config/env');
 const db = require('./config/prisma');
 const redis = require('./config/redis');
 const permissionService = require('./services/permission.service');
+const realtime = require('./realtime');
+const realtimeBridge = require('./realtime/bridge');
 
 const server = http.createServer(app);
 
@@ -93,6 +95,16 @@ async function start() {
     console.warn(`[boot] permission warm failed: ${err.message}`);
   }
 
+  /* ---- 4. Real-time (Day 10) ----
+   *
+   * Attached to the SAME HTTP server, so WebSocket and REST share one port.
+   * Done after Redis so the multi-instance adapter can use it when present;
+   * the subsystem degrades to single-instance if Redis is down, matching the
+   * rest of the app. The bridge then starts forwarding domain events to rooms.
+   */
+  const io = await realtime.init(server);
+  realtimeBridge.wire(io);
+
   await new Promise((resolve) => server.listen(env.port, resolve));
   console.log(`[boot] listening on http://localhost:${env.port}  (${env.nodeEnv})`);
 }
@@ -112,6 +124,12 @@ async function shutdown(signal) {
 
   try {
     // Stop accepting new connections; in-flight requests finish.
+    // Close Socket.IO first so live sockets get a clean disconnect.
+    try {
+      realtime.getIO().close();
+    } catch (_) {
+      /* io may not have initialised if boot failed early */
+    }
     await new Promise((resolve) => server.close(resolve));
     await Promise.allSettled([db.disconnect(), redis.disconnect()]);
     clearTimeout(force);
