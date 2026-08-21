@@ -21,6 +21,7 @@ router.get('/', (req, res) => {
       bookings: '/api/v1/bookings',
       payments: '/api/v1/payments',
       invoices: '/api/v1/admin/invoices',
+      reports: '/api/v1/admin/reports',
       dispatch: '/api/v1/admin/dispatch',
       location: '/api/v1/admin/location',
       driverLocation: '/api/v1/driver/location',
@@ -44,6 +45,7 @@ router.use('/admin/customers', apiLimiter, require('./adminCustomer.routes'));
 router.use('/admin/corporate', apiLimiter, require('./corporate.routes'));
 router.use('/admin/bookings', apiLimiter, require('./adminBooking.routes'));
 router.use('/admin/invoices', apiLimiter, require('./invoice.routes'));
+router.use('/admin/reports', apiLimiter, require('./report.routes'));
 
 const dispatchRoutes = require('./dispatch.routes');
 router.use('/admin/dispatch', apiLimiter, dispatchRoutes.ops);

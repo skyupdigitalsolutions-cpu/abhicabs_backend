@@ -75,12 +75,20 @@ app.get('/health', (req, res) => {
  * cache outage would turn it into a full outage.
  */
 app.get('/health/ready', async (req, res) => {
-  const [dbHealth, redisHealth] = await Promise.all([db.health(), redis.health()]);
+  const reporting = require('./config/reportingPrisma');
+  const [dbHealth, redisHealth, reportingHealth] = await Promise.all([
+    db.health(),
+    redis.health(),
+    reporting.health(),
+  ]);
+  // Only the PRIMARY database gates readiness. The reporting replica being down
+  // degrades reports but must not take the whole instance out of rotation.
   const ready = dbHealth.status === 'up';
 
   res.status(ready ? 200 : 503).json({
     ready,
     db: dbHealth,
+    reporting: reportingHealth,
     redis: redisHealth,
     cache: cacheService.health(),
   });

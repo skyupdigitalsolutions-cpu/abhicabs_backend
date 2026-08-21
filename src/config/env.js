@@ -27,6 +27,24 @@ const env = {
 
   databaseUrl: required('DATABASE_URL'),
 
+  /* ---------------- Reporting / analytics (Day 13) ---------------- */
+  reporting: {
+    // A read-replica connection string for heavy report/analytics queries.
+    // Optional: when unset, reporting falls back to the primary DATABASE_URL
+    // (still on its own connection pool). Set this to a physical read replica
+    // in production to keep report scans off the primary entirely.
+    databaseUrl: process.env.REPORTING_DATABASE_URL || '',
+
+    // Cache TTLs (seconds) for the report read path. Reports are recomputed by
+    // the scheduled pre-aggregation job and cached; a live request served from
+    // cache is instant. Live/volatile reports use a shorter TTL than the
+    // immutable GST view (issued invoices never change).
+    ttlLiveSeconds: Number(process.env.REPORT_TTL_LIVE || 600),   // 10m
+    ttlGstSeconds: Number(process.env.REPORT_TTL_GST || 3600),    // 1h
+    // How long a generated CSV export stays retrievable before it expires.
+    exportTtlSeconds: Number(process.env.REPORT_EXPORT_TTL || 3600), // 1h
+  },
+
   // Two DIFFERENT secrets. Using one secret for both token types means a
   // stolen access token could be replayed as a refresh token.
   accessSecret: required('JWT_ACCESS_SECRET', { min: 32 }),

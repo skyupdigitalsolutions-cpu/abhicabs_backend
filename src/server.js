@@ -138,7 +138,11 @@ async function shutdown(signal) {
       /* io may not have initialised if boot failed early */
     }
     await new Promise((resolve) => server.close(resolve));
-    await Promise.allSettled([db.disconnect(), redis.disconnect()]);
+    await Promise.allSettled([
+      db.disconnect(),
+      require('./config/reportingPrisma').disconnect(),
+      redis.disconnect(),
+    ]);
     clearTimeout(force);
     process.exit(0);
   } catch (err) {

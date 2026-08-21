@@ -132,6 +132,20 @@ async function cacheWarming() {
   return { warmed: res || true };
 }
 
+/* ---------------- report pre-aggregation (Day 13) ---------------- */
+
+/**
+ * Recomputes and re-caches the heavy reports for the common windows (this month
+ * and last 30 days). Run on a timer so the first dashboard hit after each
+ * interval is served warm from cache instead of paying for a cold multi-second
+ * scan. Reads go through the reporting client, so this never touches the
+ * transactional pool. Safe to run repeatedly — it only reads and re-caches.
+ */
+async function reportPreaggregation() {
+  const reportService = require('../services/report.service');
+  return reportService.refreshPreaggregates();
+}
+
 /* ------------------------------------------------------------------ *
  * Registry — the worker maps a scheduled job's name to its handler.
  * ------------------------------------------------------------------ */
@@ -142,6 +156,7 @@ const HANDLERS = {
   'session-pruning': sessionPruning,
   'stale-driver-cleanup': staleDriverCleanup,
   'cache-warming': cacheWarming,
+  'report-preaggregation': reportPreaggregation,
 };
 
 /**
@@ -152,6 +167,7 @@ const SCHEDULES = [
   { name: 'stale-driver-cleanup', pattern: '*/1 * * * *' },   // every minute
   { name: 'pending-payment-sweeper', pattern: '*/5 * * * *' }, // every 5 min
   { name: 'cache-warming', pattern: '*/15 * * * *' },          // every 15 min
+  { name: 'report-preaggregation', pattern: '*/10 * * * *' },  // every 10 min
   { name: 'session-pruning', pattern: '0 * * * *' },           // hourly
   { name: 'reconciliation', pattern: '30 2 * * *' },           // 02:30 daily
 ];

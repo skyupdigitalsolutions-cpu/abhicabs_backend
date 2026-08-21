@@ -31,6 +31,7 @@ const { QUEUE, getQueues, enqueue, closeQueues } = require('../queues');
 
 const notificationJob = require('../jobs/notification.job');
 const paymentJob = require('../jobs/payment.job');
+const reportJob = require('../jobs/report.job');
 const scheduled = require('../jobs/scheduled');
 
 const connection = getConnection();
@@ -49,9 +50,15 @@ const PROCESSORS = {
   [QUEUE.SCHEDULED]: (job) => handleScheduled(job),
 };
 
-// Documents/analytics are stubs for now — they exist so producers can target
-// them and the pipeline is complete. Both idempotent by being effectively no-ops.
+// Documents queue. Day 13 routes 'report-csv' exports here so CSV generation
+// runs off the request path. Other document jobs (invoice PDFs, receipts) will
+// slot in the same way. Unknown names fall through to a logged no-op.
 async function handleDocument(job) {
+  if (job.name === 'report-csv') {
+    const result = await reportJob.handle(job);
+    console.log(`[worker:documents] report-csv ${job.data?.token} ->`, result.skipped ? 'skipped (dedup)' : `${result.bytes}B`);
+    return result;
+  }
   console.log(`[worker:documents] ${job.name}`, job.data);
   return { ok: true };
 }
@@ -185,6 +192,7 @@ async function shutdown(signal) {
     await closeConnection();
     await redis.disconnect().catch(() => {});
     await db.disconnect().catch(() => {});
+    await require('../config/reportingPrisma').disconnect().catch(() => {});
     console.log('[worker] bye');
     process.exit(0);
   } catch (err) {
