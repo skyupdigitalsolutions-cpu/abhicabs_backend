@@ -34,6 +34,7 @@ const { ApiError } = require('../utils/helpers');
 const audit = require('./audit.service');
 const { emit, EVENTS } = require('../lib/events');
 const billing = require('./billing.service');
+const tripService = require('./trip.service');
 const { BOOKING_SELECT, STATUS_FLOW, ACTIVE_STATUSES } = require('../models/booking.model');
 
 /* ------------------------------------------------------------------ *
@@ -214,8 +215,16 @@ async function markEnRoute(bookingId, actor, meta) {
   return transition(bookingId, 'EN_ROUTE', actor, { meta });
 }
 
-async function startTrip(bookingId, actor, meta) {
+async function startTrip(bookingId, actor, meta, { lat = null, lng = null, odometerKm = null } = {}) {
   const booking = await transition(bookingId, 'ONGOING', actor, { meta });
+
+  // Day 11: one durable TripEvent marking where the trip began. This is a
+  // single write at a lifecycle boundary — not part of the GPS ping firehose.
+  try {
+    await tripService.recordStart(bookingId, { lat, lng, odometerKm });
+  } catch (err) {
+    console.error('[trip] failed to record start:', err.message);
+  }
 
   emit(EVENTS.BOOKING_STATUS_CHANGED, {
     bookingId: booking.id,
@@ -234,7 +243,7 @@ async function startTrip(bookingId, actor, meta) {
  * quote and the charge are different facts, and conflating them would make a
  * dispute impossible to answer.
  */
-async function completeTrip(bookingId, actor, meta, { finalFare = null } = {}) {
+async function completeTrip(bookingId, actor, meta, { finalFare = null, odometerKm = null, lat = null, lng = null } = {}) {
   const existing = await prisma.booking.findUnique({
     where: { id: bookingId },
     select: { estimatedFare: true, advancePaid: true },
@@ -253,6 +262,14 @@ async function completeTrip(bookingId, actor, meta, { finalFare = null } = {}) {
     // Invoice + balanced ledger set, atomic with the COMPLETED write.
     hook: (tx) => billing.finaliseBooking(tx, bookingId, actor, meta),
   });
+
+  // Day 11: one durable TripEvent marking the trip end. Lifecycle-boundary
+  // write, not part of the ping firehose.
+  try {
+    await tripService.recordEnd(bookingId, { lat, lng, odometerKm });
+  } catch (err) {
+    console.error('[trip] failed to record end:', err.message);
+  }
 
   emit(EVENTS.BOOKING_STATUS_CHANGED, {
     bookingId: booking.id,

@@ -92,6 +92,31 @@ const env = {
     breakerCooldownMs: Number(process.env.MAPS_BREAKER_COOLDOWN_MS || 30000),
   },
 
+  /* ---------------- GPS / location (Day 11) ---------------- */
+  gps: {
+    // A driver with no ping for longer than this is considered offline and
+    // swept. Mobile GPS drops in tunnels and dead zones, so this is generous
+    // enough not to flap on a brief signal loss.
+    heartbeatSeconds: Number(process.env.GPS_HEARTBEAT_SECONDS || 30),
+
+    // Plausibility ceiling. A ping implying a speed above this since the last
+    // one is rejected as GPS jitter or spoofing — 200 km/h is well past any
+    // legitimate city cab yet tolerant of highway stretches and GPS noise.
+    maxSpeedKmph: Number(process.env.GPS_MAX_SPEED_KMPH || 200),
+
+    // A single jump farther than this between two pings is a teleport —
+    // impossible in the time between pings, so rejected outright.
+    maxJumpKm: Number(process.env.GPS_MAX_JUMP_KM || 5),
+
+    // Persist a trip checkpoint to Postgres at most this often. Pings arrive
+    // every few seconds and go to Redis only; a durable breadcrumb every couple
+    // of minutes is enough to reconstruct a route without hammering the DB.
+    checkpointSeconds: Number(process.env.GPS_CHECKPOINT_SECONDS || 120),
+
+    // How long a driver's live position lingers in Redis after their last ping.
+    positionTtlSeconds: Number(process.env.GPS_POSITION_TTL_SECONDS || 300),
+  },
+
   /* ---------------- Dispatch / allocation ---------------- */
   dispatch: {
     // A one-way hold runs from pickup to pickup + trip duration + this buffer,
