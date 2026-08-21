@@ -105,6 +105,13 @@ async function start() {
   const io = await realtime.init(server);
   realtimeBridge.wire(io);
 
+  /* ---- 5. Queue producers (Day 12) ---- */
+  try {
+    require('./queues/producers').wire();
+  } catch (err) {
+    console.warn(`[boot] queue producers not wired: ${err.message}`);
+  }
+
   await new Promise((resolve) => server.listen(env.port, resolve));
   console.log(`[boot] listening on http://localhost:${env.port}  (${env.nodeEnv})`);
 }

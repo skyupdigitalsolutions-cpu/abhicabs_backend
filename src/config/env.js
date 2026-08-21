@@ -175,6 +175,19 @@ const env = {
     senderId: process.env.MSG91_SENDER_ID || '',
   },
 
+  /* ---------------- Workers / queues (Day 12) ---------------- */
+  workers: {
+    isWorker: process.env.WORKER === '1' || process.env.ROLE === 'worker',
+    concurrency: Number(process.env.WORKER_CONCURRENCY || 5),
+    maxAttempts: Number(process.env.JOB_MAX_ATTEMPTS || 5),
+    backoffMs: Number(process.env.JOB_BACKOFF_MS || 2000),
+  },
+
+  /* ---------------- Notifications (WhatsApp / SMS) ---------------- */
+  notify: {
+    provider: (process.env.NOTIFY_PROVIDER || 'mock').toLowerCase(),
+  },
+
   seedAdmin: {
     name: process.env.SEED_ADMIN_NAME || 'Super Admin',
     email: process.env.SEED_ADMIN_EMAIL || 'admin@example.com',
