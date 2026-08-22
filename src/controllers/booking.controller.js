@@ -5,6 +5,7 @@
  */
 
 const bookingService = require('../services/booking.service');
+const summaryService = require('../services/summary.service');
 const { asyncHandler, ApiError } = require('../utils/helpers');
 
 const meta = (req) => ({
@@ -32,6 +33,14 @@ exports.create = asyncHandler(async (req, res) => {
 exports.getOne = asyncHandler(async (req, res) => {
   const booking = await bookingService.findById(req.params.id, req.user);
   res.json({ success: true, data: { booking } });
+});
+
+// Day 14: per-screen aggregate — booking + payments + allocation + invoice +
+// live location in one owner-scoped call, so the trip-detail screen is a single
+// round-trip instead of five.
+exports.summary = asyncHandler(async (req, res) => {
+  const data = await summaryService.bookingSummary(req.params.id, req.user);
+  res.json({ success: true, data });
 });
 
 exports.getByNumber = asyncHandler(async (req, res) => {

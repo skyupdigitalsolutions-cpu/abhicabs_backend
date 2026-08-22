@@ -333,9 +333,24 @@ async function applyCapture(tx, payment, parsed) {
  * Reads
  * ------------------------------------------------------------------ */
 
-async function getById(id) {
+async function getById(id, actor = null) {
   const payment = await prisma.payment.findUnique({ where: { id }, select: PAYMENT_SELECT });
   if (!payment) throw ApiError.notFound('Payment not found');
+
+  // Day 14 IDOR fix: a customer may only read a payment on THEIR OWN booking.
+  // Without this, any authenticated user could enumerate payment ids and read
+  // anyone's payment record. Staff roles (non-USER) are allowed through for ops.
+  // We return 404 (not 403) on a mismatch so the response does not confirm that
+  // a payment with this id exists — same posture as booking.findById.
+  if (actor && actor.role === 'USER') {
+    const booking = await prisma.booking.findUnique({
+      where: { id: payment.bookingId },
+      select: { customerId: true },
+    });
+    if (!booking || booking.customerId !== actor.id) {
+      throw ApiError.notFound('Payment not found');
+    }
+  }
   return payment;
 }
 

@@ -10,6 +10,7 @@
  */
 
 const { prisma } = require('../config/prisma');
+const cache = require('./cache.service');
 
 const PENDING_STATUSES = ['PENDING', 'CONFIRMED'];
 const LIVE_STATUSES = ['ALLOCATED', 'EN_ROUTE', 'ONGOING'];
@@ -82,24 +83,34 @@ async function liveTrips(cityId = null) {
  * idx_vehicles_available partial index.
  */
 async function availableVehicles(cityId = null, vehicleClass = null) {
-  return prisma.vehicle.findMany({
-    where: {
-      status: 'AVAILABLE',
-      isActive: true,
-      ...(cityId ? { cityId: Number(cityId) } : {}),
-      ...(vehicleClass ? { vehicleClass } : {}),
-    },
-    orderBy: { odometerKm: 'asc' },
-    select: {
-      id: true,
-      registrationNumber: true,
-      vehicleClass: true,
-      makeModel: true,
-      seatingCapacity: true,
-      status: true,
-      cityId: true,
-    },
-  });
+  // Day 14: cache the available-fleet list. It changes when a vehicle is
+  // allocated or released, so the TTL is SHORT and allocation.service invalidates
+  // the city's key on every assign/release (see cache.keys.vehiclesAvailable).
+  // The dispatch board reads this on every poll, so even a 30-60s cache turns a
+  // per-poll table scan into an occasional one.
+  const key = cache.keys.vehiclesAvailable(cityId || 'all', vehicleClass || 'all');
+  return cache.getOrSet(
+    key,
+    () => prisma.vehicle.findMany({
+      where: {
+        status: 'AVAILABLE',
+        isActive: true,
+        ...(cityId ? { cityId: Number(cityId) } : {}),
+        ...(vehicleClass ? { vehicleClass } : {}),
+      },
+      orderBy: { odometerKm: 'asc' },
+      select: {
+        id: true,
+        registrationNumber: true,
+        vehicleClass: true,
+        makeModel: true,
+        seatingCapacity: true,
+        status: true,
+        cityId: true,
+      },
+    }),
+    { ttl: cache.TTL.SHORT, cacheNull: false }
+  );
 }
 
 /** The whole board in one call. */

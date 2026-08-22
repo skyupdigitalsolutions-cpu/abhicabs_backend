@@ -293,6 +293,10 @@ const keys = {
   user: (id) => `user:${id}`,
   vehicle: (id) => `vehicle:${id}`,
   driver: (id) => `driver:${id}`,
+  // Day 14: available-fleet list per city+class, and a prefix so allocation can
+  // invalidate every variant for a city in one call.
+  vehiclesAvailable: (cityId, cls) => `veh:avail:${cityId}:${cls}`,
+  vehiclesAvailablePrefix: () => 'veh:avail:',
 };
 
 function health() {

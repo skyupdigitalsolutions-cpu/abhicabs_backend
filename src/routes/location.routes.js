@@ -13,6 +13,7 @@ const express = require('express');
 const ctrl = require('../controllers/location.controller');
 const { validate } = require('../middlewares/validate');
 const { requireAuth, requirePermission, requireRole } = require('../middlewares/auth');
+const { pingLimiter } = require('../middlewares/rateLimit');
 const s = require('../validators/location.schemas');
 
 /* ---------------- driver: /driver/location ---------------- */
@@ -21,7 +22,7 @@ const driver = express.Router();
 driver.use(requireAuth, requireRole('DRIVER'));
 
 // THE HOT PATH. A driver posts their position every few seconds. Redis only.
-driver.post('/ping', validate({ body: s.pingSchema }), ctrl.ping);
+driver.post('/ping', pingLimiter, validate({ body: s.pingSchema }), ctrl.ping);
 
 driver.post('/online', ctrl.goOnline);
 driver.post('/offline', ctrl.goOffline);

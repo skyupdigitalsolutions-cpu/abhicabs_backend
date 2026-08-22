@@ -16,6 +16,41 @@ const prisma = new PrismaClient({
 });
 
 /**
+ * Day 14 — statement_timeout and pool tuning.
+ *
+ * These are set on the connection string, which you control in .env:
+ *
+ *   DATABASE_URL="postgresql://…?connection_limit=20&pool_timeout=10&statement_timeout=15000"
+ *
+ * connection_limit  caps the pool so a burst cannot open more Postgres
+ *                   connections than the database allows (exhausting it starves
+ *                   every other client). Size it to about
+ *                   (db max_connections / number of app instances) with headroom.
+ * pool_timeout      seconds a request waits for a free connection before failing
+ *                   fast instead of hanging — backpressure at the pool.
+ * statement_timeout milliseconds; Postgres kills any single query that runs
+ *                   longer, so one pathological query cannot pin a connection
+ *                   indefinitely. This is the single most important line of
+ *                   defence against a slow query taking the app down.
+ *
+ * For a specific query you expect to be heavy (a report, a wide scan) and want a
+ * TIGHTER bound than the global, wrap it with withStatementTimeout() below — it
+ * sets the timeout for that transaction only, via SET LOCAL.
+ */
+
+/**
+ * Runs `fn(tx)` inside a transaction whose statements time out after `ms`.
+ * SET LOCAL scopes the timeout to this transaction, so it never leaks to the
+ * next query that reuses the pooled connection.
+ */
+async function withStatementTimeout(ms, fn) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${Number(ms)}`);
+    return fn(tx);
+  });
+}
+
+/**
  * Prisma error codes worth handling by name.
  *
  * P2002 (unique violation) is the one that matters most: for duplicate
@@ -81,4 +116,5 @@ module.exports = {
   violatedFields,
   health,
   disconnect,
+  withStatementTimeout,
 };

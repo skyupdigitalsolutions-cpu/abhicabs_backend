@@ -16,6 +16,7 @@ const env = require('./config/env');
 const db = require('./config/prisma');
 const redis = require('./config/redis');
 const cacheService = require('./services/cache.service');
+const loadShed = require('./middlewares/loadShed');
 const { notFound, errorHandler } = require('./middlewares/error');
 
 const app = express();
@@ -91,10 +92,17 @@ app.get('/health/ready', async (req, res) => {
     reporting: reportingHealth,
     redis: redisHealth,
     cache: cacheService.health(),
+    loadShed: loadShed.stats(),
   });
 });
 
 /* ---------------- API ---------------- */
+
+// Day 14 — backpressure. Sits in front of the API routes (but AFTER /health and
+// the webhook mount, which loadShed exempts) so that when the event loop is
+// saturated, new API work gets a fast 503 instead of piling into a queue that
+// makes everything slower. Health checks and webhooks are never shed.
+app.use('/api/v1', loadShed.middleware);
 
 app.use('/api/v1', require('./routes'));
 

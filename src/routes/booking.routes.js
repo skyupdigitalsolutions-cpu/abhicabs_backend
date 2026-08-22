@@ -17,6 +17,7 @@ const invoiceCtrl = require('../controllers/invoice.controller');
 const { validate } = require('../middlewares/validate');
 const { requireAuth, attachPermissions } = require('../middlewares/auth');
 const { idempotent } = require('../middlewares/idempotency');
+const { writeLimiter } = require('../middlewares/rateLimit');
 const s = require('../validators/booking.schemas');
 const ls = require('../validators/lifecycle.schemas');
 
@@ -28,6 +29,7 @@ router.use(requireAuth);
 
 router.post(
   '/',
+  writeLimiter,
   attachPermissions,
   idempotent('POST /bookings'),
   validate({ body: s.createBookingSchema }),
@@ -52,6 +54,9 @@ router.get(
 );
 
 router.get('/:id', validate({ params: s.idParamSchema }), ctrl.getOne);
+
+// Day 14: per-screen aggregate for the trip-detail view.
+router.get('/:id/summary', validate({ params: s.idParamSchema }), ctrl.summary);
 
 /** What can happen next — lets the app render only buttons that would work. */
 router.get('/:id/actions', validate({ params: ls.idParamSchema }), life.actions);

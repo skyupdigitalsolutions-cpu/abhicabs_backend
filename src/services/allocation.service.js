@@ -30,6 +30,7 @@ const { ApiError } = require('../utils/helpers');
 const env = require('../config/env');
 const audit = require('./audit.service');
 const { emit, EVENTS } = require('../lib/events');
+const cache = require('./cache.service');
 
 const {
   ALLOCATION_SELECT,
@@ -106,7 +107,7 @@ async function allocate(bookingId, { vehicleId, driverId = null }, actor = null,
   });
 
   try {
-    return await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // THE decisive write. If a concurrent attempt already holds this vehicle
       // for an overlapping window, this insert raises 23P01 and the whole
       // transaction rolls back — the booking is NOT moved, no partial state.
@@ -157,6 +158,14 @@ async function allocate(bookingId, { vehicleId, driverId = null }, actor = null,
 
       return allocation;
     });
+
+    // Day 14: the fleet-availability list just changed (a vehicle went
+    // ASSIGNED). Invalidate it so the dispatch board does not show a car that is
+    // now taken. After-commit + fire-and-forget: a cache miss is harmless, and a
+    // failed invalidation must never fail the allocation.
+    cache.delByPrefix(cache.keys.vehiclesAvailablePrefix()).catch(() => {});
+
+    return result;
   } catch (err) {
     // Translate the database's refusals into clean, specific 409s. This is the
     // "7 clean rejections" half of the done-line.
@@ -340,6 +349,8 @@ async function decline(allocationId, driverUserId, meta = {}) {
     }
 
     await releaseInTx(tx, alloc, 'declined', meta);
+    // Day 14: a vehicle returned to AVAILABLE — refresh the fleet list.
+    cache.delByPrefix(cache.keys.vehiclesAvailablePrefix()).catch(() => {});
     return { released: true, bookingId: alloc.bookingId };
   });
 }

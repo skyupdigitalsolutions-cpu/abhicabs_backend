@@ -12,6 +12,7 @@
 
 const db = require('../config/prisma');
 const env = require('../config/env');
+const { redactError } = require('../lib/redact');
 
 function notFound(req, res) {
   res.status(404).json({
@@ -71,8 +72,12 @@ function errorHandler(err, req, res, next) {
 
   // ---- Logging ---------------------------------------------------------
   // 5xx is our fault — log the stack. 4xx is the caller's — one line.
+  // Day 14: run the error through redaction first. A 500 often carries the
+  // request context (and sometimes the body), so logging it raw could write a
+  // password attempt, OTP, or token to the log. redactError() masks those.
   if (status >= 500) {
-    console.error(`[error] ${req.method} ${req.originalUrl}`, err);
+    const safe = redactError(err);
+    console.error(`[error] ${req.method} ${req.originalUrl}`, safe, err.stack ? `\n${err.stack}` : '');
   } else {
     console.warn(`[warn] ${req.method} ${req.originalUrl} -> ${status} ${code}`);
   }

@@ -204,6 +204,34 @@ const apiLimiter = make({
   msg: 'Request rate exceeded. Please slow down.',
 });
 
+/**
+ * Day 14 — stricter tier for EXPENSIVE MUTATIONS: creating bookings, allocating
+ * vehicles, initiating payments. These each touch multiple tables, take locks,
+ * or call external providers, so a client should not be able to fire them at the
+ * full 300/min API rate. Keyed by user (falling back to IP) so one account's
+ * burst cannot crowd out others. Applied per-route alongside apiLimiter.
+ */
+const writeLimiter = make({
+  name: 'write',
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  msg: 'Too many write operations. Please slow down.',
+});
+
+/**
+ * Day 14 — tight tier for the GPS ping firehose. A driver pings every few
+ * seconds; this bounds a misbehaving or spoofed client without throttling normal
+ * pinging. Keyed by driver id.
+ */
+const pingLimiter = make({
+  name: 'ping',
+  windowMs: 60 * 1000,
+  max: 60, // one every ~second, generous for a 3-4s cadence
+  keyGenerator: (req) => req.user?.id || req.ip,
+  msg: 'Ping rate exceeded.',
+});
+
 module.exports = {
   FailoverStore,
   authLimiter,
@@ -211,4 +239,6 @@ module.exports = {
   otpVerifyLimiter,
   refreshLimiter,
   apiLimiter,
+  writeLimiter,
+  pingLimiter,
 };

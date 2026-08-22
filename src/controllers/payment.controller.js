@@ -33,7 +33,7 @@ exports.createOrder = asyncHandler(async (req, res) => {
 });
 
 exports.getOne = asyncHandler(async (req, res) => {
-  const payment = await paymentService.getById(req.params.id);
+  const payment = await paymentService.getById(req.params.id, req.user);
   res.json({ success: true, data: { payment } });
 });
 
