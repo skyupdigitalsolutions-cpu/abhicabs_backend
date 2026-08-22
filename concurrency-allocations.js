@@ -31,7 +31,14 @@ if (!TOKEN) { console.error('Set an admin token: TOKEN=eyJ... node concurrency-a
 
 const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` };
 // All bookings share this pickup time so their hold windows overlap.
-const PICKUP = '2026-10-05T09:00:00.000Z';
+// All bookings share this pickup time so their hold windows overlap — but the
+// window is UNIQUE PER RUN. The hold window is [pickup, pickup + trip + buffer),
+// so a fixed date would make every re-run collide with the ACTIVE allocation
+// left behind by the previous run's winner (=> 0 winners on re-run). A random
+// far-future day per run guarantees a fresh window no prior hold overlaps.
+// Override with PICKUP=... to pin it.
+const daysOut = 30 + Math.floor(Math.random() * 3000); // 30–3030 days out, unique per run
+const PICKUP = process.env.PICKUP || new Date(Date.now() + daysOut * 86400000).toISOString();
 const body = () => ({
   cityId: 1, vehicleClass: 'sedan', tripType: 'ONE_WAY',
   pickup: { lat: 12.9716, lng: 77.5946 }, drop: { lat: 12.9352, lng: 77.6245 },

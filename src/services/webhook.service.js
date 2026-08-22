@@ -37,6 +37,8 @@ const { ApiError } = require('../utils/helpers');
 const paymentProvider = require('./providers/payment.provider');
 const paymentService = require('./payment.service');
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * Ingests one raw webhook.
  *
@@ -88,18 +90,53 @@ async function ingest({ provider: providerName, rawBody, signature, headers = {}
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
 
-    // Seen before. Was it actually processed?
-    const existing = await prisma.webhookEvent.findUnique({
-      where: { provider_eventId: { provider: provider.name, eventId: parsed.eventId } },
-      select: { id: true, processedAt: true },
-    });
+    // We lost the INSERT race — the event id is already there. It is one of:
+    //   (a) a genuine replay of an event we FINISHED long ago,
+    //   (b) a CONCURRENT delivery whose winner is still processing right now,
+    //   (c) a prior attempt that CRASHED mid-apply (row exists, never finished).
+    //
+    // The old code treated (b) like (c) and re-entered process(), so several
+    // simultaneous losers all raced the winner — harmless to the money (the
+    // capture ledger's unique `reference` blocks any double credit) but it
+    // returned messy, non-duplicate responses to those callers. Instead we now
+    // wait briefly for an in-flight winner to finish, then return a CLEAN
+    // duplicate. Only a genuinely stale/crashed row falls through to reprocess.
+    const STALE_MS = 30_000;   // unprocessed AND older than this => crashed attempt
+    const MAX_WAIT_MS = 2_000; // how long to wait for a concurrent winner
+    const POLL_MS = 100;
+
+    const read = () =>
+      prisma.webhookEvent.findUnique({
+        where: { provider_eventId: { provider: provider.name, eventId: parsed.eventId } },
+        select: { id: true, processedAt: true, receivedAt: true },
+      });
+
+    let existing = await read();
+    const deadline = Date.now() + MAX_WAIT_MS;
+
+    // Poll while a RECENT row is still unprocessed (a winner mid-flight). A
+    // stale unprocessed row (crashed attempt) exits the loop immediately so we
+    // can recover it; a processed row exits so we can return the duplicate.
+    while (
+      existing &&
+      !existing.processedAt &&
+      Date.now() - new Date(existing.receivedAt).getTime() < STALE_MS &&
+      Date.now() < deadline
+    ) {
+      await sleep(POLL_MS); // eslint-disable-line no-await-in-loop
+      existing = await read(); // eslint-disable-line no-await-in-loop
+    }
 
     if (existing?.processedAt) {
-      // True duplicate of a completed event. This is THE replay case — return
-      // without changing anything. Sending it five times lands here four times.
+      // The winner (concurrent or historical) finished. Clean replay/duplicate.
+      // Sending it N times concurrently lands here N-1 times.
       return { duplicate: true, changed: false, reason: 'already_processed' };
     }
-    // Seen but never finished (a prior attempt crashed). Reprocess it.
+
+    // Still unprocessed after waiting => a prior attempt crashed (or a winner
+    // died mid-flight). Reprocess to recover; every downstream effect is
+    // idempotent (canAdvance status guard + the capture ledger's unique
+    // reference), so recovery can never double-apply.
     eventRow = existing;
   }
 
