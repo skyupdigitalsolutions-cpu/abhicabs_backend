@@ -27,7 +27,7 @@
  *   3. time charge         durationMin x perMinute        (one-way only)
  *   4. return-empty        % of distance charge           (one-way only)
  *   5. driver allowance    bata x days                    (round trip only)
- *   6. waiting charge      chargeable hours x rate        (round trip only)
+ *   6. waiting charge      chargeable hours x rate        (any trip type)
  *   7. night charge        % of (base + distance) only
  *   8. surge               multiplies the subtotal, bounded by config
  *   9. minimum fare floor  applied LAST
@@ -183,7 +183,7 @@ function clampSurge(requested, config) {
  *   durationMin    driving minutes
  *   pickupAt       ISO string or Date
  *   returnAt       ISO string or Date  (round trip)
- *   waitingMinutes total waiting during the journey (round trip)
+ *   waitingMinutes total waiting during the journey (any trip type)
  *   surge          requested multiplier, clamped to the config band
  *
  * @param {object} config  a fare_configs row
@@ -282,11 +282,17 @@ function computeFare(input, config) {
     });
   }
 
-  /* -- 6. waiting (round trip only) --------------------------------- */
+  /* -- 6. waiting (any trip type) ----------------------------------- *
+   * Waiting is charged whenever the vehicle is held idle beyond the free
+   * allowance, on ONE-WAY and ROUND trips alike (e.g. the driver waits while
+   * the customer runs an errand). It stays zero unless the config sets a
+   * waitingPerHour rate, so a class that shouldn't bill waiting simply leaves
+   * that rate at 0.
+   */
 
   let waitingCharge = M.dec(0);
   let chargeableWaitMin = 0;
-  if (isRoundTrip && M.dec(config.waitingPerHour ?? 0).greaterThan(0)) {
+  if (M.dec(config.waitingPerHour ?? 0).greaterThan(0)) {
     const free = Number(config.freeWaitingMin ?? 0);
     chargeableWaitMin = Math.max(0, Number(waitingMinutes) - free);
     if (chargeableWaitMin > 0) {
