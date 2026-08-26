@@ -64,6 +64,9 @@ const compareSchema = z.object(baseQuote);
 /** Every vehicle class for one trip — powers the class picker. */
 const allClassesSchema = z.object({
   ...baseQuote,
+  // /fares/options prices EVERY vehicle class, so a single class is not required
+  // here (quoteAllClasses ignores it). Override baseQuote's required field.
+  vehicleClass: vehicleClass.optional(),
   tripType: z.enum(['ONE_WAY', 'ROUND_TRIP']).default('ONE_WAY'),
 });
 
