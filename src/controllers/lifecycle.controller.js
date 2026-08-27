@@ -51,6 +51,11 @@ exports.start = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Trip started', data: { booking } });
 });
 
+exports.arrive = asyncHandler(async (req, res) => {
+  const booking = await lifecycle.markArrived(req.params.id, req.user, meta(req));
+  res.json({ success: true, message: 'Arrived at destination — awaiting payment', data: { booking } });
+});
+
 /**
  * Driver reports the actual distance travelled. If it exceeds the quoted
  * distance, the surplus km are charged at the booking's frozen per-km rate and

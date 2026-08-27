@@ -75,7 +75,11 @@ router.patch('/:id/en-route', requirePermission('DISPATCH_MANAGE'),
 router.patch('/:id/start', requirePermission('DISPATCH_MANAGE'),
   validate({ params: ls.idParamSchema, body: ls.transitionSchema }), life.start);
 
-/** ONGOING -> COMPLETED. Freezes finalFare and recomputes the balance. */
+/** ONGOING -> ARRIVED. Driver reached the destination; rider is asked to pay. */
+router.patch('/:id/arrive', requirePermission('DISPATCH_MANAGE'),
+  validate({ params: ls.idParamSchema, body: ls.transitionSchema }), life.arrive);
+
+/** ARRIVED -> COMPLETED. Refused with PAYMENT_REQUIRED if a balance is unpaid. */
 router.patch('/:id/complete', requirePermission('DISPATCH_MANAGE'),
   validate({ params: ls.idParamSchema, body: ls.completeSchema }), life.complete);
 

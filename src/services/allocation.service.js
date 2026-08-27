@@ -378,6 +378,44 @@ async function releaseInTx(tx, alloc, reason, meta = {}) {
 }
 
 /**
+ * Releases the ACTIVE allocation (if any) tied to a booking, without changing
+ * the booking's own status — the caller (completeTrip / cancel) is already
+ * writing the terminal booking status in the same transaction, so this only
+ * frees the vehicle side.
+ *
+ * This is what a completed/cancelled trip needs: otherwise the allocation stays
+ * ACTIVE and the vehicle stays ASSIGNED forever, so the next booking of that
+ * class can never be allocated (NO_VEHICLE_AVAILABLE / ALLOCATION_CONTENDED).
+ * Safe to call on a booking with no allocation — then it is a no-op.
+ */
+async function releaseVehicleForBooking(tx, bookingId, reason, meta = {}) {
+  const alloc = await tx.allocation.findFirst({
+    where: { bookingId, status: 'ACTIVE' },
+    select: { id: true, vehicleId: true, driverId: true },
+  });
+  if (!alloc) return null;
+
+  await tx.allocation.update({
+    where: { id: alloc.id },
+    data: { status: 'RELEASED', releasedAt: new Date() },
+  });
+  await tx.vehicle.update({
+    where: { id: alloc.vehicleId },
+    data: { status: 'AVAILABLE' },
+  });
+  await audit.record(tx, {
+    actor: null,
+    action: 'ALLOCATION_RELEASED',
+    entityType: 'allocation',
+    entityId: alloc.id,
+    after: { bookingId, reason },
+    meta,
+  });
+
+  return alloc;
+}
+
+/**
  * Releases allocations that were offered to a driver but not accepted within the
  * timeout. Intended to be called by the Day 12 sweeper; exposed now so it can be
  * triggered manually in testing.
@@ -416,6 +454,7 @@ module.exports = {
   assignManually,
   accept,
   decline,
+  releaseVehicleForBooking,
   expireStaleOffers,
   getForBooking,
 };

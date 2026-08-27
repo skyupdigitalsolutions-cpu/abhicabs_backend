@@ -93,14 +93,15 @@ const STATUS_FLOW = Object.freeze({
   CONFIRMED: ['ALLOCATED', 'CANCELLED'],
   ALLOCATED: ['EN_ROUTE', 'CANCELLED'],
   EN_ROUTE:  ['ONGOING', 'CANCELLED'],
-  ONGOING:   ['COMPLETED'],          // a trip in progress cannot be cancelled
+  ONGOING:   ['ARRIVED'],            // a trip in progress cannot be cancelled
+  ARRIVED:   ['COMPLETED'],          // at destination; awaiting payment, then finalise
   COMPLETED: [],                     // terminal
   CANCELLED: [],                     // terminal
   EXPIRED:   [],                     // terminal
 });
 
 /** Statuses that still occupy a vehicle or await action. */
-const ACTIVE_STATUSES = ['PENDING', 'CONFIRMED', 'ALLOCATED', 'EN_ROUTE', 'ONGOING'];
+const ACTIVE_STATUSES = ['PENDING', 'CONFIRMED', 'ALLOCATED', 'EN_ROUTE', 'ONGOING', 'ARRIVED'];
 
 const SORTABLE = ['createdAt', 'pickupAt', 'estimatedFare', 'status'];
 

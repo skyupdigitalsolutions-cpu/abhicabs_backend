@@ -34,6 +34,7 @@ const { ApiError } = require('../utils/helpers');
 const audit = require('./audit.service');
 const { emit, EVENTS } = require('../lib/events');
 const billing = require('./billing.service');
+const allocationService = require('./allocation.service');
 const tripService = require('./trip.service');
 const fare = require('./fare.service');
 const M = require('../lib/money');
@@ -80,8 +81,15 @@ const TRANSITIONS = Object.freeze({
     allowDriver: true,
     label: 'started',
   },
-  COMPLETED: {
+  ARRIVED: {
     from: ['ONGOING'],
+    stamp: 'arrivedAt',
+    permission: 'DISPATCH_MANAGE',
+    allowDriver: true,              // the driver marks arrival at the destination
+    label: 'arrived at the destination',
+  },
+  COMPLETED: {
+    from: ['ARRIVED'],              // only after arrival (and payment) can it finalise
     stamp: 'completedAt',
     permission: 'DISPATCH_MANAGE',
     allowDriver: true,
@@ -238,6 +246,26 @@ async function startTrip(bookingId, actor, meta, { lat = null, lng = null, odome
 }
 
 /**
+ * ONGOING -> ARRIVED.
+ *
+ * The driver has reached the destination. The trip is not COMPLETED yet: this
+ * is the point at which the rider is asked to pay. completeTrip() will refuse
+ * to finalise until the balance is settled (see the payment gate there), so
+ * ARRIVED is a real waiting state, not a cosmetic label.
+ */
+async function markArrived(bookingId, actor, meta, { lat = null, lng = null } = {}) {
+  const booking = await transition(bookingId, 'ARRIVED', actor, { meta });
+
+  emit(EVENTS.BOOKING_STATUS_CHANGED, {
+    bookingId: booking.id,
+    bookingNumber: booking.bookingNumber,
+    status: 'ARRIVED',
+  });
+
+  return booking;
+}
+
+/**
  * ONGOING -> COMPLETED.
  *
  * `finalFare` is captured here. Until Day 11 measures actual distance it equals
@@ -388,7 +416,7 @@ async function completeTrip(bookingId, actor, meta, { finalFare = null, odometer
 
   const existing = await prisma.booking.findUnique({
     where: { id: bookingId },
-    select: { estimatedFare: true, finalFare: true, advancePaid: true },
+    select: { estimatedFare: true, finalFare: true, advancePaid: true, paymentMode: true },
   });
   if (!existing) throw ApiError.notFound('Booking not found');
 
@@ -399,14 +427,36 @@ async function completeTrip(bookingId, actor, meta, { finalFare = null, odometer
     (existing.finalFare != null ? existing.finalFare.toString() : existing.estimatedFare.toString());
   const balance = Number(settled) - Number(existing.advancePaid);
 
+  // ---------------------------------------------------------------------------
+  // PAYMENT GATE
+  // ---------------------------------------------------------------------------
+  // A trip cannot be finalised while money is still owed on it, UNLESS the
+  // booking is explicitly a pay-after-ride / cash booking (paymentMode ZERO),
+  // where collection happens off-app. For every other mode the rider must have
+  // paid at the ARRIVED step first. This is what makes ARRIVED a genuine gate
+  // rather than a label: complete is refused with a clear, actionable error the
+  // app can turn into a "Pay ₹X to finish" prompt.
+  const PAY_LATER = existing.paymentMode === 'ZERO';
+  if (!PAY_LATER && balance > 0.009) {
+    throw ApiError.conflict(
+      `Outstanding balance of ₹${balance.toFixed(2)} must be paid before the trip can be completed`,
+      'PAYMENT_REQUIRED'
+    );
+  }
+
   const booking = await transition(bookingId, 'COMPLETED', actor, {
     meta,
     extraData: {
       finalFare: settled,
       balanceDue: balance > 0 ? balance.toFixed(2) : '0.00',
     },
-    // Invoice + balanced ledger set, atomic with the COMPLETED write.
-    hook: (tx) => billing.finaliseBooking(tx, bookingId, actor, meta),
+    // Invoice + balanced ledger set AND vehicle release, atomic with the
+    // COMPLETED write — the vehicle returns to the pool the instant the trip is
+    // finalised rather than staying held forever.
+    hook: async (tx) => {
+      await billing.finaliseBooking(tx, bookingId, actor, meta);
+      await allocationService.releaseVehicleForBooking(tx, bookingId, 'completed', meta);
+    },
   });
 
   // Day 11: one durable TripEvent marking the trip end. Lifecycle-boundary
@@ -491,6 +541,7 @@ module.exports = {
   markAllocated,
   markEnRoute,
   startTrip,
+  markArrived,
   completeTrip,
   recordTripDistance,
   recordTripDistanceAsDriver,

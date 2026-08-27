@@ -70,6 +70,7 @@ enum BookingStatus {
   ALLOCATED
   EN_ROUTE
   ONGOING
+  ARRIVED
   COMPLETED
   CANCELLED
   EXPIRED
@@ -531,6 +532,7 @@ model Booking {
 
   confirmedAt     DateTime?   @map("confirmed_at")
   startedAt       DateTime?   @map("started_at")
+  arrivedAt       DateTime?   @map("arrived_at")
   completedAt     DateTime?   @map("completed_at")
   createdAt       DateTime    @default(now()) @map("created_at")
   updatedAt       DateTime    @updatedAt @map("updated_at")

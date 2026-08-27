@@ -46,8 +46,23 @@ function ok(label, cond, extra = '') {
 
 function money(n) { return Number(n).toFixed(2); }
 
-async function login(email, password) {
+async function login(email, password, tries = 0) {
   const r = await api('POST', '/auth/login', { body: { email, password } });
+  if (r.status === 429) {
+    // Auth limiter tripped (10/15min per IP). Back off briefly a couple of times;
+    // if it persists, tell the user how to clear it rather than hammering it.
+    if (tries < 2) {
+      const waitMs = 3000 * (tries + 1);
+      console.log(`  … login rate-limited for ${email}, retrying in ${waitMs / 1000}s`);
+      await new Promise((res) => setTimeout(res, waitMs));
+      return login(email, password, tries + 1);
+    }
+    throw new Error(
+      `Auth rate limit hit for ${email}. Wait 15 min, OR flush the cache Redis ` +
+      `(e.g. docker exec -it <redis> redis-cli FLUSHDB), then re-run. ` +
+      `This is the login limiter, not a feature failure.`
+    );
+  }
   if (r.status !== 200) throw new Error(`login failed for ${email}: ${r.status} ${JSON.stringify(r.body)}`);
   return r.body.data.accessToken;
 }
@@ -61,8 +76,17 @@ async function login(email, password) {
 
   const driver1 = await prisma.user.findFirst({ where: { email: 'driver1@example.com' }, select: { id: true } });
   const driver2 = await prisma.user.findFirst({ where: { email: 'driver2@example.com' }, select: { id: true } });
-  const vehicle = await prisma.vehicle.findFirst({ where: { vehicleClass: 'sedan' }, select: { id: true, vehicleClass: true } })
-    || await prisma.vehicle.findFirst({ select: { id: true, vehicleClass: true } });
+
+  // Pick a vehicle with NO active allocation, so a stale hold from an earlier
+  // run does not cause a 409 on allocate.
+  const busy = (await prisma.allocation.findMany({ where: { status: 'ACTIVE' }, select: { vehicleId: true } }))
+    .map((a) => a.vehicleId);
+  const notBusy = busy.length ? { id: { notIn: busy } } : {};
+  const vehicle =
+    (await prisma.vehicle.findFirst({ where: { vehicleClass: 'sedan', ...notBusy }, select: { id: true, vehicleClass: true } })) ||
+    (await prisma.vehicle.findFirst({ where: notBusy, select: { id: true, vehicleClass: true } })) ||
+    (await prisma.vehicle.findFirst({ select: { id: true, vehicleClass: true } }));
+
   const city = await prisma.city.findFirst({ select: { id: true, centreLat: true, centreLng: true } });
 
   if (!driver1 || !vehicle || !city) {
@@ -98,9 +122,12 @@ async function login(email, password) {
   if (!booking) { console.error('No booking returned:', JSON.stringify(create.body, null, 2)); process.exit(1); }
 
   const id = booking.id;
-  const quotedKm = Number(booking.distanceKm ?? booking.fareBasis?.meta?.actualKm ?? 0);
+  // The quote is frozen under fareBasis.components (booking.service.js), so the
+  // rate card lives at fareBasis.components.configSnapshot.
+  const comp = booking.fareBasis?.components || booking.fareBasis || {};
+  const quotedKm = Number(comp.meta?.actualKm ?? booking.distanceKm ?? 0);
   const estimatedFare = Number(booking.estimatedFare);
-  const perKm = Number(booking.fareBasis?.configSnapshot?.perKm ?? 0);
+  const perKm = Number(comp.configSnapshot?.perKm ?? 0);
   console.log(`  booking ${booking.bookingNumber}: quotedKm=${quotedKm}, estimate=₹${money(estimatedFare)}, perKm=₹${money(perKm)}\n`);
 
   // --- 2. admin drives it forward to ONGOING -------------------------------
@@ -190,6 +217,14 @@ async function login(email, password) {
   for (const l of lines) console.log(`   ${l.description}  ×${l.quantity}  = ₹${money(l.amount)}`);
   console.log(`   taxable = ₹${money(taxable)}   |   total (incl GST) = ₹${money(invoice?.totalAmount)}\n`);
 
+  // Cleanup: release THIS test's allocation so the vehicle is free next run.
+  try {
+    await prisma.allocation.updateMany({
+      where: { bookingId: id, status: 'ACTIVE' },
+      data: { status: 'RELEASED', releasedAt: new Date() },
+    });
+  } catch (e) { /* best effort */ }
+
   await prisma.$disconnect();
   console.log(process.exitCode ? '=== SOME CHECKS FAILED ===\n' : '=== ALL CHECKS PASSED ===\n');
-})().catch((e) => { console.error('Test crashed:', e); process.exit(1); });
+})().catch((e) => { console.error('Test crashed:', e); process.exit(1); }); 

@@ -39,6 +39,7 @@ const M = require('../lib/money');
 const audit = require('./audit.service');
 const fareService = require('./fare.service');
 const corporateService = require('./corporate.service');
+const allocationService = require('./allocation.service');
 const { emit, EVENTS } = require('../lib/events');
 const { BOOKING_SELECT } = require('../models/booking.model');
 
@@ -204,6 +205,10 @@ async function cancel(bookingId, actor, body = {}, meta = {}) {
         );
       }
     }
+
+    // Free the vehicle immediately — a cancelled booking must not keep holding
+    // a vehicle out of the pool. No-op if it never got an allocation.
+    await allocationService.releaseVehicleForBooking(tx, bookingId, 'cancelled', meta);
 
     await audit.record(tx, {
       actor,
