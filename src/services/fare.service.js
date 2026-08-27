@@ -517,9 +517,67 @@ function computeCancellationFee({
   };
 }
 
+/**
+ * Extra-distance charge — when a trip covers MORE kilometres than were quoted.
+ *
+ * The driver (or ops) reports the actual distance travelled at trip end. If it
+ * exceeds the distance the fare was quoted on, the surplus km are charged at the
+ * SAME per-km rate the booking was quoted at — read from the booking's frozen
+ * `fareBasis.configSnapshot`, never the current rate card. That freeze is what
+ * makes the extra charge fair and dispute-proof: a rate change months later
+ * cannot retroactively alter what this specific trip costs per km.
+ *
+ * Deliberately conservative:
+ *   - Only surplus over the quoted distance is charged (never a negative/credit
+ *     for driving less — the quote already committed a price).
+ *   - Surge is NOT re-applied to extra km. Surge reflected demand at booking
+ *     time; extra distance discovered mid-trip is not a new surge event.
+ *   - Night/return-empty/bata are not recomputed — those are journey-level
+ *     allowances already settled in the original fare.
+ * The result is the cleanest, most defensible line: extraKm x perKm.
+ *
+ * @param {object} args
+ * @param {object} args.fareBasis   booking.fareBasis (frozen quote)
+ * @param {number|string} args.quotedKm   distance the fare was quoted on
+ * @param {number|string} args.actualKm   distance actually travelled
+ * @returns {{
+ *   extraKm: string, perKm: string, extraCharge: string,
+ *   quotedKm: string, actualKm: string, hasExtra: boolean
+ * }}
+ */
+function computeExtraDistanceCharge({ fareBasis, quotedKm, actualKm }) {
+  // The booking stores the quote under fareBasis.components (see
+  // booking.service.js), so the frozen rate card lives at
+  // fareBasis.components.configSnapshot. Fall back to a top-level configSnapshot
+  // for any caller that passes the raw quote object directly.
+  const fb = fareBasis || {};
+  const quote = fb.components || fb;
+  const snap = quote.configSnapshot || fb.configSnapshot || {};
+  const perKm = M.dec(snap.perKm ?? 0);
+
+  // Quoted distance: prefer the frozen quote's actualKm, else the caller's value.
+  const quotedFromBasis = quote.meta && quote.meta.actualKm != null ? quote.meta.actualKm : null;
+  const quoted = M.dec(quotedFromBasis ?? quotedKm ?? 0);
+  const actual = M.dec(actualKm ?? 0);
+
+  // Only the surplus is billable; clamp at zero so driving less is never a credit.
+  const extraKm = M.max(M.sub(actual, quoted), M.dec(0));
+  const extraCharge = M.round2(M.mul(extraKm, perKm));
+
+  return {
+    quotedKm: M.toStr(quoted),
+    actualKm: M.toStr(actual),
+    extraKm: M.toStr(extraKm),
+    perKm: M.toStr(perKm),
+    extraCharge: M.toStr(extraCharge),
+    hasExtra: M.gt(extraKm, 0) && M.gt(extraCharge, 0),
+  };
+}
+
 module.exports = {
   computeFare,
   computeCancellationFee,
+  computeExtraDistanceCharge,
   chargeableDays,
   isNightHour,
   touchesNight,

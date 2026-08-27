@@ -116,6 +116,11 @@ const BILLING_SELECT = {
   balanceDue: true,
   driverSharePct: true,
   pickupAt: true,
+  // Read for the extra-distance invoice line. `meta.extraDistance` is written by
+  // lifecycle.recordTripDistance when a trip runs longer than quoted.
+  distanceKm: true,
+  fareBasis: true,
+  meta: true,
   city: { select: { id: true, name: true, state: true, welfareFeePct: true } },
   customer: {
     select: {
@@ -252,19 +257,64 @@ async function createInvoice(tx, booking, fare, isCorporate) {
       placeOfSupply: supplierState,
       hsnSac: env.billing.sacCode,
       lines: {
-        create: [
-          {
-            bookingId: booking.id,
-            description: `Cab service — booking ${booking.bookingNumber}`,
-            quantity: '1',
-            unitPrice: gst.taxable.toFixed(2),
-            amount: gst.taxable.toFixed(2),
-          },
-        ],
+        create: buildInvoiceLines(booking, gst.taxable),
       },
     },
     include: { lines: true },
   });
+}
+
+/**
+ * Builds the invoice line(s) for a booking. Normally one "Cab service" line for
+ * the whole taxable value. When the trip ran longer than quoted, the extra
+ * distance is broken out as its OWN line so the customer can see exactly what
+ * the surcharge was and why — e.g.
+ *
+ *   Cab service — booking ABH-2026-000123        ₹1,200.00
+ *   Extra distance (8.0 km × ₹14.00/km)             ₹112.00
+ *
+ * The two lines always sum to the taxable value (the base line is the remainder
+ * after the extra-distance line), so the invoice foots exactly.
+ */
+function buildInvoiceLines(booking, taxable) {
+  const extra = booking.meta && booking.meta.extraDistance;
+  const extraCharge = extra ? M.dec(extra.extraCharge ?? 0) : M.dec(0);
+
+  // No extra distance → the single, original line, unchanged.
+  if (!extra || !extraCharge.greaterThan(0)) {
+    return [
+      {
+        bookingId: booking.id,
+        description: `Cab service — booking ${booking.bookingNumber}`,
+        quantity: '1',
+        unitPrice: M.round2(taxable).toFixed(2),
+        amount: M.round2(taxable).toFixed(2),
+      },
+    ];
+  }
+
+  // Base line is the taxable value MINUS the extra-distance charge, so the two
+  // lines sum back to the taxable total exactly.
+  const baseAmount = M.round2(M.sub(taxable, extraCharge));
+  const extraKm = M.toStr(extra.extraKm ?? 0);
+  const perKm = M.toStr(extra.perKm ?? 0);
+
+  return [
+    {
+      bookingId: booking.id,
+      description: `Cab service — booking ${booking.bookingNumber}`,
+      quantity: '1',
+      unitPrice: baseAmount.toFixed(2),
+      amount: baseAmount.toFixed(2),
+    },
+    {
+      bookingId: booking.id,
+      description: `Extra distance (${extraKm} km × ₹${perKm}/km)`,
+      quantity: extraKm,
+      unitPrice: perKm,
+      amount: M.round2(extraCharge).toFixed(2),
+    },
+  ];
 }
 
 /**

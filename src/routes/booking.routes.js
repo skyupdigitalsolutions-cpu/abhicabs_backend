@@ -61,6 +61,19 @@ router.get('/:id/summary', validate({ params: s.idParamSchema }), ctrl.summary);
 /** What can happen next — lets the app render only buttons that would work. */
 router.get('/:id/actions', validate({ params: ls.idParamSchema }), life.actions);
 
+/**
+ * Driver reports the actual distance travelled for a trip they are assigned to.
+ * Authorization is the allocation itself (checked in the service): only the
+ * ACTIVE assigned driver may record distance. Extra km over the quote are
+ * charged at the booking's frozen per-km rate and shown on the invoice.
+ */
+router.patch(
+  '/:id/trip-distance',
+  writeLimiter,
+  validate({ params: ls.idParamSchema, body: ls.recordDistanceSchema }),
+  life.recordDistance
+);
+
 /** The customer's tax/non-tax invoice for a completed booking. */
 router.get('/:id/invoice', validate({ params: ls.idParamSchema }), invoiceCtrl.myInvoice);
 

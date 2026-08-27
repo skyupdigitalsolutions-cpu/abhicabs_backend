@@ -35,6 +35,8 @@ const audit = require('./audit.service');
 const { emit, EVENTS } = require('../lib/events');
 const billing = require('./billing.service');
 const tripService = require('./trip.service');
+const fare = require('./fare.service');
+const M = require('../lib/money');
 const { BOOKING_SELECT, STATUS_FLOW, ACTIVE_STATUSES } = require('../models/booking.model');
 
 /* ------------------------------------------------------------------ *
@@ -243,14 +245,158 @@ async function startTrip(bookingId, actor, meta, { lat = null, lng = null, odome
  * quote and the charge are different facts, and conflating them would make a
  * dispute impossible to answer.
  */
-async function completeTrip(bookingId, actor, meta, { finalFare = null, odometerKm = null, lat = null, lng = null } = {}) {
+/**
+ * Reconcile a trip against the distance ACTUALLY travelled.
+ *
+ * The assigned driver (or ops) reports the real distance at trip end. If it
+ * exceeds the distance the fare was quoted on, the surplus km are charged at the
+ * booking's FROZEN per-km rate (see fare.computeExtraDistanceCharge) and the
+ * final fare is raised by that surcharge. The breakdown is stored on
+ * `booking.meta.extraDistance` so the invoice can show it as its own line.
+ *
+ * This does NOT complete the trip — it records the distance and updates the
+ * payable amount. Completion (which finalises the invoice) reads the stored
+ * surcharge. Call this before completeTrip, or pass actualKm to completeTrip
+ * which calls this for you.
+ *
+ * Idempotent: re-reporting the same actualKm recomputes from the ORIGINAL quoted
+ * distance (not the already-inflated fare), so it never compounds.
+ */
+async function recordTripDistance(bookingId, actor, meta, { actualKm, odometerKm = null } = {}) {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: {
+      id: true, status: true, estimatedFare: true, advancePaid: true,
+      distanceKm: true, fareBasis: true, meta: true,
+    },
+  });
+  if (!booking) throw ApiError.notFound('Booking not found');
+
+  // The distance the fare was quoted on. The quote is nested under
+  // fareBasis.components (see booking.service.js). computeExtraDistanceCharge
+  // also resolves this, but we compute a sensible fallback here too.
+  const quote = (booking.fareBasis && booking.fareBasis.components) || booking.fareBasis || {};
+  const quotedKm =
+    (quote.meta && quote.meta.actualKm != null ? quote.meta.actualKm : null) ??
+    booking.distanceKm ??
+    0;
+
+  const calc = fare.computeExtraDistanceCharge({
+    fareBasis: booking.fareBasis,
+    quotedKm,
+    actualKm,
+  });
+
+  // Base fare = the original estimate. Extra charge is always computed from the
+  // ORIGINAL quoted distance, so re-reporting is idempotent (never compounds).
+  const baseFare = M.dec(booking.estimatedFare);
+  const newFinal = M.round2(M.add(baseFare, M.dec(calc.extraCharge)));
+  const balance = M.round2(M.sub(newFinal, M.dec(booking.advancePaid)));
+
+  const extraDistanceMeta = calc.hasExtra
+    ? {
+        quotedKm: calc.quotedKm,
+        actualKm: calc.actualKm,
+        extraKm: calc.extraKm,
+        perKm: calc.perKm,
+        extraCharge: calc.extraCharge,
+        odometerKm: odometerKm ?? null,
+        recordedAt: new Date().toISOString(),
+        recordedById: actor?.id ?? null,
+      }
+    : null;
+
+  const updated = await prisma.booking.update({
+    where: { id: bookingId },
+    data: {
+      finalFare: newFinal.toFixed(2),
+      balanceDue: (balance.greaterThan(0) ? balance : M.dec(0)).toFixed(2),
+      meta: {
+        ...(booking.meta && typeof booking.meta === 'object' ? booking.meta : {}),
+        // Store (or clear) the extra-distance breadcrumb the invoice reads.
+        ...(extraDistanceMeta ? { extraDistance: extraDistanceMeta } : { extraDistance: null }),
+      },
+    },
+    select: { id: true, finalFare: true, balanceDue: true, meta: true },
+  });
+
+  audit.recordAsync({
+    actor,
+    action: 'TRIP_DISTANCE_RECORDED',
+    entityType: 'booking',
+    entityId: bookingId,
+    after: {
+      actualKm: calc.actualKm,
+      quotedKm: calc.quotedKm,
+      extraKm: calc.extraKm,
+      extraCharge: calc.extraCharge,
+      finalFare: updated.finalFare.toString(),
+    },
+    meta,
+  });
+
+  return { booking: updated, extra: calc };
+}
+
+/**
+ * Assert that `userId` is the driver actively allocated to this booking. Used to
+ * scope the driver-facing distance endpoint: a driver may only reconcile a trip
+ * they actually drove. Ops/admin bypass this via the permissioned admin route.
+ */
+async function assertAssignedDriver(bookingId, userId) {
+  const allocation = await prisma.allocation.findFirst({
+    where: { bookingId, driverId: userId, status: 'ACTIVE' },
+    select: { id: true },
+  });
+  if (!allocation) {
+    throw ApiError.forbidden(
+      'You are not the assigned driver for this trip.',
+      'NOT_ASSIGNED_DRIVER'
+    );
+  }
+}
+
+/**
+ * Driver-facing wrapper: verify the caller is the assigned driver, that the trip
+ * is in a state where distance can be recorded (ONGOING or just COMPLETED), then
+ * reconcile the distance.
+ */
+async function recordTripDistanceAsDriver(bookingId, driverUser, meta, payload) {
+  await assertAssignedDriver(bookingId, driverUser.id);
+
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: { status: true },
+  });
+  if (!booking) throw ApiError.notFound('Booking not found');
+  if (!['ONGOING', 'COMPLETED'].includes(booking.status)) {
+    throw ApiError.badRequest(
+      'Distance can only be recorded once the trip is underway.',
+      'INVALID_STATE_FOR_DISTANCE'
+    );
+  }
+
+  return recordTripDistance(bookingId, driverUser, meta, payload);
+}
+
+async function completeTrip(bookingId, actor, meta, { finalFare = null, odometerKm = null, actualKm = null, lat = null, lng = null } = {}) {
+  // If the caller reported an actual distance, reconcile the fare FIRST so the
+  // surcharge is baked into finalFare before the invoice is finalised.
+  if (actualKm != null) {
+    await recordTripDistance(bookingId, actor, meta, { actualKm, odometerKm });
+  }
+
   const existing = await prisma.booking.findUnique({
     where: { id: bookingId },
-    select: { estimatedFare: true, advancePaid: true },
+    select: { estimatedFare: true, finalFare: true, advancePaid: true },
   });
   if (!existing) throw ApiError.notFound('Booking not found');
 
-  const settled = finalFare ?? existing.estimatedFare.toString();
+  // finalFare precedence: explicit arg > a finalFare already set (e.g. by the
+  // distance reconciliation above) > the original estimate.
+  const settled =
+    finalFare ??
+    (existing.finalFare != null ? existing.finalFare.toString() : existing.estimatedFare.toString());
   const balance = Number(settled) - Number(existing.advancePaid);
 
   const booking = await transition(bookingId, 'COMPLETED', actor, {
@@ -346,6 +492,8 @@ module.exports = {
   markEnRoute,
   startTrip,
   completeTrip,
+  recordTripDistance,
+  recordTripDistanceAsDriver,
   expire,
   availableActions,
   explainRejection,

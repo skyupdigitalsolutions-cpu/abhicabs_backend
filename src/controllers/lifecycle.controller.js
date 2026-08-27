@@ -51,8 +51,32 @@ exports.start = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Trip started', data: { booking } });
 });
 
+/**
+ * Driver reports the actual distance travelled. If it exceeds the quoted
+ * distance, the surplus km are charged at the booking's frozen per-km rate and
+ * the final fare rises; the surcharge appears as its own invoice line at
+ * completion. Scoped to the assigned driver only.
+ */
+exports.recordDistance = asyncHandler(async (req, res) => {
+  const { booking, extra } = await lifecycle.recordTripDistanceAsDriver(
+    req.params.id,
+    req.user,
+    meta(req),
+    { actualKm: req.body.actualKm, odometerKm: req.body.odometerKm ?? null }
+  );
+  res.json({
+    success: true,
+    message: extra.hasExtra
+      ? `Recorded ${extra.actualKm} km — ${extra.extraKm} km extra charged`
+      : `Recorded ${extra.actualKm} km — no extra distance`,
+    data: { booking, extra },
+  });
+});
+
 exports.complete = asyncHandler(async (req, res) => {
   const booking = await lifecycle.completeTrip(req.params.id, req.user, meta(req), {
+    actualKm: req.body?.actualKm != null ? Number(req.body.actualKm) : null,
+    odometerKm: req.body?.odometerKm != null ? Number(req.body.odometerKm) : null,
     finalFare: req.body?.finalFare != null ? String(req.body.finalFare) : null,
   });
   res.json({ success: true, message: 'Trip completed', data: { booking } });

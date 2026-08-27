@@ -29,6 +29,16 @@ const cancelSchema = z.object({
  */
 const completeSchema = z.object({
   finalFare: z.coerce.number().min(0).max(9999999).optional(),
+  // Actual distance travelled. If given and it exceeds the quoted distance, the
+  // surplus is charged at the frozen per-km rate and shown on the invoice.
+  actualKm: z.coerce.number().min(0).max(100000).optional(),
+  odometerKm: z.coerce.number().int().min(0).optional(),
+  note: z.string().trim().max(500).optional().nullable(),
+});
+
+/** Driver reports the distance actually travelled for their assigned trip. */
+const recordDistanceSchema = z.object({
+  actualKm: z.coerce.number({ required_error: 'actualKm is required' }).min(0).max(100000),
   odometerKm: z.coerce.number().int().min(0).optional(),
   note: z.string().trim().max(500).optional().nullable(),
 });
@@ -51,6 +61,7 @@ module.exports = {
   idParamSchema,
   cancelSchema,
   completeSchema,
+  recordDistanceSchema,
   transitionSchema,
   policyQuerySchema,
 };
