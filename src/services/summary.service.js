@@ -47,17 +47,37 @@ async function bookingSummary(bookingId, actor) {
 
   // Live driver position only makes sense while the trip is in motion and a
   // driver is assigned. Skipped otherwise to avoid a pointless Redis call.
+  // ARRIVED is included: the driver is at the destination but the trip is not
+  // finalised, so their position is still relevant.
   let liveLocation = null;
   const driverId = activeAllocation?.driverId || null;
-  const inMotion = ['ALLOCATED', 'EN_ROUTE', 'ONGOING'].includes(bk.status);
+  const inMotion = ['ALLOCATED', 'EN_ROUTE', 'ONGOING', 'ARRIVED'].includes(bk.status);
   if (driverId && inMotion) {
     liveLocation = await location.driverLocation(driverId).catch(() => null);
   }
 
+  // Flatten the allocation into the shape the client expects. getForBooking
+  // returns nested driver.user / vehicle objects; the app reads driverName,
+  // driverPhone and vehicleNumber directly, so map them here rather than
+  // leaking the ORM shape to the client (and breaking the driver card).
+  const allocationView = activeAllocation
+    ? {
+        id: activeAllocation.id,
+        bookingId: activeAllocation.bookingId,
+        driverId: activeAllocation.driverId,
+        vehicleId: activeAllocation.vehicleId,
+        status: activeAllocation.status,
+        driverName: activeAllocation.driver?.user?.name ?? null,
+        driverPhone: activeAllocation.driver?.user?.phone ?? null,
+        vehicleNumber: activeAllocation.vehicle?.registrationNumber ?? null,
+        vehicleModel: activeAllocation.vehicle?.makeModel ?? null,
+      }
+    : null;
+
   return {
     booking: bk,
     payments,
-    allocation: activeAllocation,
+    allocation: allocationView,
     invoice,
     liveLocation,
   };
