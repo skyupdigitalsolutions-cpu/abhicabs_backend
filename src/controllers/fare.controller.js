@@ -65,6 +65,14 @@ exports.distance = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { origin, destination, route } });
 });
 
+/** Road route geometry (the polyline that follows streets) for drawing on a map. */
+exports.route = asyncHandler(async (req, res) => {
+  const origin = await quote.resolveLocation(req.body.origin, 'origin');
+  const destination = await quote.resolveLocation(req.body.destination, 'destination');
+  const route = await maps.getRoute(origin, destination, { fresh: req.body.fresh });
+  res.json({ success: true, data: { origin, destination, route } });
+});
+
 /** Maps cache hit rates and breaker state — useful for watching the bill. */
 exports.mapsHealth = asyncHandler(async (req, res) => {
   res.json({ success: true, data: maps.health() });

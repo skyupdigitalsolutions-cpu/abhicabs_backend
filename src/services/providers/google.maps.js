@@ -136,4 +136,57 @@ async function autocomplete(query, { sessionToken, lat, lng } = {}) {
   }));
 }
 
-module.exports = { name: NAME, getDistanceMatrix, geocode, reverseGeocode, autocomplete };
+/**
+ * Road route geometry between two points, for drawing the driving path on the
+ * map (the line that follows streets, not a straight line).
+ *
+ * Uses the Directions API. Billed per request like Distance Matrix, so the
+ * result is cached upstream in maps.service. Returns the decoded list of
+ * {lat,lng} points plus distance/duration so a caller can use it standalone.
+ */
+async function getRoute(origin, destination) {
+  const { data } = await http.get('/directions/json', {
+    params: {
+      origin: `${origin.lat},${origin.lng}`,
+      destination: `${destination.lat},${destination.lng}`,
+      mode: 'driving',
+      key: env.maps.apiKey,
+    },
+  });
+
+  assertOk(data, 'directions');
+
+  const route = data.routes?.[0];
+  const leg = route?.legs?.[0];
+  if (!route || !leg) {
+    throw new Error(`[maps:google] no route found (${data.status})`);
+  }
+
+  return {
+    points: decodePolyline(route.overview_polyline?.points || ''),
+    distanceKm: Number((leg.distance.value / 1000).toFixed(2)),
+    durationMin: Math.round(leg.duration.value / 60),
+    provider: NAME,
+  };
+}
+
+/**
+ * Decode Google's "encoded polyline" string into [{lat,lng}...].
+ * This is Google's standard algorithm — small and dependency-free.
+ */
+function decodePolyline(encoded) {
+  const points = [];
+  let index = 0, lat = 0, lng = 0;
+  while (index < encoded.length) {
+    let b, shift = 0, result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+    shift = 0; result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+    points.push({ lat: lat / 1e5, lng: lng / 1e5 });
+  }
+  return points;
+}
+
+module.exports = { name: NAME, getDistanceMatrix, getRoute, geocode, reverseGeocode, autocomplete };

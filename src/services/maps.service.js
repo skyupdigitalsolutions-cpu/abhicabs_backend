@@ -252,6 +252,7 @@ async function geocode(address) {
       try {
         return await callProvider(() => getProvider().geocode(trimmed), 'geocode');
       } catch (err) {
+        // TEMP DEBUG — reveal the real underlying cause (remove after diagnosis)
         // Do NOT cache a failure as a permanent negative — a transient provider
         // error would otherwise poison this address for 30 days.
         throw ApiError.badRequest(`Could not locate "${trimmed}"`, 'GEOCODE_FAILED');
@@ -362,10 +363,52 @@ function resetBreaker() {
   breaker.failures = 0;
 }
 
+/**
+ * Road route geometry (the driving path that follows streets) between two
+ * points, for drawing on the map. Cached like distance (roads rarely change),
+ * breaker-wrapped, and falls back to a straight 2-point line on any failure so
+ * the map always has *something* to draw.
+ */
+async function getRoute(origin, destination, opts = {}) {
+  if (!geo.isValidCoordinate(origin) || !geo.isValidCoordinate(destination)) {
+    throw ApiError.badRequest('Invalid pickup or drop coordinates', 'INVALID_COORDINATES');
+  }
+
+  const key = `maps:route:${geo.coordKey(origin)}:${geo.coordKey(destination)}`;
+
+  if (!opts.fresh) {
+    const hit = await cache.get(key);
+    if (hit) return { ...hit, cached: true };
+  }
+
+  try {
+    const result = await callProvider(
+      () => getProvider().getRoute(origin, destination),
+      'route'
+    );
+    await cache.set(key, result, TTL.DISTANCE);
+    return { ...result, cached: false };
+  } catch (err) {
+    // Never block the UI over a missing route line — draw the straight line.
+    return {
+      points: [
+        { lat: Number(origin.lat), lng: Number(origin.lng) },
+        { lat: Number(destination.lat), lng: Number(destination.lng) },
+      ],
+      distanceKm: Number(geo.haversineKm(origin, destination).toFixed(2)),
+      durationMin: null,
+      provider: 'fallback',
+      estimated: true,
+      cached: false,
+    };
+  }
+}
+
 module.exports = {
   TTL,
   keys,
   getDistance,
+  getRoute,
   estimateDistance,
   geocode,
   reverseGeocode,

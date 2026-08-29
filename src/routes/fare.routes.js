@@ -33,6 +33,7 @@ router.post('/geocode', validate({ body: s.geocodeSchema }), ctrl.geocode);
 router.get('/reverse-geocode', validate({ query: s.reverseGeocodeSchema }), ctrl.reverseGeocode);
 router.get('/autocomplete', validate({ query: s.autocompleteSchema }), ctrl.autocomplete);
 router.post('/distance', validate({ body: s.distanceSchema }), ctrl.distance);
+router.post('/route', validate({ body: s.distanceSchema }), ctrl.route);
 
 /* ---------------- ops ---------------- */
 

@@ -102,4 +102,18 @@ async function autocomplete(query) {
     }));
 }
 
-module.exports = { name: NAME, getDistanceMatrix, geocode, reverseGeocode, autocomplete };
+/** A trivial 2-point "route" (straight line) so mock mode still returns geometry. */
+async function getRoute(origin, destination) {
+  const dm = await getDistanceMatrix(origin, destination);
+  return {
+    points: [
+      { lat: Number(origin.lat), lng: Number(origin.lng) },
+      { lat: Number(destination.lat), lng: Number(destination.lng) },
+    ],
+    distanceKm: dm.distanceKm,
+    durationMin: dm.durationMin,
+    provider: NAME,
+  };
+}
+
+module.exports = { name: NAME, getDistanceMatrix, getRoute, geocode, reverseGeocode, autocomplete };
