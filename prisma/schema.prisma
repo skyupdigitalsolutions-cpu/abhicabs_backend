@@ -45,6 +45,8 @@ enum AccountType {
 enum TripType {
   ONE_WAY
   ROUND_TRIP
+  AIRPORT
+  HOURLY
 }
 
 // How much is collected at the moment of booking
@@ -255,6 +257,7 @@ model City {
   createdAt DateTime @default(now()) @map("created_at")
 
   fareConfigs FareConfig[]
+  rentalPackages RentalPackage[]
   vehicles    Vehicle[]
   bookings    Booking[]
 
@@ -292,6 +295,18 @@ model FareConfig {
   nightStartHour  Int     @default(22) @map("night_start_hour")
   nightEndHour    Int     @default(6) @map("night_end_hour")
 
+  // --- AIRPORT only ---
+  // A flat surcharge added on top of the normal distance fare for airport
+  // pickups/drops (parking, entry toll, queueing). 0 = disabled.
+  airportSurcharge Decimal @default(0) @map("airport_surcharge") @db.Decimal(10, 2)
+
+  // --- HOURLY only ---
+  // Flexible "any hours" rate: used when no fixed package is chosen. The rental
+  // is then priced as (hours x hourlyRate) + (extra km beyond hours*kmPerHour x
+  // perKm). Fixed packages live in the separate RentalPackage table.
+  hourlyRate       Decimal @default(0) @map("hourly_rate") @db.Decimal(10, 2)
+  hourlyKmPerHour  Int     @default(10) @map("hourly_km_per_hour")
+
   // --- surge bounds (MVAG caps dynamic pricing) ---
   maxSurge        Decimal @default(2.00) @map("max_surge") @db.Decimal(4, 2)
   minSurge        Decimal @default(0.50) @map("min_surge") @db.Decimal(4, 2)
@@ -305,6 +320,33 @@ model FareConfig {
   @@unique([cityId, vehicleClass, tripType, effectiveFrom])
   @@index([cityId, isActive])
   @@map("fare_configs")
+}
+
+/// Fixed local-rental packages (e.g. 4hr/40km, 8hr/80km, 12hr/120km). A rental
+/// booking either picks one of these, or uses the flexible hourly rate on
+/// FareConfig. Overage beyond the included hours/km is charged at the extra
+/// rates below.
+model RentalPackage {
+  id           Int      @id @default(autoincrement())
+  cityId       Int      @map("city_id")
+  vehicleClass String   @map("vehicle_class") @db.VarChar(24)
+
+  label        String   @db.VarChar(40)   // e.g. "8 hrs / 80 km"
+  includedHours Int     @map("included_hours")
+  includedKm    Int     @map("included_km")
+  packageFare   Decimal @map("package_fare") @db.Decimal(10, 2)
+
+  extraPerHour  Decimal @map("extra_per_hour") @db.Decimal(10, 2)
+  extraPerKm    Decimal @map("extra_per_km") @db.Decimal(10, 2)
+
+  sortOrder    Int      @default(0) @map("sort_order")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  city City @relation(fields: [cityId], references: [id])
+
+  @@index([cityId, vehicleClass, isActive])
+  @@map("rental_packages")
 }
 
 // ===========================================================================
@@ -499,6 +541,16 @@ model Booking {
 
   pickupAt      DateTime      @map("pickup_at")
   returnAt      DateTime?     @map("return_at")   // required for ROUND_TRIP
+
+  // --- AIRPORT ---
+  flightNumber  String?       @map("flight_number") @db.VarChar(16)
+
+  // --- HOURLY rental ---
+  // The chosen package (null for the flexible "any hours" option). rentalHours /
+  // rentalKm capture what the rider committed to, so the frozen fare is auditable.
+  rentalPackageId Int?        @map("rental_package_id")
+  rentalHours     Int?        @map("rental_hours")
+  rentalKm        Int?        @map("rental_km")
 
   // --- computed trip metrics ---
   distanceKm      Decimal?    @map("distance_km") @db.Decimal(10, 2)

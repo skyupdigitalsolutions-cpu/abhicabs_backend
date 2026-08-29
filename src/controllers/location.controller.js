@@ -6,6 +6,9 @@
 
 const location = require('../services/location.service');
 const trip = require('../services/trip.service');
+const lifecycle = require('../services/lifecycle.service');
+const { prisma } = require('../config/prisma');
+const geo = require('../lib/geo');
 const { asyncHandler, ApiError } = require('../utils/helpers');
 
 // Best-effort live broadcast of a driver's position over the Day 10 sockets.
@@ -44,8 +47,31 @@ exports.ping = asyncHandler(async (req, res) => {
   // If the driver is on a trip, add the durable throttled checkpoint. Almost
   // every call here is a no-op against Postgres (inside the throttle window).
   let checkpoint = null;
+  let autoArrived = false;
   if (bookingId) {
     checkpoint = await trip.onTripPing(bookingId, { lat, lng, speed, heading });
+
+    // Auto-arrive: when an ONGOING trip's driver gets within ARRIVE_RADIUS of the
+    // drop, transition the booking to ARRIVED automatically — no manual /arrive.
+    // Wrapped so a lifecycle hiccup never fails the ping itself.
+    try {
+      const bkg = await prisma.booking.findUnique({
+        where: { id: bookingId },
+        select: { status: true, dropLat: true, dropLng: true },
+      });
+      if (bkg && bkg.status === 'ONGOING') {
+        const metres =
+          geo.haversineKm(lat, lng, Number(bkg.dropLat), Number(bkg.dropLng)) * 1000;
+        const ARRIVE_RADIUS_M = Number(process.env.GPS_ARRIVE_RADIUS_M || 80);
+        if (metres <= ARRIVE_RADIUS_M) {
+          await lifecycle.markArrived(bookingId, req.user, { via: 'auto-gps' }, { lat, lng });
+          autoArrived = true;
+        }
+      }
+    } catch (e) {
+      // Non-fatal: log and let the ping succeed. Ops can still /arrive manually.
+      console.error('[auto-arrive] skipped:', e && e.message);
+    }
   }
 
   // Fire the live broadcast after the write so watchers see the new position.
@@ -53,7 +79,7 @@ exports.ping = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    data: { accepted: true, speedKmph: result.speedKmph, jumpKm: result.jumpKm, checkpoint },
+    data: { accepted: true, speedKmph: result.speedKmph, jumpKm: result.jumpKm, checkpoint, autoArrived },
   });
 });
 

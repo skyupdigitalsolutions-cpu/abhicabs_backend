@@ -54,7 +54,7 @@ const transitionSchema = z.object({
 const policyQuerySchema = z.object({
   cityId: z.coerce.number().int().positive(),
   vehicleClass: z.string().trim().min(2).max(24),
-  tripType: z.enum(['ONE_WAY', 'ROUND_TRIP']),
+  tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']),
 });
 
 module.exports = {

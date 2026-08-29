@@ -39,7 +39,7 @@ const createBookingSchema = z
   .object({
     cityId: z.coerce.number().int().positive(),
     vehicleClass: z.string().trim().min(2).max(24),
-    tripType: z.enum(['ONE_WAY', 'ROUND_TRIP']),
+    tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']),
 
     pickup: location,
     drop: location,
@@ -47,6 +47,13 @@ const createBookingSchema = z
 
     pickupAt: z.string().datetime({ message: 'pickupAt must be an ISO datetime' }),
     returnAt: z.string().datetime().optional().nullable(),
+
+    // AIRPORT: optional flight number for the driver / flight tracking.
+    flightNumber: z.string().trim().max(16).optional().nullable(),
+
+    // HOURLY: either a fixed package id, or a flexible hours commitment.
+    rentalPackageId: z.coerce.number().int().positive().optional().nullable(),
+    rentalHours: z.coerce.number().int().min(1).max(24).optional().nullable(),
 
     // false = "book me a cab now"; true = scheduled for later.
     scheduled: z.boolean().default(true),
@@ -63,6 +70,10 @@ const createBookingSchema = z
   .refine((d) => d.tripType !== 'ROUND_TRIP' || !!d.returnAt, {
     message: 'A round trip needs a return date and time',
     path: ['returnAt'],
+  })
+  .refine((d) => d.tripType !== 'HOURLY' || !!d.rentalPackageId || !!d.rentalHours, {
+    message: 'An hourly rental needs a package or a number of hours',
+    path: ['rentalHours'],
   });
 
 const listBookingsQuerySchema = z.object({
@@ -71,7 +82,7 @@ const listBookingsQuerySchema = z.object({
   status: z
     .enum(['PENDING','CONFIRMED','ALLOCATED','EN_ROUTE','ONGOING','COMPLETED','CANCELLED','EXPIRED'])
     .optional(),
-  tripType: z.enum(['ONE_WAY', 'ROUND_TRIP']).optional(),
+  tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']).optional(),
   customerId: uuid.optional(),
   corporateAccountId: uuid.optional(),
   cityId: z.coerce.number().int().positive().optional(),

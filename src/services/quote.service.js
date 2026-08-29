@@ -132,10 +132,15 @@ async function getQuote(input) {
     returnAt = null,
     waitingMinutes = 0,
     surge = 1,
+    rentalPackageId = null,
+    rentalHours = null,
   } = input;
 
   if (tripType === 'ROUND_TRIP' && !returnAt) {
     throw ApiError.badRequest('A round trip needs a return date and time', 'RETURN_TIME_REQUIRED');
+  }
+  if (tripType === 'HOURLY' && !rentalPackageId && !rentalHours) {
+    throw ApiError.badRequest('An hourly rental needs a package or a number of hours', 'RENTAL_TERMS_REQUIRED');
   }
   if (returnAt && new Date(returnAt) <= new Date(pickupAt)) {
     throw ApiError.badRequest('Return time must be after pickup', 'INVALID_RETURN_TIME');
@@ -170,12 +175,24 @@ async function getQuote(input) {
 
   const config = await getFareConfig(cityId, vehicleClass, tripType);
 
+  // HOURLY: load the chosen fixed package (if any) so the engine can price it.
+  let rentalPackage = null;
+  if (tripType === 'HOURLY' && rentalPackageId) {
+    rentalPackage = await prisma.rentalPackage.findFirst({
+      where: { id: Number(rentalPackageId), cityId: Number(cityId), vehicleClass, isActive: true },
+    });
+    if (!rentalPackage) {
+      throw ApiError.badRequest('That rental package is not available', 'RENTAL_PACKAGE_NOT_FOUND');
+    }
+  }
+
   // The city's IANA timezone decides the night window and the calendar-day
   // count. Without it the fare would follow the SERVER's timezone, so the same
   // booking would price differently on a Bengaluru laptop and a UTC server.
   const priced = fare.computeFare(
     {
       tripType, distanceKm, durationMin, pickupAt, returnAt, waitingMinutes, surge,
+      rentalPackage, rentalHours,
       timeZone: city.timezone,
     },
     config

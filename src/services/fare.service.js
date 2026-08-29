@@ -177,20 +177,162 @@ function clampSurge(requested, config) {
  * ------------------------------------------------------------------ */
 
 /**
- * @param {object} input
- *   tripType       'ONE_WAY' | 'ROUND_TRIP'
+ * Hourly local-rental pricing. Two modes:
+ *
+ *   • Fixed package (rentalPackage supplied): a flat packageFare covers the
+ *     included hours + km. Overage beyond either is charged at the package's
+ *     extraPerHour / extraPerKm. (Overage is only known at trip end; at quote
+ *     time it's zero, so the quote equals the package fare.)
+ *
+ *   • Flexible "any hours" (no package): hours x hourlyRate, plus any distance
+ *     beyond the included allowance (hours x hourlyKmPerHour) at perKm.
+ *
+ * Night charge still applies (on the time/package component). Surge and the
+ * minimum-fare floor apply exactly as for other trip types.
+ */
+function computeHourlyFare(input, config) {
+  const {
+    rentalHours = 0,
+    rentalPackage = null,
+    distanceKm = 0,
+    pickupAt = new Date(),
+    returnAt = null,
+    surge: requestedSurge = 1,
+    timeZone = DEFAULT_TIMEZONE,
+  } = input;
+
+  if (!config) throw new Error('[fare] No fare configuration supplied');
+  const breakdown = [];
+
+  let core = M.dec(0);          // package fare or hours*rate
+  let extraKmCharge = M.dec(0);
+  let extraHourCharge = M.dec(0);
+  let includedKm = 0;
+  let includedHours = 0;
+
+  if (rentalPackage) {
+    includedHours = Number(rentalPackage.includedHours);
+    includedKm = Number(rentalPackage.includedKm);
+    core = M.round2(M.dec(rentalPackage.packageFare));
+    breakdown.push({
+      label: `Rental package (${rentalPackage.label})`,
+      amount: M.toStr(core),
+      note: `${includedHours} hrs / ${includedKm} km included`,
+    });
+
+    const extraKm = Math.max(0, Number(distanceKm) - includedKm);
+    if (extraKm > 0 && M.dec(rentalPackage.extraPerKm).greaterThan(0)) {
+      extraKmCharge = M.round2(M.mul(extraKm, rentalPackage.extraPerKm));
+      breakdown.push({
+        label: `Extra distance (${extraKm} km x ${M.toStr(rentalPackage.extraPerKm)}/km)`,
+        amount: M.toStr(extraKmCharge),
+      });
+    }
+  } else {
+    // Flexible: hours x hourly rate.
+    includedHours = Number(rentalHours);
+    const rate = M.dec(config.hourlyRate ?? 0);
+    if (!rate.greaterThan(0)) {
+      throw new Error('[fare] hourly rate not configured for this class');
+    }
+    core = M.round2(M.mul(rentalHours, rate));
+    breakdown.push({
+      label: `Hourly rental (${rentalHours} hr x ${M.toStr(rate)}/hr)`,
+      amount: M.toStr(core),
+    });
+
+    includedKm = Number(rentalHours) * Number(config.hourlyKmPerHour ?? 10);
+    const extraKm = Math.max(0, Number(distanceKm) - includedKm);
+    if (extraKm > 0 && M.dec(config.perKm).greaterThan(0)) {
+      extraKmCharge = M.round2(M.mul(extraKm, config.perKm));
+      breakdown.push({
+        label: `Extra distance (${extraKm} km beyond ${includedKm} km x ${M.toStr(config.perKm)}/km)`,
+        amount: M.toStr(extraKmCharge),
+      });
+    }
+  }
+
+  /* night charge on the core rental component */
+  let nightCharge = M.dec(0);
+  const nightPct = M.dec(config.nightChargePct ?? 0);
+  if (
+    nightPct.greaterThan(0) &&
+    touchesNight(pickupAt, returnAt, Number(config.nightStartHour ?? 22), Number(config.nightEndHour ?? 6), timeZone)
+  ) {
+    nightCharge = M.round2(M.pct(core, nightPct));
+    breakdown.push({ label: `Night charge (${M.toStr(nightPct)}%)`, amount: M.toStr(nightCharge) });
+  }
+
+  const subtotal = M.sum([core, extraKmCharge, extraHourCharge, nightCharge]);
+
+  const surge = clampSurge(requestedSurge, config);
+  const surgeAmount = surge.equals(1) ? M.dec(0) : M.round2(M.sub(M.mul(subtotal, surge), subtotal));
+  if (!surgeAmount.isZero()) {
+    breakdown.push({ label: `Demand pricing (${surge.toFixed(2)}x)`, amount: M.toStr(surgeAmount) });
+  }
+  const afterSurge = M.add(subtotal, surgeAmount);
+
+  const minimumFare = M.dec(config.minimumFare ?? 0);
+  const belowMinimum = afterSurge.lessThan(minimumFare);
+  const minimumFareAdjustment = belowMinimum ? M.sub(minimumFare, afterSurge) : M.dec(0);
+  const beforeRounding = belowMinimum ? minimumFare : afterSurge;
+  if (belowMinimum) {
+    breakdown.push({ label: 'Minimum fare adjustment', amount: M.toStr(minimumFareAdjustment) });
+  }
+
+  const total = M.roundRupee(beforeRounding);
+  const roundingAdjustment = M.sub(total, beforeRounding);
+  if (!roundingAdjustment.isZero()) {
+    breakdown.push({ label: 'Rounding', amount: M.toStr(roundingAdjustment), note: 'Rounded to the nearest rupee' });
+  }
+
+  return {
+    tripType: 'HOURLY',
+    currency: 'INR',
+    base: M.toStr(core),
+    distance: M.toStr(extraKmCharge),
+    time: '0.00',
+    returnEmpty: '0.00',
+    bata: '0.00',
+    waiting: '0.00',
+    night: M.toStr(nightCharge),
+    airport: '0.00',
+    surgeAmount: M.toStr(surgeAmount),
+    subtotal: M.toStr(subtotal),
+    minimumFareAdjustment: M.toStr(minimumFareAdjustment),
+    total: total.toFixed(2),
+    meta: {
+      rental: true,
+      includedHours,
+      includedKm,
+      packageLabel: rentalPackage ? rentalPackage.label : null,
+    },
+    breakdown,
+  };
+}
+
+/**
  *   distanceKm     road distance. For a round trip this is the TOTAL both ways.
  *   durationMin    driving minutes
  *   pickupAt       ISO string or Date
  *   returnAt       ISO string or Date  (round trip)
  *   waitingMinutes total waiting during the journey (any trip type)
  *   surge          requested multiplier, clamped to the config band
+ *   rentalHours    HOURLY: hours the rider is committing to
+ *   rentalPackage  HOURLY: a rental_packages row, or null for the flexible rate
  *
  * @param {object} config  a fare_configs row
  *
  * @returns {object} components as strings, plus a human-readable breakdown
  */
 function computeFare(input, config) {
+  // Hourly rentals price by time/package, not by trip distance — a separate
+  // model entirely, so it gets its own function rather than tangling branches
+  // through the distance logic below.
+  if (input.tripType === 'HOURLY') {
+    return computeHourlyFare(input, config);
+  }
+
   const {
     tripType,
     distanceKm = 0,
@@ -208,6 +350,7 @@ function computeFare(input, config) {
   if (!config) throw new Error('[fare] No fare configuration supplied');
 
   const isRoundTrip = tripType === 'ROUND_TRIP';
+  const isAirport = tripType === 'AIRPORT';
   const breakdown = [];
 
   /* -- 1. billable distance ----------------------------------------
@@ -329,6 +472,20 @@ function computeFare(input, config) {
     });
   }
 
+  /* -- 7b. airport surcharge (airport only) ------------------------- */
+
+  // A flat fee for airport pickups/drops (parking, entry toll, queueing),
+  // added on top of the normal distance fare. 0 in config disables it.
+  let airportCharge = M.dec(0);
+  if (isAirport && M.dec(config.airportSurcharge ?? 0).greaterThan(0)) {
+    airportCharge = M.round2(M.dec(config.airportSurcharge));
+    breakdown.push({
+      label: 'Airport surcharge',
+      amount: M.toStr(airportCharge),
+      note: 'Airport parking / entry toll',
+    });
+  }
+
   /* -- 8. surge ------------------------------------------------------ */
 
   // M.sum takes an ARRAY. M.add is binary — calling it with seven arguments
@@ -343,6 +500,7 @@ function computeFare(input, config) {
     bata,
     waitingCharge,
     nightCharge,
+    airportCharge,
   ]);
 
   const surge = clampSurge(requestedSurge, config);
@@ -406,6 +564,7 @@ function computeFare(input, config) {
     bata: M.toStr(bata),
     waiting: M.toStr(waitingCharge),
     night: M.toStr(nightCharge),
+    airport: M.toStr(airportCharge),
     surgeAmount: M.toStr(surgeAmount),
     subtotal: M.toStr(subtotal),
     minimumFareAdjustment: M.toStr(minimumFareAdjustment),

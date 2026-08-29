@@ -46,16 +46,25 @@ const baseQuote = {
   returnAt: z.string().datetime({ offset: true }).or(z.string().min(10)).optional().nullable(),
   waitingMinutes: z.coerce.number().int().min(0).max(10080).default(0),
   surge,
+  // AIRPORT
+  flightNumber: z.string().trim().max(16).optional().nullable(),
+  // HOURLY: a fixed package id OR a flexible hours commitment.
+  rentalPackageId: z.coerce.number().int().positive().optional().nullable(),
+  rentalHours: z.coerce.number().int().min(1).max(24).optional().nullable(),
 };
 
 const estimateSchema = z
   .object({
     ...baseQuote,
-    tripType: z.enum(['ONE_WAY', 'ROUND_TRIP']),
+    tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']),
   })
   .refine(
     (v) => v.tripType !== 'ROUND_TRIP' || Boolean(v.returnAt),
     { message: 'A round trip needs a return date and time', path: ['returnAt'] }
+  )
+  .refine(
+    (v) => v.tripType !== 'HOURLY' || Boolean(v.rentalPackageId) || Boolean(v.rentalHours),
+    { message: 'An hourly rental needs a package or a number of hours', path: ['rentalHours'] }
   );
 
 /** Prices the same trip both ways so a customer can compare. */
@@ -67,7 +76,7 @@ const allClassesSchema = z.object({
   // /fares/options prices EVERY vehicle class, so a single class is not required
   // here (quoteAllClasses ignores it). Override baseQuote's required field.
   vehicleClass: vehicleClass.optional(),
-  tripType: z.enum(['ONE_WAY', 'ROUND_TRIP']).default('ONE_WAY'),
+  tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']).default('ONE_WAY'),
 });
 
 const geocodeSchema = z.object({
@@ -95,7 +104,7 @@ const distanceSchema = z.object({
 const cancellationSchema = z.object({
   cityId: z.coerce.number().int().positive(),
   vehicleClass,
-  tripType: z.enum(['ONE_WAY', 'ROUND_TRIP']).default('ONE_WAY'),
+  tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']).default('ONE_WAY'),
   pickupAt: z.string().min(10),
   fareTotal: z.coerce.number().min(0).optional(),
 });
