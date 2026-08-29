@@ -27,6 +27,16 @@ exports.options = asyncHandler(async (req, res) => {
   res.json({ success: true, data });
 });
 
+/** GET /fares/rental-packages — local-rental packages for the hourly picker. */
+exports.rentalPackages = asyncHandler(async (req, res) => {
+  const q = req.validatedQuery || req.query;
+  const packages = await quote.listRentalPackages({
+    cityId: q.cityId,
+    vehicleClass: q.vehicleClass || null,
+  });
+  res.json({ success: true, data: { packages } });
+});
+
 /** POST /fares/cancellation-fee — what a cancellation would cost right now. */
 exports.cancellationFee = asyncHandler(async (req, res) => {
   const { cityId, vehicleClass, tripType, pickupAt, fareTotal } = req.body;

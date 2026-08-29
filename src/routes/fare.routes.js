@@ -25,6 +25,7 @@ router.use(requireAuth);
 router.post('/estimate', validate({ body: s.estimateSchema }), ctrl.estimate);
 router.post('/compare', validate({ body: s.compareSchema }), ctrl.compare);
 router.post('/options', validate({ body: s.allClassesSchema }), ctrl.options);
+router.get('/rental-packages', validate({ query: s.rentalPackagesSchema }), ctrl.rentalPackages);
 router.post('/cancellation-fee', validate({ body: s.cancellationSchema }), ctrl.cancellationFee);
 
 /* ---------------- maps ---------------- */

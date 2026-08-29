@@ -307,6 +307,14 @@ async function quoteAllClasses(input) {
     throw ApiError.badRequest('Pickup is outside the service area', 'OUTSIDE_SERVICE_AREA');
   }
 
+  // HOURLY needs a package or an hours commitment, same rule as a single quote.
+  if (input.tripType === 'HOURLY' && !input.rentalPackageId && !input.rentalHours) {
+    throw ApiError.badRequest(
+      'An hourly rental needs a package or a number of hours',
+      'RENTAL_TERMS_REQUIRED'
+    );
+  }
+
   const route = await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
 
   const configs = await prisma.fareConfig.findMany({
@@ -327,24 +335,48 @@ async function quoteAllClasses(input) {
     return true;
   });
 
+  // A round trip covers the route twice; the engine expects the TOTAL distance.
+  // HOURLY and AIRPORT use the one-way distance (the engine adds their own
+  // package/surcharge logic on top).
   const multiplier = input.tripType === 'ROUND_TRIP' ? 2 : 1;
 
-  const options = latest.map((config) => ({
-    vehicleClass: config.vehicleClass,
-    ...fare.computeFare(
-      {
-        tripType: input.tripType,
-        distanceKm: route.distanceKm * multiplier,
-        durationMin: route.durationMin * multiplier,
-        pickupAt: input.pickupAt,
-        returnAt: input.returnAt,
-        waitingMinutes: input.waitingMinutes || 0,
-        surge: input.surge,
-        timeZone: city.timezone,
-      },
-      config
-    ),
-  }));
+  // HOURLY with a fixed package: load the package PER vehicle class, since each
+  // class has its own package fares. Done once up front to avoid N queries.
+  let packagesByClass = null;
+  if (input.tripType === 'HOURLY' && input.rentalPackageId) {
+    const pkgs = await prisma.rentalPackage.findMany({
+      where: { id: Number(input.rentalPackageId), cityId: Number(input.cityId), isActive: true },
+    });
+    packagesByClass = new Map(pkgs.map((p) => [p.vehicleClass, p]));
+  }
+
+  const options = latest
+    .map((config) => {
+      const rentalPackage = packagesByClass ? packagesByClass.get(config.vehicleClass) || null : null;
+      // If a specific package was requested but this class doesn't offer it, skip
+      // the class rather than mis-pricing it.
+      if (input.tripType === 'HOURLY' && input.rentalPackageId && !rentalPackage) return null;
+
+      return {
+        vehicleClass: config.vehicleClass,
+        ...fare.computeFare(
+          {
+            tripType: input.tripType,
+            distanceKm: route.distanceKm * multiplier,
+            durationMin: route.durationMin * multiplier,
+            pickupAt: input.pickupAt,
+            returnAt: input.returnAt,
+            waitingMinutes: input.waitingMinutes || 0,
+            surge: input.surge,
+            rentalPackage,
+            rentalHours: input.rentalHours || null,
+            timeZone: city.timezone,
+          },
+          config
+        ),
+      };
+    })
+    .filter(Boolean);
 
   options.sort((a, b) => Number(a.total) - Number(b.total));
 
@@ -363,10 +395,39 @@ async function quoteAllClasses(input) {
   };
 }
 
+/**
+ * List the active local-rental packages for a city (e.g. 4hr/40km, 8hr/80km,
+ * 12hr/120km), grouped so the app can render a package picker. Optionally
+ * filtered to one vehicle class. Cached briefly since packages change rarely.
+ */
+async function listRentalPackages({ cityId, vehicleClass = null }) {
+  const packages = await prisma.rentalPackage.findMany({
+    where: {
+      cityId: Number(cityId),
+      isActive: true,
+      ...(vehicleClass ? { vehicleClass } : {}),
+    },
+    orderBy: [{ vehicleClass: 'asc' }, { sortOrder: 'asc' }, { includedHours: 'asc' }],
+  });
+
+  return packages.map((p) => ({
+    id: p.id,
+    cityId: p.cityId,
+    vehicleClass: p.vehicleClass,
+    label: p.label,
+    includedHours: p.includedHours,
+    includedKm: p.includedKm,
+    packageFare: p.packageFare.toString(),
+    extraPerHour: p.extraPerHour.toString(),
+    extraPerKm: p.extraPerKm.toString(),
+  }));
+}
+
 module.exports = {
   getQuote,
   compareTripTypes,
   quoteAllClasses,
+  listRentalPackages,
   getFareConfig,
   getCity,
   invalidateFareConfig,

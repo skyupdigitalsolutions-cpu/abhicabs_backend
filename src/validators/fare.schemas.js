@@ -79,6 +79,12 @@ const allClassesSchema = z.object({
   tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']).default('ONE_WAY'),
 });
 
+/** GET /fares/rental-packages?cityId=1&vehicleClass=sedan */
+const rentalPackagesSchema = z.object({
+  cityId: z.coerce.number().int().positive(),
+  vehicleClass: vehicleClass.optional(),
+});
+
 const geocodeSchema = z.object({
   address: z.string().trim().min(3).max(500),
 });
@@ -114,6 +120,7 @@ module.exports = {
   estimateSchema,
   compareSchema,
   allClassesSchema,
+  rentalPackagesSchema,
   geocodeSchema,
   reverseGeocodeSchema,
   autocompleteSchema,
