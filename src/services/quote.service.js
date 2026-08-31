@@ -150,9 +150,15 @@ async function getQuote(input) {
 
   const city = await getCity(cityId);
 
+  // HOURLY (local rental) has no fixed destination. If no drop was given, use the
+  // pickup as a placeholder so downstream code has coordinates; the fare comes
+  // from the package, not the pickup→drop distance, so distance is set to 0.
+  const isHourly = tripType === 'HOURLY';
+  const effectiveDrop = drop || (isHourly ? pickup : drop);
+
   const [pickupPoint, dropPoint] = await Promise.all([
     resolveLocation(pickup, 'pickup'),
-    resolveLocation(drop, 'drop'),
+    resolveLocation(effectiveDrop, 'drop'),
   ]);
 
   const serviceable = maps.isServiceable(pickupPoint, city);
@@ -165,7 +171,11 @@ async function getQuote(input) {
 
   /* -- 2. distance -- */
 
-  const route = await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
+  // HOURLY prices from the package/hours, not the route, so we skip the distance
+  // call entirely (which also avoids the SAME_LOCATION check when drop==pickup).
+  const route = isHourly
+    ? { distanceKm: 0, durationMin: 0, provider: 'none', estimated: false }
+    : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
 
   // A round trip covers the route twice. The engine expects the TOTAL.
   const distanceKm = tripType === 'ROUND_TRIP' ? route.distanceKm * 2 : route.distanceKm;
@@ -297,9 +307,13 @@ async function compareTripTypes(input) {
 async function quoteAllClasses(input) {
   const city = await getCity(input.cityId);
 
+  const isHourly = input.tripType === 'HOURLY';
+  // HOURLY has no fixed destination — default drop to pickup if absent.
+  const effectiveDrop = input.drop || (isHourly ? input.pickup : input.drop);
+
   const [pickupPoint, dropPoint] = await Promise.all([
     resolveLocation(input.pickup, 'pickup'),
-    resolveLocation(input.drop, 'drop'),
+    resolveLocation(effectiveDrop, 'drop'),
   ]);
 
   const serviceable = maps.isServiceable(pickupPoint, city);
@@ -308,14 +322,18 @@ async function quoteAllClasses(input) {
   }
 
   // HOURLY needs a package or an hours commitment, same rule as a single quote.
-  if (input.tripType === 'HOURLY' && !input.rentalPackageId && !input.rentalHours) {
+  if (isHourly && !input.rentalPackageId && !input.rentalHours) {
     throw ApiError.badRequest(
       'An hourly rental needs a package or a number of hours',
       'RENTAL_TERMS_REQUIRED'
     );
   }
 
-  const route = await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
+  // HOURLY prices from the package, so skip the distance lookup (and its
+  // SAME_LOCATION guard when drop==pickup).
+  const route = isHourly
+    ? { distanceKm: 0, durationMin: 0, provider: 'none', estimated: false }
+    : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
 
   const configs = await prisma.fareConfig.findMany({
     where: {

@@ -41,7 +41,9 @@ const baseQuote = {
   cityId: z.coerce.number().int().positive(),
   vehicleClass,
   pickup: location,
-  drop: location,
+  // Optional so HOURLY (local rental) can quote with no drop. The quote service
+  // defaults it to pickup for HOURLY and skips the distance leg.
+  drop: location.optional().nullable(),
   pickupAt: z.string().datetime({ offset: true }).or(z.string().min(10)),
   returnAt: z.string().datetime({ offset: true }).or(z.string().min(10)).optional().nullable(),
   waitingMinutes: z.coerce.number().int().min(0).max(10080).default(0),

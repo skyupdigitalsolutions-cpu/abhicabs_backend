@@ -42,7 +42,10 @@ const createBookingSchema = z
     tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']),
 
     pickup: location,
-    drop: location,
+    // Drop is optional for HOURLY (local rentals have no fixed destination —
+    // you keep the car for the package hours). Required for every other type,
+    // enforced by the refine below.
+    drop: location.optional().nullable(),
     stops: z.array(location).max(10).optional(),
 
     pickupAt: z.string().datetime({ message: 'pickupAt must be an ISO datetime' }),
@@ -74,6 +77,10 @@ const createBookingSchema = z
   .refine((d) => d.tripType !== 'HOURLY' || !!d.rentalPackageId || !!d.rentalHours, {
     message: 'An hourly rental needs a package or a number of hours',
     path: ['rentalHours'],
+  })
+  .refine((d) => d.tripType === 'HOURLY' || !!d.drop, {
+    message: 'A drop location is required',
+    path: ['drop'],
   });
 
 const listBookingsQuerySchema = z.object({

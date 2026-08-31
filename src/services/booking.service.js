@@ -225,6 +225,13 @@ function validateTiming({ pickupAt, returnAt, tripType, scheduled }) {
 async function create(input, actor, meta = {}) {
   const customerId = input.customerId || actor.id;
 
+  // HOURLY (local rental) has no fixed destination. If the app sent no drop,
+  // use the pickup as the drop so the rest of the pipeline has coordinates —
+  // the fare comes from the package, not the route, so this doesn't affect price.
+  if (input.tripType === 'HOURLY' && !input.drop) {
+    input = { ...input, drop: input.pickup };
+  }
+
   /* ---- 1. attempt logged FIRST, before anything can reject ---- */
   const attempt = await logAttempt(
     {
