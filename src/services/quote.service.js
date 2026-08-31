@@ -188,9 +188,20 @@ async function getQuote(input) {
   // HOURLY: load the chosen fixed package (if any) so the engine can price it.
   let rentalPackage = null;
   if (tripType === 'HOURLY' && rentalPackageId) {
-    rentalPackage = await prisma.rentalPackage.findFirst({
-      where: { id: Number(rentalPackageId), cityId: Number(cityId), vehicleClass, isActive: true },
+    // The app stores a representative package id (from whichever class it listed
+    // first). Resolve it to THIS booking's class: find the stored row to learn
+    // its duration label, then match the same label for the booked class. So
+    // "4hr/40km" works whatever class the user chooses.
+    const requested = await prisma.rentalPackage.findFirst({
+      where: { id: Number(rentalPackageId), cityId: Number(cityId), isActive: true },
     });
+    rentalPackage = requested && requested.vehicleClass === vehicleClass
+      ? requested
+      : requested
+        ? await prisma.rentalPackage.findFirst({
+            where: { cityId: Number(cityId), vehicleClass, label: requested.label, isActive: true },
+          })
+        : null;
     if (!rentalPackage) {
       throw ApiError.badRequest('That rental package is not available', 'RENTAL_PACKAGE_NOT_FOUND');
     }
@@ -210,6 +221,10 @@ async function getQuote(input) {
 
   return {
     quote: priced,
+    // The rental package actually applied (resolved to this booking's class), so
+    // the caller persists the correct class-specific id, not the raw app input.
+    rentalPackageId: rentalPackage ? rentalPackage.id : null,
+    rentalHours: rentalHours || null,
     trip: {
       tripType,
       vehicleClass,

@@ -273,6 +273,11 @@ async function create(input, actor, meta = {}) {
       returnAt: input.returnAt || null,
       waitingMinutes: input.waitingMinutes || 0,
       surge: input.surge || 1,
+      // HOURLY needs its package/hours to price; without these getQuote throws
+      // RENTAL_TERMS_REQUIRED. AIRPORT may carry a flight number.
+      rentalPackageId: input.rentalPackageId || null,
+      rentalHours: input.rentalHours || null,
+      flightNumber: input.flightNumber || null,
     });
 
     const total = quote.quote.total;
@@ -304,13 +309,19 @@ async function create(input, actor, meta = {}) {
           pickupAddress: quote.trip.pickup.formattedAddress || input.pickup.address || 'Pickup',
           pickupLat: quote.trip.pickup.lat,
           pickupLng: quote.trip.pickup.lng,
-          dropAddress: quote.trip.drop.formattedAddress || input.drop.address || 'Drop',
+          dropAddress: quote.trip.drop.formattedAddress || input.drop?.address || 'Drop',
           dropLat: quote.trip.drop.lat,
           dropLng: quote.trip.drop.lng,
           stops: input.stops || [],
 
           pickupAt: new Date(input.pickupAt),
           returnAt: input.returnAt ? new Date(input.returnAt) : null,
+
+          // Trip-type extras. For HOURLY we store the package the quote actually
+          // applied (resolved to this class), not the raw id the app sent.
+          flightNumber: input.flightNumber || null,
+          rentalPackageId: quote.rentalPackageId ?? input.rentalPackageId ?? null,
+          rentalHours: quote.rentalHours ?? input.rentalHours ?? null,
 
           distanceKm: quote.trip.totalKm,
           durationMinutes: quote.trip.durationMin,
