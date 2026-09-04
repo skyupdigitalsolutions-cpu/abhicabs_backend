@@ -44,4 +44,12 @@ ops.get('/trip/:bookingId/trail', requirePermission('DISPATCH_MANAGE'),
 // Manual trigger for the stale-driver sweep (Day 12 schedules it).
 ops.post('/sweep-stale', requirePermission('DISPATCH_MANAGE'), ctrl.sweepStale);
 
-module.exports = { driver, ops };
+/* ---------------- rider: /location (any signed-in user) ---------------- */
+
+const rider = express.Router();
+rider.use(requireAuth);
+
+// Anonymized "cars near me" for the home map. Auth'd but no special permission.
+rider.get('/nearby-cars', validate({ query: s.nearbyQuerySchema }), ctrl.nearbyForRider);
+
+module.exports = { driver, ops, rider };

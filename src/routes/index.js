@@ -62,6 +62,7 @@ router.use('/driver/offers', apiLimiter, dispatchRoutes.driver);
 const locationRoutes = require('./location.routes');
 router.use('/driver/location', apiLimiter, locationRoutes.driver);
 router.use('/admin/location', apiLimiter, locationRoutes.ops);
+router.use('/location', apiLimiter, locationRoutes.rider);
 router.use('/admin/audit', apiLimiter, require('./audit.routes'));
 
 module.exports = router;

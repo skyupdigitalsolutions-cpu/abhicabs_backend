@@ -112,6 +112,25 @@ exports.nearby = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { count: vehicles.length, drivers: vehicles } });
 });
 
+/**
+ * Rider-facing "cars near me" for the home map. Same GEO lookup, but privacy-
+ * stripped: no driverId, no distance, just anonymous {lat,lng} dots so the map
+ * can show "cabs are around" without exposing who or where a specific driver is.
+ */
+exports.nearbyForRider = asyncHandler(async (req, res) => {
+  const q = req.validatedQuery || req.query;
+  const vehicles = await location.nearbyVehicles({
+    lat: q.lat,
+    lng: q.lng,
+    radiusKm: q.radiusKm || 5,
+    limit: q.limit || 15,
+  });
+  const cars = vehicles
+    .filter((v) => Number.isFinite(v.lat) && Number.isFinite(v.lng))
+    .map((v) => ({ lat: v.lat, lng: v.lng }));
+  res.json({ success: true, data: { count: cars.length, cars } });
+});
+
 exports.driverLocation = asyncHandler(async (req, res) => {
   const loc = await location.driverLocation(req.params.driverId);
   if (!loc) throw ApiError.notFound('No live location for this driver');
