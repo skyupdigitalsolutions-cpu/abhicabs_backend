@@ -23,73 +23,48 @@ const { ApiError, publicUser } = require('../utils/helpers');
  * ------------------------------------------------------------------ */
 
 /**
- * Sends a code. The response is identical whether or not the number is
- * registered, so this cannot be used to discover which numbers have accounts.
+ * Sends a code — but ONLY to numbers that already have an account. This app is
+ * registration-gated: an unregistered number is refused with NOT_REGISTERED so
+ * the client can send the user to sign up first. (This deliberately reveals
+ * whether a number is registered, which is the intended product behaviour here.)
  */
 async function requestOtp(phone) {
-  const result = await otpService.requestOtp(phone);
+  const existing = await prisma.user.findFirst({
+    where: { phone, role: { in: ['USER', 'DRIVER'] } },
+    select: { id: true },
+  });
+  if (!existing) {
+    throw ApiError.notFound(
+      'No account found for this number. Please register first.',
+      'NOT_REGISTERED',
+    );
+  }
 
-  // Deliberately does NOT reveal whether the account exists.
-  return {
-    ...result,
-    message: 'If the number is valid, a verification code has been sent',
-  };
+  const result = await otpService.requestOtp(phone);
+  return { ...result, message: 'A verification code has been sent' };
 }
 
 /* ------------------------------------------------------------------ *
  * Verify → log in or sign up
  * ------------------------------------------------------------------ */
 
-async function verifyAndLogin({ phone, code, name }, meta = {}) {
+async function verifyAndLogin({ phone, code }, meta = {}) {
   // Throws on wrong/expired/locked. Consumes the code on success.
   await otpService.verifyOtp(phone, code);
 
-  let user = await prisma.user.findFirst({
+  const user = await prisma.user.findFirst({
     where: { phone, role: { in: ['USER', 'DRIVER'] } },
     orderBy: { createdAt: 'asc' },
   });
 
-  let isNewAccount = false;
-
+  // OTP no longer creates accounts. A verified code proves control of the
+  // number, but without an existing account there is nothing to log in to — the
+  // user must register (name + email + mobile) first.
   if (!user) {
-    // ---- first-time signup ----
-    // A random password is stored so the column stays NOT NULL and no one can
-    // log in with a guessable value. The user authenticates by OTP; if they
-    // later want a password they go through a reset flow.
-    const randomPassword = require('crypto').randomBytes(32).toString('base64');
-    const bcrypt = require('bcryptjs');
-
-    // Placeholder email keeps the unique (email, role) constraint satisfiable
-    // for phone-first accounts. Replaced when the user supplies a real one.
-    const placeholderEmail = `phone_${phone}@placeholder.local`;
-
-    try {
-      user = await prisma.user.create({
-        data: {
-          name: (name || '').trim() || `User ${phone.slice(-4)}`,
-          email: placeholderEmail,
-          phone,
-          password: await bcrypt.hash(randomPassword, 12),
-          role: 'USER',            // hard-coded — never from input
-        },
-      });
-
-      // Every phone-first account is a customer.
-      await prisma.customer.create({
-        data: { userId: user.id, accountType: 'RETAIL' },
-      });
-
-      isNewAccount = true;
-    } catch (err) {
-      // Two simultaneous verifications for the same new number: one wins, the
-      // other reads the row the winner created.
-      if (err.code === 'P2002') {
-        user = await prisma.user.findFirst({ where: { phone } });
-        if (!user) throw err;
-      } else {
-        throw err;
-      }
-    }
+    throw ApiError.notFound(
+      'No account found for this number. Please register first.',
+      'NOT_REGISTERED',
+    );
   }
 
   if (!user.isActive) {
@@ -109,7 +84,7 @@ async function verifyAndLogin({ phone, code, name }, meta = {}) {
     },
   });
 
-  return { user: publicUser(user), accessToken, refreshToken, isNewAccount };
+  return { user: publicUser(user), accessToken, refreshToken };
 }
 
 module.exports = { requestOtp, verifyAndLogin };

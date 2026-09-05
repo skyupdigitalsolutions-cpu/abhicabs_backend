@@ -7,6 +7,7 @@
  */
 
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { prisma, isUniqueViolation } = require('../config/prisma');
 const tokens = require('../utils/tokens');
@@ -39,8 +40,12 @@ async function issueTokens(user, meta = {}) {
  * Register
  * ---------------------------------------------------------------- */
 
-async function register({ name, email, password, phone }, meta) {
-  const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+async function register({ name, email, phone }, meta) {
+  // Registration is passwordless — riders authenticate by OTP. The password
+  // column is non-null, so we store an unguessable random hash that nobody can
+  // ever log in with (there is no plaintext, so password login is impossible
+  // for these accounts by construction).
+  const hash = await bcrypt.hash(crypto.randomUUID(), BCRYPT_ROUNDS);
 
   let user;
   try {

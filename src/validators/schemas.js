@@ -44,11 +44,16 @@ const uuid = z.string().uuid('Invalid id');
 
 // Note: `role` is deliberately NOT accepted here. If it were, anyone could
 // register themselves as an admin. Admins are created by admins, or seeded.
+// Passwordless registration: name + email + mobile only. Phone is REQUIRED here
+// (unlike the shared optional `phone`) because it's the number the rider will
+// sign in with via OTP afterwards.
 const registerSchema = z.object({
   name,
   email,
-  password,
-  phone,
+  phone: z
+    .string()
+    .trim()
+    .regex(/^[0-9+\-\s()]{7,20}$/, 'Enter a valid phone number'),
 });
 
 const loginSchema = z.object({
