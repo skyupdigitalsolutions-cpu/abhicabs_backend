@@ -269,6 +269,7 @@ async function create(input, actor, meta = {}) {
       tripType: input.tripType,
       pickup: input.pickup,
       drop: input.drop,
+      stops: input.stops || [],
       pickupAt: input.pickupAt,
       returnAt: input.returnAt || null,
       waitingMinutes: input.waitingMinutes || 0,
@@ -312,7 +313,7 @@ async function create(input, actor, meta = {}) {
           dropAddress: quote.trip.drop.formattedAddress || input.drop?.address || 'Drop',
           dropLat: quote.trip.drop.lat,
           dropLng: quote.trip.drop.lng,
-          stops: input.stops || [],
+          stops: quote.trip.stops ?? (input.stops || []),
 
           pickupAt: new Date(input.pickupAt),
           returnAt: input.returnAt ? new Date(input.returnAt) : null,

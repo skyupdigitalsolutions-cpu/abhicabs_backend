@@ -215,6 +215,50 @@ async function getDistance(origin, destination, opts = {}) {
   }
 }
 
+/**
+ * Distance/duration for a multi-stop path: pickup → stop₁ → … → drop.
+ *
+ * Each consecutive leg is measured with getDistance(), so every leg is
+ * individually Redis-cached (TTL.DISTANCE) and reused across quotes — adding a
+ * stop only ever costs the ONE new leg it introduces; the rest come from Redis.
+ * A zero-length leg (a stop dropped on the previous point) is skipped rather
+ * than throwing SAME_LOCATION.
+ */
+async function getPathDistance(points, opts = {}) {
+  if (!Array.isArray(points) || points.length < 2) {
+    throw ApiError.badRequest('At least a pickup and drop are required', 'INVALID_COORDINATES');
+  }
+
+  let distanceKm = 0;
+  let durationMin = 0;
+  let estimated = false;
+  let allCached = true;
+  const providers = new Set();
+
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    if (geo.haversineKm(a, b) < 0.05) continue; // skip a zero-length leg
+    // Sequential on purpose: cache hits are instant, and misses stay within the
+    // provider's rate budget instead of bursting one call per leg at once.
+    // eslint-disable-next-line no-await-in-loop
+    const leg = await getDistance(a, b, opts);
+    distanceKm += leg.distanceKm;
+    durationMin += leg.durationMin;
+    estimated = estimated || !!leg.estimated;
+    allCached = allCached && !!leg.cached;
+    providers.add(leg.provider);
+  }
+
+  return {
+    distanceKm: Math.round(distanceKm * 100) / 100,
+    durationMin: Math.round(durationMin),
+    provider: providers.size === 1 ? [...providers][0] : providers.size === 0 ? 'none' : 'mixed',
+    estimated,
+    cached: allCached,
+  };
+}
+
 function estimateDistance(origin, destination, reason) {
   metrics.fallbackEstimates += 1;
   const straightKm = geo.haversineKm(origin, destination);
@@ -408,6 +452,7 @@ module.exports = {
   TTL,
   keys,
   getDistance,
+  getPathDistance,
   getRoute,
   estimateDistance,
   geocode,

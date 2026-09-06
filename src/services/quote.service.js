@@ -128,6 +128,7 @@ async function getQuote(input) {
     tripType,
     pickup,
     drop,
+    stops = [],
     pickupAt,
     returnAt = null,
     waitingMinutes = 0,
@@ -161,6 +162,11 @@ async function getQuote(input) {
     resolveLocation(effectiveDrop, 'drop'),
   ]);
 
+  // Intermediate stops (ignored for HOURLY, which prices by package not route).
+  const stopPoints = isHourly
+    ? []
+    : await Promise.all((stops || []).map((s, i) => resolveLocation(s, `stop ${i + 1}`)));
+
   const serviceable = maps.isServiceable(pickupPoint, city);
   if (!serviceable.ok) {
     throw ApiError.badRequest(
@@ -173,9 +179,13 @@ async function getQuote(input) {
 
   // HOURLY prices from the package/hours, not the route, so we skip the distance
   // call entirely (which also avoids the SAME_LOCATION check when drop==pickup).
+  // With stops, the route is pickup → stop₁ → … → drop. getPathDistance sums the
+  // legs, each Redis-cached exactly like a plain pickup→drop lookup.
   const route = isHourly
     ? { distanceKm: 0, durationMin: 0, provider: 'none', estimated: false }
-    : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
+    : stopPoints.length
+      ? await maps.getPathDistance([pickupPoint, ...stopPoints, dropPoint], { maxKm: MAX_TRIP_KM })
+      : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
 
   // A round trip covers the route twice. The engine expects the TOTAL.
   const distanceKm = tripType === 'ROUND_TRIP' ? route.distanceKm * 2 : route.distanceKm;
@@ -232,6 +242,11 @@ async function getQuote(input) {
       cityName: city.name,
       pickup: { ...pickupPoint },
       drop: { ...dropPoint },
+      stops: stopPoints.map((p) => ({
+        lat: p.lat,
+        lng: p.lng,
+        address: p.formattedAddress || null,
+      })),
       pickupAt,
       returnAt,
       oneWayKm: route.distanceKm,
