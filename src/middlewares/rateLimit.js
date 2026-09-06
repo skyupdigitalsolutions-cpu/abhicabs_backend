@@ -232,6 +232,19 @@ const pingLimiter = make({
   msg: 'Ping rate exceeded.',
 });
 
+/**
+ * Public contact form. Unauthenticated, so keyed by IP. Tight window to stop a
+ * bot from flooding the inbox, but generous enough that a genuine visitor who
+ * mistypes and resubmits a few times is never blocked.
+ */
+const contactLimiter = make({
+  name: 'contact',
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  keyGenerator: (req) => req.ip,
+  msg: 'Too many messages from this network. Please try again later.',
+});
+
 module.exports = {
   FailoverStore,
   authLimiter,
@@ -241,4 +254,5 @@ module.exports = {
   apiLimiter,
   writeLimiter,
   pingLimiter,
+  contactLimiter,
 };

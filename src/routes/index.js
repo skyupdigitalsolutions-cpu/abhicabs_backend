@@ -5,7 +5,7 @@
  */
 
 const express = require('express');
-const { apiLimiter } = require('../middlewares/rateLimit');
+const { apiLimiter, contactLimiter } = require('../middlewares/rateLimit');
 
 const router = express.Router();
 
@@ -20,6 +20,7 @@ router.get('/', (req, res) => {
       fares: '/api/v1/fares',
       bookings: '/api/v1/bookings',
       payments: '/api/v1/payments',
+      contact: '/api/v1/contact',
       drivers: '/api/v1/admin/drivers',
       vehicles: '/api/v1/admin/vehicles',
       fleet: '/api/v1/admin/fleet',
@@ -43,6 +44,11 @@ router.use('/customers', apiLimiter, require('./customer.routes'));
 router.use('/fares', apiLimiter, require('./fare.routes'));
 router.use('/bookings', apiLimiter, require('./booking.routes'));
 router.use('/payments', apiLimiter, require('./payment.routes'));
+
+// Public website contact form (no auth) + the staff inbox that reads it.
+const contactRoutes = require('./contact.routes');
+router.use('/contact', contactLimiter, contactRoutes.publicRoutes);
+router.use('/admin/contacts', apiLimiter, contactRoutes.adminRoutes);
 
 router.use('/admin', apiLimiter, require('./admin.routes'));
 router.use('/admin/customers', apiLimiter, require('./adminCustomer.routes'));
