@@ -64,6 +64,7 @@ router.use('/admin/reports', apiLimiter, require('./report.routes'));
 const dispatchRoutes = require('./dispatch.routes');
 router.use('/admin/dispatch', apiLimiter, dispatchRoutes.ops);
 router.use('/driver/offers', apiLimiter, dispatchRoutes.driver);
+router.use('/driver/bookings', apiLimiter, require('./driverBooking.routes'));
 
 const locationRoutes = require('./location.routes');
 router.use('/driver/location', apiLimiter, locationRoutes.driver);

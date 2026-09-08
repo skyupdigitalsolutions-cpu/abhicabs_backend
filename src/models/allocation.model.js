@@ -21,6 +21,9 @@ const ALLOCATION_SELECT = {
   acceptedAt: true,
   declinedAt: true,
   releasedAt: true,
+  driverStartLat: true,
+  driverStartLng: true,
+  driverStartAt: true,
   createdAt: true,
   vehicle: {
     select: { id: true, registrationNumber: true, vehicleClass: true, makeModel: true, status: true },

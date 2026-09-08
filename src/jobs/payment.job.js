@@ -31,7 +31,7 @@ async function handle(job) {
       // The durable effect. Kept intentionally small and idempotent-by-nature;
       // heavier follow-on work (receipts, corporate credit reconciliation) is
       // enqueued to documents/analytics rather than done inline. Here we simply
-      // stamp the payment as post-processed so downstream reads can rely on it.
+      // stamp the payment as post-processed so downstream reads can rely on it.  
       const payment = await tx.payment.findUnique({
         where: { id: paymentId },
         select: { id: true, status: true, bookingId: true },

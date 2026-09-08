@@ -15,7 +15,16 @@ const uuid = z.string().uuid('Invalid id');
 
 const idParamSchema = z.object({ id: uuid });
 
+// Customer-facing cancel: the reason is REQUIRED (client requirement — stored
+// on the booking for reporting and future analysis). The service always records
+// the canceller as CUSTOMER, so cancelledByType is not accepted here.
 const cancelSchema = z.object({
+  reason: z.string().trim().min(3, 'Please tell us why you are cancelling').max(500),
+});
+
+// Staff/admin cancel: reason optional, and they may attribute the cancellation
+// to any party.
+const adminCancelSchema = z.object({
   reason: z.string().trim().min(3).max(500).optional().nullable(),
   // Staff only. A customer's cancellation is always recorded as CUSTOMER
   // regardless of what they send — the service overrides it.
@@ -60,6 +69,7 @@ const policyQuerySchema = z.object({
 module.exports = {
   idParamSchema,
   cancelSchema,
+  adminCancelSchema,
   completeSchema,
   recordDistanceSchema,
   transitionSchema,

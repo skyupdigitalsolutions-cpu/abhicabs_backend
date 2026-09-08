@@ -664,12 +664,15 @@ model Allocation {
   startsAt DateTime @map("starts_at")
   endsAt   DateTime @map("ends_at")
 
-  assignedById String?   @map("assigned_by_id") @db.Uuid
-  acceptedAt   DateTime? @map("accepted_at")
-  declinedAt   DateTime? @map("declined_at")
-  releasedAt   DateTime? @map("released_at")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  assignedById   String?   @map("assigned_by_id") @db.Uuid
+  acceptedAt     DateTime? @map("accepted_at")
+  declinedAt     DateTime? @map("declined_at")
+  releasedAt     DateTime? @map("released_at")
+  driverStartLat Decimal?  @map("driver_start_lat") @db.Decimal(10, 7)
+  driverStartLng Decimal?  @map("driver_start_lng") @db.Decimal(10, 7)
+  driverStartAt  DateTime? @map("driver_start_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
   vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Restrict)

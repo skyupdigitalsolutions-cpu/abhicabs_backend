@@ -303,7 +303,11 @@ async function applyCapture(tx, payment, parsed) {
   //    booking negative. Single atomic statement — no read-modify-write race.
   const booking = await tx.booking.findUnique({
     where: { id: payment.bookingId },
-    select: { estimatedFare: true, finalFare: true },
+    select: {
+      estimatedFare: true, finalFare: true,
+      status: true, paymentMode: true, bookingNumber: true,
+      customerId: true, pickupAt: true,
+    },
   });
   const total = M.round2(booking.finalFare != null ? booking.finalFare : booking.estimatedFare);
 
@@ -317,6 +321,26 @@ async function applyCapture(tx, payment, parsed) {
         "updated_at"   = NOW()
     WHERE "id" = ${payment.bookingId}::uuid
   `;
+
+  // 3. Auto-confirm on payment. A prepaid booking (FULL/PARTIAL) is confirmed
+  //    by its first successful capture — the advance for PARTIAL, the whole
+  //    amount for FULL. Guarded WHERE status='PENDING' so it fires exactly once
+  //    and never fights a concurrent transition. Pay-later (ZERO) was already
+  //    confirmed at creation and is skipped.
+  if (booking.status === 'PENDING' && booking.paymentMode !== 'ZERO') {
+    const { count } = await tx.booking.updateMany({
+      where: { id: payment.bookingId, status: 'PENDING' },
+      data: { status: 'CONFIRMED', confirmedAt: new Date() },
+    });
+    if (count > 0) {
+      emit(EVENTS.BOOKING_CONFIRMED, {
+        bookingId: payment.bookingId,
+        bookingNumber: booking.bookingNumber,
+        customerId: booking.customerId,
+        pickupAt: booking.pickupAt,
+      });
+    }
+  }
 
   // Fire-and-forget: Day 10 turns this into a customer receipt + admin alert.
   // Emitted AFTER the row change so a listener that reads the booking sees the
@@ -362,6 +386,120 @@ async function listForBooking(bookingId) {
   });
 }
 
+/* ------------------------------------------------------------------ *
+ * Driver cash collection (offline settlement)
+ * ------------------------------------------------------------------ */
+
+/**
+ * The assigned driver collects the outstanding balance in cash after the ride
+ * (pay-later ZERO trips, or the remaining half of a PARTIAL trip). Records a
+ * CASH payment + a BALANCE_RECEIVED ledger credit and zeroes the balance — all
+ * atomic, and idempotent via the unique ledger reference so a double-tap can't
+ * post twice.
+ *
+ * Authorisation: the caller must be the driver on an allocation for this
+ * booking. Allowed only at/after ARRIVED (i.e. after the trip has run).
+ */
+async function collectCash(bookingId, actor, meta = {}) {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: {
+      id: true, status: true, paymentMode: true,
+      advancePaid: true, finalFare: true, estimatedFare: true,
+      bookingNumber: true, customerId: true,
+    },
+  });
+  if (!booking) throw ApiError.notFound('Booking not found');
+
+  // This driver must actually be assigned to the trip.
+  const allocation = await prisma.allocation.findFirst({
+    where: { bookingId, driverId: actor.id },
+    select: { id: true },
+  });
+  if (!allocation) {
+    throw ApiError.forbidden('You are not assigned to this trip', 'NOT_YOUR_TRIP');
+  }
+
+  if (!['ARRIVED', 'COMPLETED'].includes(booking.status)) {
+    throw ApiError.conflict(
+      'Cash can only be collected once the trip has reached the drop-off',
+      'NOT_COLLECTABLE_YET'
+    );
+  }
+
+  const total = M.round2(booking.finalFare != null ? booking.finalFare : booking.estimatedFare);
+  const balance = M.round2(M.sub(M.dec(total), M.dec(booking.advancePaid)));
+  if (Number(balance) <= 0.009) {
+    throw ApiError.conflict('Nothing is due on this trip', 'NOTHING_DUE');
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const payment = await tx.payment.create({
+      data: {
+        bookingId,
+        provider: 'cash',
+        amount: balance.toFixed(2),
+        currency: 'INR',
+        method: 'CASH',
+        status: PAYMENT_STATUS.CAPTURED,
+        purpose: PAYMENT_PURPOSE.BALANCE,
+        paidAt: new Date(),
+        rawResponse: { offline: true, collectedByDriverId: actor.id },
+      },
+      select: { id: true },
+    });
+
+    try {
+      await tx.ledgerEntry.create({
+        data: {
+          bookingId,
+          entryType: 'BALANCE_RECEIVED',
+          direction: 'CREDIT',
+          amount: balance.toFixed(2),
+          currency: 'INR',
+          reference: `cash:${bookingId}`, // one cash settlement per booking
+          note: 'Balance collected in cash by driver',
+          meta: { paymentId: payment.id, driverId: actor.id },
+        },
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        throw ApiError.conflict('This trip has already been settled in cash', 'ALREADY_SETTLED');
+      }
+      throw err;
+    }
+
+    await tx.booking.update({
+      where: { id: bookingId },
+      data: { advancePaid: total.toFixed(2), balanceDue: '0.00' },
+    });
+
+    await audit.record(tx, {
+      actor,
+      action: 'CASH_COLLECTED',
+      entityType: 'booking',
+      entityId: bookingId,
+      after: { amount: balance.toFixed(2), method: 'CASH' },
+      meta,
+    });
+
+    emit(EVENTS.PAYMENT_RECEIVED, {
+      bookingId,
+      paymentId: payment.id,
+      purpose: PAYMENT_PURPOSE.BALANCE,
+      amount: balance.toFixed(2),
+    });
+
+    return {
+      bookingId,
+      bookingNumber: booking.bookingNumber,
+      collected: balance.toFixed(2),
+      balanceDue: '0.00',
+      method: 'CASH',
+    };
+  });
+}
+
 module.exports = {
   createOrder,
   applyGatewayEvent,
@@ -369,4 +507,5 @@ module.exports = {
   listForBooking,
   amountForPurpose,
   bookingTotal,
+  collectCash,
 };

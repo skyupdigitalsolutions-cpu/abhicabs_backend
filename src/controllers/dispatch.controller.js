@@ -60,6 +60,16 @@ exports.autoAssign = asyncHandler(async (req, res) => {
   });
 });
 
+exports.reassign = asyncHandler(async (req, res) => {
+  const alloc = await allocation.reassign(
+    req.params.bookingId,
+    { vehicleId: req.body.vehicleId, driverId: req.body.driverId || null },
+    req.user,
+    meta(req)
+  );
+  res.json({ success: true, message: 'Vehicle reassigned', data: { allocation: alloc } });
+});
+
 exports.getForBooking = asyncHandler(async (req, res) => {
   const alloc = await allocation.getForBooking(req.params.bookingId);
   res.json({ success: true, data: { allocation: alloc } });

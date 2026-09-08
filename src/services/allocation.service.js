@@ -325,6 +325,31 @@ async function accept(allocationId, driverUserId, meta = {}) {
   if (count === 0) {
     throw ApiError.conflict('Offer is no longer available to accept', 'OFFER_NOT_ACCEPTABLE');
   }
+
+  // Record where the driver was when they took the trip — their starting point,
+  // for ETA-to-pickup and analytics. Best-effort: a missing live fix (driver
+  // offline) or a Redis hiccup must never fail the acceptance, so it's wrapped
+  // and lazily required to avoid any import cycle.
+  try {
+    const { driverLocation } = require('./location.service');
+    const pos = await driverLocation(driverUserId);
+    if (pos && Number.isFinite(pos.lat) && Number.isFinite(pos.lng)) {
+      await prisma.allocation.update({
+        where: { id: allocationId },
+        data: {
+          driverStartLat: pos.lat.toFixed(7),
+          driverStartLng: pos.lng.toFixed(7),
+          driverStartAt: new Date(),
+        },
+      });
+    }
+  } catch (err) {
+    if (process.env.NODE_ENV !== 'production') {
+      // eslint-disable-next-line no-console
+      console.warn('[allocation] could not capture driver start location:', err.message);
+    }
+  }
+
   return prisma.allocation.findUnique({ where: { id: allocationId }, select: ALLOCATION_SELECT });
 }
 
@@ -448,10 +473,127 @@ async function getForBooking(bookingId) {
   });
 }
 
+/**
+ * Reassign an already-allocated booking to a different vehicle (and optionally
+ * driver). Releases the current allocation, holds the new vehicle, and records
+ * an audit entry with before/after + who/when. The DB exclusion constraint still
+ * referees vehicle/driver overlap, so a reassignment can't double-book a car.
+ *
+ * Allowed only while the booking is ALLOCATED or EN_ROUTE (before the customer
+ * has boarded). The booking's own status is left unchanged — this swaps the
+ * assignment under it, it does not move it backward.
+ */
+const REASSIGNABLE_STATUSES = ['ALLOCATED', 'EN_ROUTE'];
+
+async function reassign(bookingId, { vehicleId, driverId = null }, actor = null, meta = {}) {
+  if (!vehicleId) throw ApiError.badRequest('vehicleId is required', 'VEHICLE_REQUIRED');
+
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: {
+      id: true, status: true, vehicleClass: true, cityId: true, tripType: true,
+      pickupAt: true, returnAt: true, durationMinutes: true, bookingNumber: true,
+    },
+  });
+  if (!booking) throw ApiError.notFound('Booking not found');
+  if (!REASSIGNABLE_STATUSES.includes(booking.status)) {
+    throw ApiError.conflict(`A ${booking.status} booking cannot be reassigned`, 'BOOKING_NOT_REASSIGNABLE');
+  }
+
+  const current = await prisma.allocation.findFirst({
+    where: { bookingId, status: 'ACTIVE' },
+    select: { id: true, vehicleId: true, driverId: true },
+  });
+  if (!current) throw ApiError.conflict('Booking has no active allocation to reassign', 'NO_ACTIVE_ALLOCATION');
+
+  if (current.vehicleId === vehicleId && (current.driverId || null) === (driverId || null)) {
+    throw ApiError.conflict('That vehicle/driver is already assigned', 'NO_CHANGE');
+  }
+
+  const vehicle = await prisma.vehicle.findUnique({
+    where: { id: vehicleId },
+    select: { id: true, vehicleClass: true, status: true, isActive: true },
+  });
+  if (!vehicle) throw ApiError.notFound('Vehicle not found');
+  if (vehicle.vehicleClass !== booking.vehicleClass) {
+    throw ApiError.conflict(
+      `Vehicle is ${vehicle.vehicleClass}, booking needs ${booking.vehicleClass}`,
+      'VEHICLE_CLASS_MISMATCH'
+    );
+  }
+  if (!vehicle.isActive || vehicle.status === 'MAINTENANCE' || vehicle.status === 'INACTIVE') {
+    throw ApiError.conflict('Vehicle is not in service', 'VEHICLE_OUT_OF_SERVICE');
+  }
+
+  const window = computeHoldWindow(booking, {
+    bufferMinutes: env.dispatch.holdBufferMinutes,
+    defaultTripMinutes: env.dispatch.defaultTripMinutes,
+  });
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      // Release the current allocation and free its vehicle (unless we're
+      // keeping the same vehicle and only changing the driver).
+      await tx.allocation.update({
+        where: { id: current.id },
+        data: { status: 'RELEASED', releasedAt: new Date() },
+      });
+      if (current.vehicleId !== vehicleId) {
+        await tx.vehicle.update({ where: { id: current.vehicleId }, data: { status: 'AVAILABLE' } });
+      }
+
+      // Hold the new vehicle. The exclusion constraint fires here if it's taken.
+      const allocation = await tx.allocation.create({
+        data: {
+          bookingId, vehicleId, driverId, status: 'ACTIVE',
+          startsAt: window.startsAt, endsAt: window.endsAt,
+          assignedById: actor?.id || null,
+        },
+        select: ALLOCATION_SELECT,
+      });
+      await tx.vehicle.update({ where: { id: vehicleId }, data: { status: 'ASSIGNED' } });
+
+      await audit.record(tx, {
+        actor,
+        action: 'ALLOCATION_REASSIGNED',
+        entityType: 'allocation',
+        entityId: allocation.id,
+        before: {
+          allocationId: current.id,
+          vehicleId: current.vehicleId,
+          driverId: current.driverId,
+        },
+        after: {
+          bookingId,
+          vehicleId,
+          driverId,
+          reassignedAt: new Date().toISOString(),
+          reassignedBy: actor?.id || null,
+        },
+        meta,
+      });
+
+      return allocation;
+    });
+
+    cache.delByPrefix(cache.keys.vehiclesAvailablePrefix()).catch(() => {});
+    return result;
+  } catch (err) {
+    if (isExclusionViolation(err, 'excl_allocation_vehicle_overlap')) {
+      throw ApiError.conflict('Vehicle is already committed for this window', 'VEHICLE_UNAVAILABLE');
+    }
+    if (isExclusionViolation(err, 'excl_allocation_driver_overlap')) {
+      throw ApiError.conflict('Driver is already committed for this window', 'DRIVER_UNAVAILABLE');
+    }
+    throw err;
+  }
+}
+
 module.exports = {
   allocate,
   autoAssign,
   assignManually,
+  reassign,
   accept,
   decline,
   releaseVehicleForBooking,

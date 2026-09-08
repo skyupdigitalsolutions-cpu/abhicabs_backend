@@ -41,6 +41,11 @@ ops.post('/bookings/:bookingId/auto-assign', requirePermission('DISPATCH_MANAGE'
 ops.post('/bookings/:bookingId/assign', requirePermission('DISPATCH_MANAGE'),
   validate({ params: s.bookingIdParamSchema, body: s.assignSchema }), ctrl.assign);
 
+// Reassign — swap the vehicle (and optionally driver) on an already-allocated
+// booking. Logged to the audit trail with before/after + who/when.
+ops.patch('/bookings/:bookingId/reassign', requirePermission('DISPATCH_MANAGE'),
+  validate({ params: s.bookingIdParamSchema, body: s.assignSchema }), ctrl.reassign);
+
 ops.get('/bookings/:bookingId/allocation', requirePermission('DISPATCH_MANAGE'),
   validate({ params: s.bookingIdParamSchema }), ctrl.getForBooking);
 

@@ -136,7 +136,7 @@ async function settleAttempt(attemptId, { outcome, bookingId = null, failureReas
  * percentage rather than a flat figure because a flat advance makes no sense
  * across a Rs 800 local trip and a Rs 20,000 outstation booking.
  */
-const PARTIAL_PCT = Number(process.env.PARTIAL_PAYMENT_PCT || 25);
+const PARTIAL_PCT = Number(process.env.PARTIAL_PAYMENT_PCT || 50);
 
 function splitPayment(total, paymentMode) {
   const fare = M.dec(total);
@@ -304,7 +304,11 @@ async function create(input, actor, meta = {}) {
           corporateAccountId: billing.corporateAccountId,
           cityId: input.cityId,
           tripType: input.tripType,
-          status: 'PENDING',
+          // Pay-later (ZERO) has no upfront payment to confirm it, so it goes
+          // live immediately. Prepaid modes (FULL/PARTIAL) stay PENDING until
+          // the payment capture confirms them (see payment.service.applyCapture).
+          status: input.paymentMode === 'ZERO' ? 'CONFIRMED' : 'PENDING',
+          confirmedAt: input.paymentMode === 'ZERO' ? new Date() : null,
           vehicleClass: input.vehicleClass,
 
           pickupAddress: quote.trip.pickup.formattedAddress || input.pickup.address || 'Pickup',
@@ -382,6 +386,17 @@ async function create(input, actor, meta = {}) {
       tripType: booking.tripType,
       pickupAt: booking.pickupAt,
     });
+
+    // Pay-later was confirmed inline above — fire the same event a payment
+    // confirmation would, so the customer gets the "booking confirmed" notice.
+    if (input.paymentMode === 'ZERO') {
+      emit(EVENTS.BOOKING_CONFIRMED, {
+        bookingId: booking.id,
+        bookingNumber: booking.bookingNumber,
+        customerId,
+        pickupAt: booking.pickupAt,
+      });
+    }
 
     return {
       booking,

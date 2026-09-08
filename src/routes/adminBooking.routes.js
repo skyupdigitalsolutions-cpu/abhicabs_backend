@@ -98,6 +98,6 @@ router.get('/:id/cancellation-quote', requirePermission('BOOKING_CANCEL'),
 
 router.post('/:id/cancel', requirePermission('BOOKING_CANCEL'),
   idempotent('POST /admin/bookings/:id/cancel'),
-  validate({ params: ls.idParamSchema, body: ls.cancelSchema }), life.cancel);
+  validate({ params: ls.idParamSchema, body: ls.adminCancelSchema }), life.cancel);
 
 module.exports = router;
