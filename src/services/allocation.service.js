@@ -319,7 +319,7 @@ async function assignManually(bookingId, payload, actor = null, meta = {}) {
  */
 async function accept(allocationId, driverUserId, meta = {}) {
   const { count } = await prisma.allocation.updateMany({
-    where: { id: allocationId, driverId: driverUserId, status: 'ACTIVE', acceptedAt: null },
+    where: { id: allocationId, driverId: driverUserId, status: 'ACTIVE', acceptedAt: null, declinedAt: null },
     data: { acceptedAt: new Date() },
   });
   if (count === 0) {
@@ -363,7 +363,7 @@ async function decline(allocationId, driverUserId, meta = {}) {
   return prisma.$transaction(async (tx) => {
     const alloc = await tx.allocation.findUnique({
       where: { id: allocationId },
-      select: { id: true, driverId: true, status: true, bookingId: true, vehicleId: true },
+      select: { id: true, driverId: true, status: true, acceptedAt: true, bookingId: true, vehicleId: true },
     });
     if (!alloc) throw ApiError.notFound('Allocation not found');
     if (alloc.driverId !== driverUserId) {
@@ -371,6 +371,12 @@ async function decline(allocationId, driverUserId, meta = {}) {
     }
     if (alloc.status !== 'ACTIVE') {
       throw ApiError.conflict('Offer is no longer active', 'OFFER_NOT_ACTIVE');
+    }
+    // Accept and decline are mutually exclusive: once accepted, this is no longer
+    // a decline. Dropping an accepted trip must go through the explicit cancel /
+    // reassign flow, not a silent release that leaves both timestamps set.
+    if (alloc.acceptedAt) {
+      throw ApiError.conflict('You have already accepted this trip', 'ALREADY_ACCEPTED');
     }
 
     await releaseInTx(tx, alloc, 'declined', meta);

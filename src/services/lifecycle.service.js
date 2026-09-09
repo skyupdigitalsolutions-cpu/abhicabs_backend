@@ -74,8 +74,15 @@ const TRANSITIONS = Object.freeze({
     allowDriver: true,              // the driver marks themselves en route
     label: 'marked en route',
   },
-  ONGOING: {
+  REACHED: {
     from: ['EN_ROUTE'],
+    stamp: 'reachedAt',            // <-- driver arrived AT THE PICKUP point
+    permission: 'DISPATCH_MANAGE',
+    allowDriver: true,             // the driver marks arrival at the pickup
+    label: 'reached the pickup point',
+  },
+  ONGOING: {
+    from: ['EN_ROUTE', 'REACHED'], // reaching the pickup first is optional but recorded
     stamp: 'startedAt',
     permission: 'DISPATCH_MANAGE',
     allowDriver: true,
@@ -223,6 +230,29 @@ async function markAllocated(bookingId, actor, meta) {
 
 async function markEnRoute(bookingId, actor, meta) {
   return transition(bookingId, 'EN_ROUTE', actor, { meta });
+}
+
+/**
+ * EN_ROUTE -> REACHED. The driver has arrived AT THE PICKUP point (distinct from
+ * ARRIVED, which is the destination). Stamps bookings.reached_at and writes a
+ * durable `reached` TripEvent with the pickup-arrival location + time.
+ */
+async function markReached(bookingId, actor, meta, { lat = null, lng = null } = {}) {
+  const booking = await transition(bookingId, 'REACHED', actor, { meta });
+
+  try {
+    await tripService.recordReached(bookingId, { lat, lng });
+  } catch (err) {
+    console.error('[trip] failed to record reached event:', err.message);
+  }
+
+  emit(EVENTS.BOOKING_STATUS_CHANGED, {
+    bookingId,
+    bookingNumber: booking.bookingNumber,
+    status: 'REACHED',
+  });
+
+  return booking;
 }
 
 async function startTrip(bookingId, actor, meta, { lat = null, lng = null, odometerKm = null } = {}) {
@@ -540,6 +570,7 @@ module.exports = {
   confirm,
   markAllocated,
   markEnRoute,
+  markReached,
   startTrip,
   markArrived,
   completeTrip,

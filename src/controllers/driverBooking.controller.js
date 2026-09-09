@@ -10,10 +10,54 @@
 const paymentService = require('../services/payment.service');
 const tripService = require('../services/trip.service');
 const storageService = require('../services/storage.service');
+const lifecycleService = require('../services/lifecycle.service');
+const locationService = require('../services/location.service');
 const { prisma } = require('../config/prisma');
 const { asyncHandler, ApiError } = require('../utils/helpers');
 
 const meta = (req) => ({ ip: req.ip || '', userAgent: req.get('user-agent') || '' });
+
+/** Shared: the caller must be the driver on an allocation for this booking. */
+async function assertDriverOnBooking(bookingId, driverUserId) {
+  const allocation = await prisma.allocation.findFirst({
+    where: { bookingId, driverId: driverUserId },
+    orderBy: { createdAt: 'desc' },
+    select: { vehicleId: true },
+  });
+  if (!allocation) {
+    throw ApiError.forbidden('You are not assigned to this trip', 'NOT_YOUR_TRIP');
+  }
+  return allocation;
+}
+
+/**
+ * POST /driver/bookings/:bookingId/reached
+ * The driver arrived AT THE PICKUP point. Stamps bookings.reached_at (via the
+ * REACHED transition) and records a `reached` trip event with the driver's
+ * live location. Requires the trip to be EN_ROUTE.
+ */
+exports.recordReached = asyncHandler(async (req, res) => {
+  const { bookingId } = req.params;
+  await assertDriverOnBooking(bookingId, req.user.id);
+
+  // Best-effort live location for the event (never blocks the milestone).
+  let lat = null;
+  let lng = null;
+  try {
+    const pos = await locationService.driverLocation(req.user.id);
+    if (pos && Number.isFinite(pos.lat) && Number.isFinite(pos.lng)) {
+      lat = pos.lat;
+      lng = pos.lng;
+    }
+  } catch (_e) { /* ignore */ }
+
+  const booking = await lifecycleService.markReached(bookingId, req.user, meta(req), { lat, lng });
+  res.json({
+    success: true,
+    message: 'Marked reached at pickup',
+    data: { bookingId, status: booking.status, reachedAt: booking.reachedAt },
+  });
+});
 
 exports.collectCash = asyncHandler(async (req, res) => {
   const result = await paymentService.collectCash(req.params.bookingId, req.user, meta(req));

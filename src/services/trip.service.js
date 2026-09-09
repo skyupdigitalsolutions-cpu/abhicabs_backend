@@ -191,8 +191,26 @@ async function recordOdometer(bookingId, { odometerKm, vehicleId, photoUrl = nul
   });
 }
 
+/**
+ * The driver reached the PICKUP point. One durable TripEvent capturing where and
+ * when — the pickup-arrival breadcrumb (distinct from the `arrived` at drop-off).
+ */
+async function recordReached(bookingId, { lat = null, lng = null } = {}) {
+  return prisma.tripEvent.create({
+    data: {
+      bookingId,
+      eventType: 'reached',
+      lat: lat != null ? Number(lat).toFixed(7) : null,
+      lng: lng != null ? Number(lng).toFixed(7) : null,
+      note: 'Driver reached the pickup point',
+    },
+    select: { id: true, occurredAt: true },
+  });
+}
+
 module.exports = {
   recordStart,
+  recordReached,
   recordEnd,
   recordOdometer,
   maybeCheckpoint,

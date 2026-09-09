@@ -71,6 +71,7 @@ enum BookingStatus {
   CONFIRMED
   ALLOCATED
   EN_ROUTE
+  REACHED // <-- add this line
   ONGOING
   ARRIVED
   COMPLETED
@@ -583,6 +584,7 @@ model Booking {
   meta            Json    @default("{}")
 
   confirmedAt DateTime? @map("confirmed_at")
+  reachedAt   DateTime? @map("reached_at")
   startedAt   DateTime? @map("started_at")
   arrivedAt   DateTime? @map("arrived_at")
   completedAt DateTime? @map("completed_at")

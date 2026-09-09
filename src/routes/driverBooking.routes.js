@@ -20,6 +20,13 @@ const router = express.Router();
 
 router.use(requireAuth, requireRole('DRIVER'));
 
+// POST /api/v1/driver/bookings/:bookingId/reached  — driver arrived at pickup
+router.post(
+  '/:bookingId/reached',
+  validate({ params: s.bookingIdParamSchema }),
+  ctrl.recordReached
+);
+
 // POST /api/v1/driver/bookings/:bookingId/collect-cash
 router.post(
   '/:bookingId/collect-cash',
