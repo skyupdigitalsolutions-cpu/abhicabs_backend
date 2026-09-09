@@ -12,6 +12,13 @@ const idParamSchema = z.object({ id: uuid });
 
 const bookingIdParamSchema = z.object({ bookingId: uuid });
 
+// Driver submits the final odometer reading after the trip. photoUrl optional
+// (odometer-photo upload is a separate feature; when present it's a stored ref).
+const odometerSubmitSchema = z.object({
+  odometerKm: z.coerce.number().int().min(0).max(100000000),
+  photoUrl: z.string().trim().max(500).url().optional(),
+});
+
 const providerParamSchema = z.object({
   provider: z.enum(['mock', 'razorpay']),
 });
@@ -35,6 +42,7 @@ const simulateWebhookSchema = z.object({
 module.exports = {
   idParamSchema,
   bookingIdParamSchema,
+  odometerSubmitSchema,
   providerParamSchema,
   createOrderSchema,
   simulateWebhookSchema,

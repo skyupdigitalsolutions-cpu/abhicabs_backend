@@ -13,6 +13,7 @@ const express = require('express');
 const ctrl = require('../controllers/driverBooking.controller');
 const { validate } = require('../middlewares/validate');
 const { requireAuth, requireRole } = require('../middlewares/auth');
+const { uploadSingle } = require('../middlewares/upload');
 const s = require('../validators/payment.schemas');
 
 const router = express.Router();
@@ -24,6 +25,16 @@ router.post(
   '/:bookingId/collect-cash',
   validate({ params: s.bookingIdParamSchema }),
   ctrl.collectCash
+);
+
+// POST /api/v1/driver/bookings/:bookingId/odometer  — final reading after trip.
+// Accepts multipart with an optional `photo` file (uploaded to storage), plus
+// odometerKm. multer runs before validate so text fields land in req.body.
+router.post(
+  '/:bookingId/odometer',
+  uploadSingle('photo'),
+  validate({ params: s.bookingIdParamSchema, body: s.odometerSubmitSchema }),
+  ctrl.recordOdometer
 );
 
 module.exports = router;

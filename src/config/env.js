@@ -202,6 +202,30 @@ const env = {
   },
 
   /* ---------------- Notifications (WhatsApp / SMS) ---------------- */
+  /* ---------------- File/image storage (Cloudinary) ---------------- */
+  storage: {
+    // mock | cloudinary
+    //
+    // Defaults to mock: no account, no network. The mock returns a deterministic
+    // fake URL so the whole upload pipeline (route -> multer -> service ->
+    // trip_event/document) is exercised offline. Going live is one env var.
+    //
+    // Falls back to mock automatically if 'cloudinary' is selected without full
+    // credentials — a missing key should degrade uploads, not take the app down.
+    provider: process.env.STORAGE_PROVIDER || 'mock',
+    cloudinary: {
+      cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
+      apiKey: process.env.CLOUDINARY_API_KEY || '',
+      apiSecret: process.env.CLOUDINARY_API_SECRET || '',
+      // Base folder; per-entity subfolders are appended (odometer/, driver-docs/…).
+      folder: process.env.CLOUDINARY_FOLDER || 'abhicabs',
+    },
+    // Upload guardrails.
+    maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES || 8 * 1024 * 1024), // 8 MB
+    allowedMime: (process.env.UPLOAD_ALLOWED_MIME || 'image/jpeg,image/png,image/webp')
+      .split(',').map((s) => s.trim()).filter(Boolean),
+  },
+
   notify: {
     provider: (process.env.NOTIFY_PROVIDER || 'mock').toLowerCase(),
   },

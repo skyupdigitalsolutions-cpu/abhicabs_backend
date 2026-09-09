@@ -29,6 +29,7 @@ const { prisma } = require('../config/prisma');
 const redis = require('../config/redis');
 const env = require('../config/env');
 const { emit, EVENTS } = require('../lib/events');
+const { ApiError } = require('../utils/helpers');
 
 const checkpointGate = (bookingId) => `trip:cp:${bookingId}`;
 
@@ -133,9 +134,67 @@ async function onTripPing(bookingId, ping) {
   return maybeCheckpoint(bookingId, ping);
 }
 
+/**
+ * The assigned driver submits the final odometer reading AFTER the trip.
+ *
+ * Two things happen atomically:
+ *   1. a durable `odometer` trip_event is written (reading + optional photo
+ *      reference + when it was taken), so the booking keeps its own end-of-trip
+ *      reading; and
+ *   2. the vehicle's cumulative `odometer_km` is advanced — FORWARD ONLY. A
+ *      reading below the vehicle's current odometer is rejected as a typo (an
+ *      odometer never goes backwards).
+ *
+ * The caller (driver controller) has already verified the driver owns the trip
+ * and passes the allocation's vehicleId.
+ */
+async function recordOdometer(bookingId, { odometerKm, vehicleId, photoUrl = null, photoPublicId = null, actorId = null } = {}) {
+  const reading = Number(odometerKm);
+  if (!Number.isFinite(reading) || reading < 0) {
+    throw ApiError.badRequest('A valid odometer reading is required', 'INVALID_ODOMETER');
+  }
+
+  return prisma.$transaction(async (tx) => {
+    if (vehicleId) {
+      const vehicle = await tx.vehicle.findUnique({
+        where: { id: vehicleId },
+        select: { odometerKm: true },
+      });
+      if (vehicle && reading < vehicle.odometerKm) {
+        throw ApiError.conflict(
+          `Reading ${reading} km is below the vehicle's current odometer (${vehicle.odometerKm} km)`,
+          'ODOMETER_BELOW_CURRENT'
+        );
+      }
+      if (vehicle && reading > vehicle.odometerKm) {
+        await tx.vehicle.update({ where: { id: vehicleId }, data: { odometerKm: reading } });
+      }
+    }
+
+    const event = await tx.tripEvent.create({
+      data: {
+        bookingId,
+        eventType: 'odometer',
+        odometerKm: reading,
+        note: 'Final odometer reading submitted by driver',
+        meta: {
+          photoUrl: photoUrl || null,
+          photoPublicId: photoPublicId || null,
+          submittedByDriverId: actorId || null,
+          submittedAt: new Date().toISOString(),
+        },
+      },
+      select: { id: true, odometerKm: true, occurredAt: true },
+    });
+
+    return { bookingId, vehicleId: vehicleId || null, odometerKm: reading, eventId: event.id, at: event.occurredAt };
+  });
+}
+
 module.exports = {
   recordStart,
   recordEnd,
+  recordOdometer,
   maybeCheckpoint,
   onTripPing,
   trail,
