@@ -14,13 +14,25 @@
 -- ----------------------------------------------------------------------------
 -- AIRPORT fares — normal distance fare + a flat airport surcharge (parking,
 -- entry toll, queueing). Uses the same base/per-km shape as ONE_WAY.
+--
+-- NO ALLOWANCES. Airport transfers are exempt from both the night allowance
+-- and the driver allowance (bata) — they pay the airport surcharge instead,
+-- and loading bata plus a night uplift on top would double-charge for the same
+-- short journey. The fare engine enforces this regardless of what is stored
+-- here (see ALLOWANCE_EXEMPT_TRIP_TYPES in fare.service.js), but the columns
+-- are seeded at 0 so the rate card reads honestly: nobody should look at an
+-- airport row and expect a night charge that will never be applied.
 -- ----------------------------------------------------------------------------
 INSERT INTO "fare_configs"
   ("city_id", "vehicle_class", "trip_type", "base_fare", "per_km", "per_minute",
    "minimum_fare", "cancellation_fee", "airport_surcharge",
-   "night_charge_pct", "night_start_hour", "night_end_hour", "effective_from")
+   "driver_allowance", "night_allowance", "night_charge_pct",
+   "night_start_hour", "night_start_minute", "night_end_hour", "night_end_minute",
+   "effective_from")
 SELECT c."id", v.cls, 'AIRPORT', v.base, v.km, v.min_rate, v.min_fare, v.cancel, v.surcharge,
-       10.00, 22, 6, TIMESTAMPTZ '2020-01-01 00:00:00+00' 
+       0, 0, 0,
+       21, 55, 6, 0,
+       TIMESTAMPTZ '2020-01-01 00:00:00+00'
 FROM "cities" c
 CROSS JOIN (VALUES
   ('hatchback',  350.00, 15.00, 1.50,  550.00,  50.00, 120.00),
@@ -41,20 +53,28 @@ WHERE c."name" = 'Bengaluru'
 -- chosen. Priced as (hours x hourly_rate) + (extra km beyond hours*km_per_hour
 -- at per_km). Fixed packages live in rental_packages below.
 -- ----------------------------------------------------------------------------
+-- Night window runs 21:55–06:00 and carries a FLAT allowance plus the 10%
+-- uplift. Bata is one day per rental (an overnight hire is booked as a round
+-- trip, which counts calendar days properly).
 INSERT INTO "fare_configs"
   ("city_id", "vehicle_class", "trip_type", "base_fare", "per_km", "per_minute",
    "minimum_fare", "cancellation_fee",
    "hourly_rate", "hourly_km_per_hour",
-   "night_charge_pct", "night_start_hour", "night_end_hour", "effective_from")
+   "driver_allowance", "night_allowance", "night_charge_pct",
+   "night_start_hour", "night_start_minute", "night_end_hour", "night_end_minute",
+   "effective_from")
 SELECT c."id", v.cls, 'HOURLY', 0, v.km, 0, v.min_fare, v.cancel,
-       v.hourly, 10, 10.00, 22, 6, TIMESTAMPTZ '2020-01-01 00:00:00+00' 
+       v.hourly, 10,
+       v.bata, v.night_flat, 10.00,
+       21, 55, 6, 0,
+       TIMESTAMPTZ '2020-01-01 00:00:00+00'
 FROM "cities" c
 CROSS JOIN (VALUES
-  ('hatchback',  12.00, 200.00,  50.00, 180.00),
-  ('sedan',      15.00, 250.00,  75.00, 220.00),
-  ('suv',        20.00, 350.00, 100.00, 300.00),
-  ('tempo',      28.00, 600.00, 200.00, 500.00)
-) AS v(cls, km, min_fare, cancel, hourly)
+  ('hatchback',  12.00, 200.00,  50.00, 180.00, 300.00, 250.00),
+  ('sedan',      15.00, 250.00,  75.00, 220.00, 400.00, 300.00),
+  ('suv',        20.00, 350.00, 100.00, 300.00, 500.00, 400.00),
+  ('tempo',      28.00, 600.00, 200.00, 500.00, 700.00, 500.00)
+) AS v(cls, km, min_fare, cancel, hourly, bata, night_flat)
 WHERE c."name" = 'Bengaluru'
   AND NOT EXISTS (
     SELECT 1 FROM "fare_configs" fc

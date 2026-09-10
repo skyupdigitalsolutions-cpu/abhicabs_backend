@@ -257,7 +257,7 @@ async function createInvoice(tx, booking, fare, isCorporate) {
       placeOfSupply: supplierState,
       hsnSac: env.billing.sacCode,
       lines: {
-        create: buildInvoiceLines(booking, gst.taxable),
+        create: buildInvoiceLines(booking, gst.taxable, fare),
       },
     },
     include: { lines: true },
@@ -265,39 +265,112 @@ async function createInvoice(tx, booking, fare, isCorporate) {
 }
 
 /**
- * Builds the invoice line(s) for a booking. Normally one "Cab service" line for
- * the whole taxable value. When the trip ran longer than quoted, the extra
- * distance is broken out as its OWN line so the customer can see exactly what
- * the surcharge was and why — e.g.
+ * Builds the invoice line(s) for a booking.
+ *
+ * The default is one "Cab service" line for the whole taxable value. Charges
+ * the customer is likely to QUERY are broken out onto their own lines — the
+ * night allowance, the driver allowance (bata), and any extra distance:
  *
  *   Cab service — booking ABH-2026-000123        ₹1,200.00
- *   Extra distance (8.0 km × ₹14.00/km)             ₹112.00
+ *   Night allowance (21:55–06:00)                  ₹338.00
+ *   Driver allowance / Bata (2 days × ₹400.00)     ₹800.00
+ *   Extra distance (8.0 km × ₹14.00/km)            ₹112.00
  *
- * The two lines always sum to the taxable value (the base line is the remainder
- * after the extra-distance line), so the invoice foots exactly.
+ * ---------------------------------------------------------------------------
+ * WHY THESE THREE AND NOT EVERY COMPONENT
+ * ---------------------------------------------------------------------------
+ * An invoice is not a fare breakdown. Itemising base, per-km, per-minute and
+ * return-empty turns a bill into a spreadsheet nobody reads. These three are
+ * different: they are the lines a customer does not expect. "Why is this ₹338
+ * more than the app quoted?" is a support ticket if the invoice is silent and
+ * a non-event if the invoice says "Night allowance (21:55–06:00)". The full
+ * component-level breakdown still lives on booking.fareBasis for disputes.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE AMOUNTS ARE SCALED
+ * ---------------------------------------------------------------------------
+ * Fares are GST-INCLUSIVE, so on a TAX invoice the taxable value is the gross
+ * with the embedded tax backed out. The allowance figures on fareBasis are
+ * gross. Copying them straight onto a taxable-value invoice would overstate
+ * each line and force the "Cab service" remainder to absorb the difference —
+ * the invoice would still foot, but the individual lines would be wrong, and
+ * the night line would not match what the fare engine said it charged.
+ *
+ * Scaling every broken-out line by taxable/gross keeps each line a genuine
+ * taxable value. On a retail NON_TAX invoice the ratio is exactly 1, so
+ * nothing changes there.
+ *
+ * The "Cab service" line is always the REMAINDER, so whatever rounding falls
+ * out of the scaling lands in one place and the lines sum to the taxable value
+ * to the paisa.
  */
-function buildInvoiceLines(booking, taxable) {
-  const extra = booking.meta && booking.meta.extraDistance;
-  const extraCharge = extra ? M.dec(extra.extraCharge ?? 0) : M.dec(0);
+function buildInvoiceLines(booking, taxable, gross) {
+  const taxableValue = M.round2(taxable);
 
-  // No extra distance → the single, original line, unchanged.
-  if (!extra || !extraCharge.greaterThan(0)) {
-    return [
-      {
-        bookingId: booking.id,
-        description: `Cab service — booking ${booking.bookingNumber}`,
-        quantity: '1',
-        unitPrice: M.round2(taxable).toFixed(2),
-        amount: M.round2(taxable).toFixed(2),
-      },
-    ];
+  // Gross → taxable ratio. Guard the zero-fare case rather than dividing by it.
+  const grossValue = M.round2(gross ?? taxable);
+  const ratio = M.isPositive(grossValue) ? M.div(taxableValue, grossValue) : M.dec(1);
+  const scaled = (amount) => M.round2(M.mul(M.dec(amount ?? 0), ratio));
+
+  // The frozen quote. booking.service stores it at fareBasis.components; fall
+  // back to the top level for any older row written before that nesting.
+  const fareBasis = booking.fareBasis || {};
+  const quote = fareBasis.components || fareBasis;
+  const quoteMeta = quote.meta || {};
+  const snapshot = quote.configSnapshot || {};
+
+  const lines = [];
+
+  /* --- night allowance ------------------------------------------- */
+  const night = scaled(quote.night);
+  if (M.isPositive(night)) {
+    // The window is read from the FROZEN snapshot, not the live rate card: an
+    // invoice reprinted after the night window moves must still describe the
+    // window that was actually applied to this trip.
+    const window = snapshot.nightWindow || quoteMeta.nightWindow || null;
+    lines.push({
+      bookingId: booking.id,
+      description: window ? `Night allowance (${window})` : 'Night allowance',
+      quantity: '1',
+      unitPrice: night.toFixed(2),
+      amount: night.toFixed(2),
+    });
   }
 
-  // Base line is the taxable value MINUS the extra-distance charge, so the two
-  // lines sum back to the taxable total exactly.
-  const baseAmount = M.round2(M.sub(taxable, extraCharge));
-  const extraKm = M.toStr(extra.extraKm ?? 0);
-  const perKm = M.toStr(extra.perKm ?? 0);
+  /* --- driver allowance (bata) ----------------------------------- */
+  const bata = scaled(quote.bata);
+  if (M.isPositive(bata)) {
+    const days = Number(quoteMeta.days ?? 1);
+    const perDay = snapshot.driverAllowance ? M.toStr(snapshot.driverAllowance) : null;
+    const detail =
+      days > 1 && perDay ? ` (${days} days × ₹${perDay})` : perDay ? ` (₹${perDay})` : '';
+
+    lines.push({
+      bookingId: booking.id,
+      description: `Driver allowance / Bata${detail}`,
+      quantity: String(days),
+      unitPrice: perDay ? M.round2(M.div(bata, days)).toFixed(2) : bata.toFixed(2),
+      amount: bata.toFixed(2),
+    });
+  }
+
+  /* --- extra distance -------------------------------------------- */
+  const extra = booking.meta && booking.meta.extraDistance;
+  const extraCharge = extra ? scaled(extra.extraCharge) : M.dec(0);
+  if (extra && M.isPositive(extraCharge)) {
+    const extraKm = M.toStr(extra.extraKm ?? 0);
+    lines.push({
+      bookingId: booking.id,
+      description: `Extra distance (${extraKm} km × ₹${M.toStr(extra.perKm ?? 0)}/km)`,
+      quantity: extraKm,
+      unitPrice: M.toStr(extra.perKm ?? 0),
+      amount: extraCharge.toFixed(2),
+    });
+  }
+
+  /* --- the base line is whatever is left -------------------------- */
+  const brokenOut = lines.reduce((acc, l) => M.add(acc, M.dec(l.amount)), M.dec(0));
+  const baseAmount = M.round2(M.sub(taxableValue, brokenOut));
 
   return [
     {
@@ -307,13 +380,7 @@ function buildInvoiceLines(booking, taxable) {
       unitPrice: baseAmount.toFixed(2),
       amount: baseAmount.toFixed(2),
     },
-    {
-      bookingId: booking.id,
-      description: `Extra distance (${extraKm} km × ₹${perKm}/km)`,
-      quantity: extraKm,
-      unitPrice: perKm,
-      amount: M.round2(extraCharge).toFixed(2),
-    },
+    ...lines,
   ];
 }
 
@@ -483,4 +550,5 @@ module.exports = {
   // exported for tests
   financialYear,
   splitGstInclusive,
+  buildInvoiceLines,
 };

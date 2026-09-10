@@ -26,20 +26,53 @@
  *   2. distance charge     billableKm x perKm
  *   3. time charge         durationMin x perMinute        (one-way only)
  *   4. return-empty        % of distance charge           (one-way only)
- *   5. driver allowance    bata x days                    (round trip only)
+ *   5. driver allowance    bata x days                    (NOT airport)
  *   6. waiting charge      chargeable hours x rate        (any trip type)
- *   7. night charge        % of (base + distance) only
+ *   7. night allowance     flat + % of (base + distance)  (NOT airport)
+ *   7b. airport surcharge  flat                           (airport only)
  *   8. surge               multiplies the subtotal, bounded by config
  *   9. minimum fare floor  applied LAST
  *
- * Night charge deliberately excludes bata and waiting: those are fixed
+ * The night percentage deliberately excludes bata and waiting: those are fixed
  * allowances, not distance-driven, and uplifting them would overcharge.
  * The minimum-fare floor is last so it is a true floor on what is payable.
+ *
+ * AIRPORT is exempt from steps 5 and 7 — it pays the airport surcharge at 7b
+ * instead. See ALLOWANCE_EXEMPT_TRIP_TYPES for why that is enforced here
+ * rather than by zeroing the rate card.
  */
 
 const M = require('../lib/money');
 
 const DEFAULT_TIMEZONE = 'Asia/Kolkata';
+
+/**
+ * Trip types that never attract the night allowance or the driver allowance.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS ENFORCED IN CODE, NOT JUST IN THE RATE CARD
+ * ---------------------------------------------------------------------------
+ * Airport transfers are priced as a flat-ish transfer plus an airport
+ * surcharge; loading bata and a night uplift on top would double-charge for
+ * the same short journey, and airport fares are the ones customers compare
+ * most closely against competitors.
+ *
+ * Zeroing driver_allowance and night_charge_pct on the AIRPORT rate rows would
+ * be enough TODAY. It is not enough tomorrow: rate cards are edited by ops
+ * through SQL, a new city gets seeded by copying an existing row, and the
+ * moment somebody copies a ONE_WAY row into an AIRPORT slot the exemption is
+ * silently gone and every airport fare is wrong until a customer complains.
+ *
+ * Keeping the rule here makes it a property of the product rather than of the
+ * data. The migration still zeroes the airport rows so the rate card reads
+ * honestly, but the engine does not depend on that having been done.
+ */
+const ALLOWANCE_EXEMPT_TRIP_TYPES = new Set(['AIRPORT']);
+
+/** Is this trip type exempt from the night and driver allowances? */
+function isAllowanceExempt(tripType) {
+  return ALLOWANCE_EXEMPT_TRIP_TYPES.has(tripType);
+}
 
 /* ------------------------------------------------------------------ *
  * Time helpers — all timezone-aware
@@ -128,27 +161,88 @@ function chargeableDays(pickupAt, returnAt, timeZone = DEFAULT_TIMEZONE) {
   return Math.max(1, days);
 }
 
+/* ------------------------------------------------------------------ *
+ * The night window
+ * ------------------------------------------------------------------ */
+
 /**
- * Does an hour fall inside the night window?
- *
- * Handles the wrap across midnight: a window of 22:00-06:00 has start > end, so
- * "inside" means hour >= 22 OR hour < 6. Treating it as a simple range would
- * make the window match nothing at all.
+ * Minutes elapsed since local midnight. The whole night window is compared in
+ * this single unit so a boundary like 21:55 is one number (1315) rather than an
+ * hour and a minute that have to be compared in the right order.
  */
-function isNightHour(hour, startHour, endHour) {
-  if (startHour === endHour) return false;
-  if (startHour < endHour) return hour >= startHour && hour < endHour;
-  return hour >= startHour || hour < endHour;
+function minutesOfDay(hour, minute = 0) {
+  return Number(hour) * 60 + Number(minute);
 }
 
 /**
- * A trip attracts the night charge if EITHER end falls in the window,
- * evaluated in the CITY's timezone rather than the server's.
+ * Reads the night window off a fare config, in minutes-of-day.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY MINUTES AND NOT HOURS
+ * ---------------------------------------------------------------------------
+ * ABHICABS' night band starts at 21:55, not on the hour. With hour-only
+ * columns the window could only be 21:00 (charging night on 55 minutes of
+ * ordinary evening trips) or 22:00 (missing the 21:55-22:00 band). Neither
+ * matches the policy, and the error is silent — the fare is simply wrong, with
+ * nothing in the breakdown to show it.
+ *
+ * Defaults are 21:55 -> 06:00 so a config row that predates the minute columns
+ * still lands on the intended policy rather than on midnight.
  */
-function touchesNight(pickupAt, returnAt, startHour, endHour, timeZone = DEFAULT_TIMEZONE) {
-  const hours = [zonedParts(pickupAt, timeZone).hour];
-  if (returnAt) hours.push(zonedParts(returnAt, timeZone).hour);
-  return hours.some((h) => isNightHour(h, startHour, endHour));
+function nightWindowFromConfig(config = {}) {
+  return {
+    startMin: minutesOfDay(config.nightStartHour ?? 21, config.nightStartMinute ?? 55),
+    endMin: minutesOfDay(config.nightEndHour ?? 6, config.nightEndMinute ?? 0),
+  };
+}
+
+/** "21:55–06:00" — for the breakdown note and the invoice line. */
+function formatNightWindow({ startMin, endMin }) {
+  const hhmm = (m) =>
+    `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  return `${hhmm(startMin)}\u2013${hhmm(endMin)}`;
+}
+
+/**
+ * Does a local time-of-day fall inside the night window?
+ *
+ * Handles the wrap across midnight: a window of 21:55-06:00 has start > end, so
+ * "inside" means at-or-after 21:55 OR before 06:00. Treating it as a simple
+ * range would make the window match nothing at all.
+ *
+ * The start boundary is INCLUSIVE and the end boundary EXCLUSIVE: a 21:55
+ * pickup is night, a 06:00 pickup is not. That gives the window no gap and no
+ * overlap with the day rate, so no instant is ever billed twice or missed.
+ */
+function isNightMinute(mins, startMin, endMin) {
+  if (startMin === endMin) return false;
+  if (startMin < endMin) return mins >= startMin && mins < endMin;
+  return mins >= startMin || mins < endMin;
+}
+
+/**
+ * Back-compat wrapper for the old hour-granularity signature. Kept because it
+ * is part of the module's public surface; new code should use isNightMinute.
+ */
+function isNightHour(hour, startHour, endHour) {
+  return isNightMinute(minutesOfDay(hour), minutesOfDay(startHour), minutesOfDay(endHour));
+}
+
+/**
+ * A trip attracts the night allowance if EITHER end falls in the window,
+ * evaluated in the CITY's timezone rather than the server's.
+ *
+ * @param {{startMin:number,endMin:number}} window  from nightWindowFromConfig
+ */
+function touchesNight(pickupAt, returnAt, window, timeZone = DEFAULT_TIMEZONE) {
+  const at = (instant) => {
+    const { hour, minute } = zonedParts(instant, timeZone);
+    return minutesOfDay(hour, minute);
+  };
+
+  const stamps = [at(pickupAt)];
+  if (returnAt) stamps.push(at(returnAt));
+  return stamps.some((m) => isNightMinute(m, window.startMin, window.endMin));
 }
 
 /* ------------------------------------------------------------------ *
@@ -252,18 +346,52 @@ function computeHourlyFare(input, config) {
     }
   }
 
-  /* night charge on the core rental component */
-  let nightCharge = M.dec(0);
-  const nightPct = M.dec(config.nightChargePct ?? 0);
-  if (
-    nightPct.greaterThan(0) &&
-    touchesNight(pickupAt, returnAt, Number(config.nightStartHour ?? 22), Number(config.nightEndHour ?? 6), timeZone)
-  ) {
-    nightCharge = M.round2(M.pct(core, nightPct));
-    breakdown.push({ label: `Night charge (${M.toStr(nightPct)}%)`, amount: M.toStr(nightCharge) });
+  /* driver allowance (bata) — hourly rentals are never airport transfers, so
+   * the exemption cannot apply here; the check is kept anyway so the rule lives
+   * in exactly one place and a future exempt trip type is honoured everywhere.
+   *
+   * A rental is quoted for a block of hours on one day, so this is one day of
+   * bata. Overnight rentals are booked as ROUND_TRIP, which counts calendar
+   * days properly.
+   */
+  const exemptFromAllowances = isAllowanceExempt('HOURLY');
+
+  let bata = M.dec(0);
+  if (!exemptFromAllowances && M.dec(config.driverAllowance ?? 0).greaterThan(0)) {
+    bata = M.round2(M.dec(config.driverAllowance));
+    breakdown.push({
+      label: `Driver allowance (${M.toStr(config.driverAllowance)})`,
+      amount: M.toStr(bata),
+      note: 'Bata paid to the driver',
+    });
   }
 
-  const subtotal = M.sum([core, extraKmCharge, extraHourCharge, nightCharge]);
+  /* night allowance on the core rental component */
+  const nightWindow = nightWindowFromConfig(config);
+  const touchesNightWindow = touchesNight(pickupAt, returnAt, nightWindow, timeZone);
+
+  let nightCharge = M.dec(0);
+  const nightPct = M.dec(config.nightChargePct ?? 0);
+  const nightFlat = M.dec(config.nightAllowance ?? 0);
+  const nightIsChargeable =
+    touchesNightWindow && !exemptFromAllowances && (nightPct.greaterThan(0) || nightFlat.greaterThan(0));
+
+  if (nightIsChargeable) {
+    const pctPart = nightPct.greaterThan(0) ? M.round2(M.pct(core, nightPct)) : M.dec(0);
+    nightCharge = M.round2(M.add(nightFlat, pctPart));
+
+    const detail = [];
+    if (nightFlat.greaterThan(0)) detail.push(`flat ${M.toStr(nightFlat)}`);
+    if (nightPct.greaterThan(0)) detail.push(`${M.toStr(nightPct)}% of rental`);
+
+    breakdown.push({
+      label: 'Night allowance',
+      amount: M.toStr(nightCharge),
+      note: `Trip falls within ${formatNightWindow(nightWindow)} (${detail.join(' + ')})`,
+    });
+  }
+
+  const subtotal = M.sum([core, extraKmCharge, extraHourCharge, bata, nightCharge]);
 
   const surge = clampSurge(requestedSurge, config);
   const surgeAmount = surge.equals(1) ? M.dec(0) : M.round2(M.sub(M.mul(subtotal, surge), subtotal));
@@ -293,7 +421,7 @@ function computeHourlyFare(input, config) {
     distance: M.toStr(extraKmCharge),
     time: '0.00',
     returnEmpty: '0.00',
-    bata: '0.00',
+    bata: M.toStr(bata),
     waiting: '0.00',
     night: M.toStr(nightCharge),
     airport: '0.00',
@@ -306,6 +434,11 @@ function computeHourlyFare(input, config) {
       includedHours,
       includedKm,
       packageLabel: rentalPackage ? rentalPackage.label : null,
+      days: 1,
+      isNight: nightIsChargeable,
+      touchesNightWindow,
+      nightWindow: formatNightWindow(nightWindow),
+      allowancesExempt: exemptFromAllowances,
     },
     breakdown,
   };
@@ -351,6 +484,8 @@ function computeFare(input, config) {
 
   const isRoundTrip = tripType === 'ROUND_TRIP';
   const isAirport = tripType === 'AIRPORT';
+  // Airport transfers pay the airport surcharge instead of bata + night uplift.
+  const exemptFromAllowances = isAllowanceExempt(tripType);
   const breakdown = [];
 
   /* -- 1. billable distance ----------------------------------------
@@ -414,14 +549,25 @@ function computeFare(input, config) {
     });
   }
 
-  /* -- 5. driver allowance (round trip only) ------------------------ */
+  /* -- 5. driver allowance / bata (every trip type EXCEPT airport) -- *
+   *
+   * Per-day allowance for the driver being on duty. `days` is 1 for a one-way
+   * trip and one per CALENDAR day for a round trip, so the same line covers
+   * both without a special case.
+   *
+   * Airport transfers are exempt — see ALLOWANCE_EXEMPT_TRIP_TYPES.
+   */
 
   let bata = M.dec(0);
-  if (isRoundTrip && M.dec(config.driverAllowance ?? 0).greaterThan(0)) {
+  if (!exemptFromAllowances && M.dec(config.driverAllowance ?? 0).greaterThan(0)) {
     bata = M.round2(M.mul(config.driverAllowance, days));
     breakdown.push({
-      label: `Driver allowance (${days} day${days > 1 ? 's' : ''} x ${M.toStr(config.driverAllowance)})`,
+      label:
+        days > 1
+          ? `Driver allowance (${days} days x ${M.toStr(config.driverAllowance)})`
+          : `Driver allowance (${M.toStr(config.driverAllowance)})`,
       amount: M.toStr(bata),
+      note: 'Bata paid to the driver',
     });
   }
 
@@ -447,30 +593,54 @@ function computeFare(input, config) {
     }
   }
 
-  /* -- 7. night charge ---------------------------------------------- */
+  /* -- 7. night allowance (every trip type EXCEPT airport) ---------- *
+   *
+   * Two independent parts, either of which a city may leave at 0:
+   *   • a FLAT allowance for any trip touching the window (the usual shape of
+   *     "night bata" — the driver loses a night's sleep whether the trip is
+   *     8km or 80km, so a percentage of distance is the wrong instrument)
+   *   • a PERCENTAGE uplift on base + distance
+   *
+   * The percentage deliberately excludes bata and waiting: those are fixed
+   * allowances, not distance-driven, and uplifting them would overcharge.
+   *
+   * IMPORTANT: whether the trip is "at night" is decided BEFORE the exemption,
+   * so meta.isNight still reports the truth about the clock for an airport run
+   * at 2am. Only the money is exempt. Reporting that wants to know how many
+   * airport trips run overnight can still answer the question.
+   */
 
-  // Applied to base + distance ONLY. Bata and waiting are fixed allowances, not
-  // distance-driven, so uplifting them for a night departure would overcharge.
+  const nightWindow = nightWindowFromConfig(config);
+  const touchesNightWindow = touchesNight(pickupAt, returnAt, nightWindow, timeZone);
+
   let nightCharge = M.dec(0);
   const nightPct = M.dec(config.nightChargePct ?? 0);
-  const isNight =
-    nightPct.greaterThan(0) &&
-    touchesNight(
-      pickupAt,
-      returnAt,
-      Number(config.nightStartHour ?? 22),
-      Number(config.nightEndHour ?? 6),
-      timeZone
-    );
+  const nightFlat = M.dec(config.nightAllowance ?? 0);
+  const nightIsChargeable =
+    touchesNightWindow && !exemptFromAllowances && (nightPct.greaterThan(0) || nightFlat.greaterThan(0));
 
-  if (isNight) {
-    nightCharge = M.round2(M.pct(M.add(base, distanceCharge), nightPct));
+  if (nightIsChargeable) {
+    const pctPart = nightPct.greaterThan(0)
+      ? M.round2(M.pct(M.add(base, distanceCharge), nightPct))
+      : M.dec(0);
+    nightCharge = M.round2(M.add(nightFlat, pctPart));
+
+    // One line, not two: the customer cares that a night allowance applied and
+    // what it cost, not that it happens to be assembled from a flat part and a
+    // percentage part. The note carries the detail if anyone asks.
+    const detail = [];
+    if (nightFlat.greaterThan(0)) detail.push(`flat ${M.toStr(nightFlat)}`);
+    if (nightPct.greaterThan(0)) detail.push(`${M.toStr(nightPct)}% of base + distance`);
+
     breakdown.push({
-      label: `Night charge (${M.toStr(nightPct)}%)`,
+      label: 'Night allowance',
       amount: M.toStr(nightCharge),
-      note: `Between ${config.nightStartHour}:00 and ${config.nightEndHour}:00`,
+      note: `Trip falls within ${formatNightWindow(nightWindow)} (${detail.join(' + ')})`,
     });
   }
+
+  // Kept for meta/back-compat: did the MONEY apply?
+  const isNight = nightIsChargeable;
 
   /* -- 7b. airport surcharge (airport only) ------------------------- */
 
@@ -579,7 +749,20 @@ function computeFare(input, config) {
       durationMin: Number(durationMin),
       days,
       chargeableWaitMin,
+
+      // isNight = the night allowance was CHARGED.
+      // touchesNightWindow = the clock says night, regardless of whether it was
+      // charged. They differ for an airport trip at 2am, and keeping both means
+      // "why was there no night allowance?" is answerable from the frozen fare
+      // alone, without re-deriving anything.
       isNight,
+      touchesNightWindow,
+      nightWindow: formatNightWindow(nightWindow),
+      allowancesExempt: exemptFromAllowances,
+      allowancesExemptReason: exemptFromAllowances
+        ? `${tripType} trips do not attract night or driver allowance`
+        : null,
+
       surgeMultiplier: surge.toFixed(2),
       surgeWasClamped: !surge.equals(M.dec(requestedSurge ?? 1)),
       belowMinimumFare: belowMinimum,
@@ -603,9 +786,14 @@ function computeFare(input, config) {
       driverAllowance: M.toStr(config.driverAllowance ?? 0),
       waitingPerHour: M.toStr(config.waitingPerHour ?? 0),
       freeWaitingMin: Number(config.freeWaitingMin ?? 0),
+      nightAllowance: M.toStr(config.nightAllowance ?? 0),
       nightChargePct: M.toStr(config.nightChargePct ?? 0),
-      nightStartHour: Number(config.nightStartHour ?? 22),
+      nightStartHour: Number(config.nightStartHour ?? 21),
+      nightStartMinute: Number(config.nightStartMinute ?? 55),
       nightEndHour: Number(config.nightEndHour ?? 6),
+      nightEndMinute: Number(config.nightEndMinute ?? 0),
+      nightWindow: formatNightWindow(nightWindow),
+      allowanceExemptTripTypes: [...ALLOWANCE_EXEMPT_TRIP_TYPES],
       computedAt: new Date().toISOString(),
     },
   };
@@ -739,6 +927,12 @@ module.exports = {
   computeExtraDistanceCharge,
   chargeableDays,
   isNightHour,
+  isNightMinute,
+  minutesOfDay,
+  nightWindowFromConfig,
+  formatNightWindow,
   touchesNight,
+  isAllowanceExempt,
+  ALLOWANCE_EXEMPT_TRIP_TYPES,
   clampSurge,
 };

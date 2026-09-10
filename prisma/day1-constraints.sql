@@ -222,18 +222,24 @@ ON CONFLICT ("name", "state") DO NOTHING;
 
 
 -- ONE_WAY fares
+-- Bata and the night allowance apply to ONE_WAY as well as ROUND_TRIP.
+-- Night window is 21:55–06:00 (minute precision — the band does not start on
+-- the hour). AIRPORT is exempt from both; see seed-airport-hourly.sql.
 INSERT INTO "fare_configs"
   ("city_id", "vehicle_class", "trip_type", "base_fare", "per_km", "per_minute",
    "minimum_fare", "cancellation_fee", "return_empty_pct",
-   "night_charge_pct", "night_start_hour", "night_end_hour")
-SELECT c."id", v.cls, 'ONE_WAY', v.base, v.km, v.min_rate, v.min_fare, v.cancel, 40.00, 10.00, 22, 6
+   "driver_allowance", "night_allowance", "night_charge_pct",
+   "night_start_hour", "night_start_minute", "night_end_hour", "night_end_minute")
+SELECT c."id", v.cls, 'ONE_WAY', v.base, v.km, v.min_rate, v.min_fare, v.cancel, 40.00,
+       v.bata, v.night_flat, 10.00,
+       21, 55, 6, 0
 FROM "cities" c
 CROSS JOIN (VALUES
-  ('hatchback',  400.00, 14.00, 1.50,  600.00,  50.00),
-  ('sedan',      500.00, 18.00, 2.00,  800.00,  75.00),
-  ('suv',        700.00, 24.00, 2.50, 1200.00, 100.00),
-  ('tempo',     1200.00, 32.00, 3.00, 2000.00, 200.00)
-) AS v(cls, base, km, min_rate, min_fare, cancel)
+  ('hatchback',  400.00, 14.00, 1.50,  600.00,  50.00, 300.00, 250.00),
+  ('sedan',      500.00, 18.00, 2.00,  800.00,  75.00, 400.00, 300.00),
+  ('suv',        700.00, 24.00, 2.50, 1200.00, 100.00, 500.00, 400.00),
+  ('tempo',     1200.00, 32.00, 3.00, 2000.00, 200.00, 700.00, 500.00)
+) AS v(cls, base, km, min_rate, min_fare, cancel, bata, night_flat)
 WHERE c."name" = 'Bengaluru'
 ON CONFLICT DO NOTHING;
 
@@ -243,16 +249,19 @@ INSERT INTO "fare_configs"
   ("city_id", "vehicle_class", "trip_type", "base_fare", "per_km", "per_minute",
    "minimum_fare", "cancellation_fee", "min_km_per_day", "driver_allowance",
    "waiting_per_hour", "free_waiting_min",
-   "night_charge_pct", "night_start_hour", "night_end_hour")
+   "night_allowance", "night_charge_pct",
+   "night_start_hour", "night_start_minute", "night_end_hour", "night_end_minute")
 SELECT c."id", v.cls, 'ROUND_TRIP', v.base, v.km, 0, v.min_fare, v.cancel,
-       250, v.bata, v.wait, 30, 10.00, 22, 6
+       250, v.bata, v.wait, 30,
+       v.night_flat, 10.00,
+       21, 55, 6, 0
 FROM "cities" c
 CROSS JOIN (VALUES
-  ('hatchback',  400.00, 12.00,  700.00,  50.00, 300.00, 100.00),
-  ('sedan',      500.00, 15.00,  900.00,  75.00, 400.00, 120.00),
-  ('suv',        700.00, 20.00, 1400.00, 100.00, 500.00, 150.00),
-  ('tempo',     1200.00, 28.00, 2400.00, 200.00, 700.00, 200.00)
-) AS v(cls, base, km, min_fare, cancel, bata, wait)
+  ('hatchback',  400.00, 12.00,  700.00,  50.00, 300.00, 100.00, 250.00),
+  ('sedan',      500.00, 15.00,  900.00,  75.00, 400.00, 120.00, 300.00),
+  ('suv',        700.00, 20.00, 1400.00, 100.00, 500.00, 150.00, 400.00),
+  ('tempo',     1200.00, 28.00, 2400.00, 200.00, 700.00, 200.00, 500.00)
+) AS v(cls, base, km, min_fare, cancel, bata, wait, night_flat)
 WHERE c."name" = 'Bengaluru'
 ON CONFLICT DO NOTHING;
 

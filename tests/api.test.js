@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * tests/api.test.js
  *
@@ -12,11 +10,17 @@
  * running — the suite creates and deletes users.
  */
 
-const request = require('supertest');
-const { describe, it, expect, beforeAll, afterAll } = require('vitest');
+// ESM imports, not require(): vitest 2.x refuses to be loaded from a CommonJS
+// module, so `require('vitest')` fails at collection time and NO test in the
+// file runs. The source modules stay CommonJS — vite's interop imports them
+// fine — only the test file itself needs to be ESM.
+import request from 'supertest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
-const app = require('../src/app');
-const { prisma } = require('../src/config/prisma');
+import app from '../src/app.js';
+import prismaConfig from '../src/config/prisma.js';
+
+const { prisma } = prismaConfig;
 
 const ADMIN = { email: 'admin@example.com', password: 'Admin@12345' };
 const TEST_EMAIL = `test_${Date.now()}@example.com`;

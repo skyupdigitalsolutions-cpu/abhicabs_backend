@@ -286,15 +286,30 @@ model FareConfig {
   returnEmptyPct Decimal @default(0) @map("return_empty_pct") @db.Decimal(5, 2)
 
   // --- ROUND_TRIP only ---
-  minKmPerDay     Int     @default(0) @map("min_km_per_day")
-  driverAllowance Decimal @default(0) @map("driver_allowance") @db.Decimal(10, 2) // bata, per day
-  waitingPerHour  Decimal @default(0) @map("waiting_per_hour") @db.Decimal(10, 2)
-  freeWaitingMin  Int     @default(0) @map("free_waiting_min")
+  minKmPerDay    Int     @default(0) @map("min_km_per_day")
+  waitingPerHour Decimal @default(0) @map("waiting_per_hour") @db.Decimal(10, 2)
+  freeWaitingMin Int     @default(0) @map("free_waiting_min")
 
-  // --- night charge ---
-  nightChargePct Decimal @default(0) @map("night_charge_pct") @db.Decimal(5, 2)
-  nightStartHour Int     @default(22) @map("night_start_hour")
-  nightEndHour   Int     @default(6) @map("night_end_hour")
+  // --- driver allowance (bata) — ALL trip types except AIRPORT ---
+  // Per-day allowance paid to the driver for being on duty. One-way and hourly
+  // trips bill one day; a round trip bills one per CALENDAR day away.
+  // Airport transfers are exempt in code (see fare.service ALLOWANCE_EXEMPT_
+  // TRIP_TYPES), so the value here is ignored on an AIRPORT row.
+  driverAllowance Decimal @default(0) @map("driver_allowance") @db.Decimal(10, 2)
+
+  // --- night allowance — ALL trip types except AIRPORT ---
+  // Two independent parts, either of which may be 0:
+  //   nightAllowance  a FLAT rupee amount for a trip touching the night window
+  //   nightChargePct  a percentage uplift on (base + distance)
+  // The window is stored to MINUTE precision because ABHICABS' night band
+  // starts at 21:55, not on the hour. Storing only the hour would force the
+  // window to 21:00 or 22:00 and misprice every trip in between.
+  nightAllowance   Decimal @default(0) @map("night_allowance") @db.Decimal(10, 2)
+  nightChargePct   Decimal @default(0) @map("night_charge_pct") @db.Decimal(5, 2)
+  nightStartHour   Int     @default(21) @map("night_start_hour")
+  nightStartMinute Int     @default(55) @map("night_start_minute")
+  nightEndHour     Int     @default(6) @map("night_end_hour")
+  nightEndMinute   Int     @default(0) @map("night_end_minute")
 
   // --- AIRPORT only ---
   // A flat surcharge added on top of the normal distance fare for airport
