@@ -65,6 +65,8 @@ const dispatchRoutes = require('./dispatch.routes');
 router.use('/admin/dispatch', apiLimiter, dispatchRoutes.ops);
 router.use('/driver/offers', apiLimiter, dispatchRoutes.driver);
 router.use('/driver/bookings', apiLimiter, require('./driverBooking.routes'));
+// Driver self-service: own profile, documents, vehicle registration/claims.
+router.use('/driver/me', apiLimiter, require('./driverSelf.routes'));
 
 const locationRoutes = require('./location.routes');
 router.use('/driver/location', apiLimiter, locationRoutes.driver);

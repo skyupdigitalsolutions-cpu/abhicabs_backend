@@ -11,6 +11,7 @@ const express = require('express');
 
 const ctrl = require('../controllers/auth.controller');
 const otpCtrl = require('../controllers/otp.controller');
+const driverSelfCtrl = require('../controllers/driverSelf.controller');
 const { validate } = require('../middlewares/validate');
 const { requireAuth, attachPermissions } = require('../middlewares/auth');
 const {
@@ -22,6 +23,7 @@ const {
 
 const s = require('../validators/schemas');
 const otpSchemas = require('../validators/otp.schemas');
+const driverSelfSchemas = require('../validators/driverSelf.schemas');
 
 const router = express.Router();
 
@@ -29,6 +31,19 @@ const router = express.Router();
 
 router.post('/register', authLimiter, validate({ body: s.registerSchema }), ctrl.register);
 router.post('/login',    authLimiter, validate({ body: s.loginSchema }),    ctrl.login);
+
+/* ---------------- driver self-registration ---------------- */
+
+// Separate endpoint rather than a `role` field on /register: role must never be
+// caller-supplied (see the note in validators/schemas.js). This one hard-codes
+// DRIVER in the service and takes the licence number that /register has no
+// concept of. The account is created UNVERIFIED — signing up is not approval.
+router.post(
+  '/driver/register',
+  authLimiter,
+  validate({ body: driverSelfSchemas.driverRegisterSchema }),
+  driverSelfCtrl.register
+);
 
 /* ---------------- OTP flow (customers, drivers) ---------------- */
 
