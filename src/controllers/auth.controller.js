@@ -8,6 +8,7 @@
  */
 
 const authService = require('../services/auth.service');
+const passwordReset = require('../services/passwordReset.service');
 const { asyncHandler } = require('../utils/helpers');
 
 const meta = (req) => ({
@@ -55,5 +56,24 @@ exports.me = asyncHandler(async (req, res) => {
 
 exports.changePassword = asyncHandler(async (req, res) => {
   const result = await authService.changePassword(req.user.id, req.body);
+  res.json({ success: true, ...result });
+});
+
+/* ---------------- password reset ---------------- */
+
+exports.forgotPassword = asyncHandler(async (req, res) => {
+  const result = await passwordReset.requestReset(req.body.email);
+  // Always 200, always the same message. A different status or body for an
+  // unknown address would undo the enumeration protection in the service.
+  res.json({ success: true, ...result });
+});
+
+exports.verifyResetToken = asyncHandler(async (req, res) => {
+  const result = await passwordReset.verifyToken(req.body.token);
+  res.json({ success: true, data: result });
+});
+
+exports.resetPassword = asyncHandler(async (req, res) => {
+  const result = await passwordReset.resetPassword(req.body);
   res.json({ success: true, ...result });
 });

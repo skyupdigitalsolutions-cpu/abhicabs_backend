@@ -187,6 +187,30 @@ const otpVerifyLimiter = make({
   msg: 'Too many verification attempts. Request a new code.',
 });
 
+/**
+ * Forgot-password requests. Keyed by ip AND email together, for the same reason
+ * as the OTP limiter: one abusive IP must not be able to lock a real user out
+ * of resetting, and one targeted address must not exhaust a shared office IP.
+ *
+ * Tight, because each request can send an email — uncapped, this is a free
+ * mail cannon pointed at any address an attacker chooses.
+ */
+const passwordResetLimiter = make({
+  name: 'pwreset',
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => `${req.ip}:${(req.body?.email || 'none').toLowerCase()}`,
+  msg: 'Too many reset requests. Please try again later.',
+});
+
+/** Redeeming a token. Bounds guessing at the HTTP edge. */
+const passwordResetVerifyLimiter = make({
+  name: 'pwresetver',
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  msg: 'Too many attempts. Please request a new reset link.',
+});
+
 /** Refresh: generous, but not unlimited. */
 const refreshLimiter = make({
   name: 'refresh',
@@ -246,6 +270,8 @@ const contactLimiter = make({
 });
 
 module.exports = {
+  passwordResetLimiter,
+  passwordResetVerifyLimiter,
   FailoverStore,
   authLimiter,
   otpRequestLimiter,

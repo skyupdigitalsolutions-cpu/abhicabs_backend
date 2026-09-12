@@ -19,6 +19,8 @@ const {
   otpRequestLimiter,
   otpVerifyLimiter,
   refreshLimiter,
+  passwordResetLimiter,
+  passwordResetVerifyLimiter,
 } = require('../middlewares/rateLimit');
 
 const s = require('../validators/schemas');
@@ -59,6 +61,38 @@ router.post(
   otpVerifyLimiter,
   validate({ body: otpSchemas.otpVerifySchema }),
   otpCtrl.verifyOtp
+);
+
+/* ---------------- password reset (email accounts) ----------------
+ *
+ * Public by design: someone who has forgotten their password cannot
+ * authenticate first. The protection is the token itself, the rate limiters,
+ * and the identical response for every email — not a login check.
+ *
+ * Customers who sign in by phone have no password and use the OTP flow.
+ */
+
+router.post(
+  '/forgot-password',
+  passwordResetLimiter,
+  validate({ body: s.forgotPasswordSchema }),
+  ctrl.forgotPassword
+);
+
+// Lets the reset page say "this link expired" BEFORE the user types a new
+// password twice. Does not consume the token.
+router.post(
+  '/reset-password/verify',
+  passwordResetVerifyLimiter,
+  validate({ body: s.verifyResetTokenSchema }),
+  ctrl.verifyResetToken
+);
+
+router.post(
+  '/reset-password',
+  passwordResetVerifyLimiter,
+  validate({ body: s.resetPasswordSchema }),
+  ctrl.resetPassword
 );
 
 /* ---------------- session management ---------------- */

@@ -65,6 +65,33 @@ const refreshSchema = z.object({
   refreshToken: z.string().min(10, 'Refresh token is required').max(1000),
 });
 
+/* ---------------------------------------------------------------- *
+ * Password reset
+ * ---------------------------------------------------------------- */
+
+const forgotPasswordSchema = z.object({
+  email,
+});
+
+// The token is 32 random bytes hex-encoded, so exactly 64 chars. Pinning the
+// length rejects obvious junk before it ever reaches Redis.
+const resetTokenSchema = z
+  .string()
+  .trim()
+  .length(64, 'Invalid reset token')
+  .regex(/^[a-f0-9]+$/i, 'Invalid reset token');
+
+const verifyResetTokenSchema = z.object({
+  token: resetTokenSchema,
+});
+
+const resetPasswordSchema = z.object({
+  token: resetTokenSchema,
+  // Same rules as every other password in the system — a reset must not be a
+  // way to set a weaker password than register would allow.
+  newPassword: password,
+});
+
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1, 'Current password is required').max(72),
   newPassword: password,
@@ -131,6 +158,9 @@ module.exports = {
   loginSchema,
   refreshSchema,
   changePasswordSchema,
+  forgotPasswordSchema,
+  verifyResetTokenSchema,
+  resetPasswordSchema,
   updateProfileSchema,
   createUserSchema,
   updateUserSchema,
