@@ -8,8 +8,8 @@
  * ---------------------------------------------------------------------------
  * ABHICABS POLICY — CONFIRMED
  * ---------------------------------------------------------------------------
- *   30 minutes or more before pickup   FREE, full refund of any advance
- *   less than 30 minutes               full cancellation fee from the rate card
+ *   60 minutes or more before pickup   FREE, full refund of any advance
+ *   less than 60 minutes               full cancellation fee from the rate card
  *   after the scheduled pickup time    full cancellation fee
  *   once the trip is ONGOING           cannot be cancelled at all
  *
@@ -46,7 +46,19 @@ const { BOOKING_SELECT } = require('../models/booking.model');
 /** Statuses a booking may be cancelled from. ONGOING is deliberately absent. */
 const CANCELLABLE = ['PENDING', 'CONFIRMED', 'ALLOCATED', 'EN_ROUTE'];
 
-const FREE_MINUTES = Number(process.env.CANCEL_FREE_MINUTES || 30);
+/**
+ * How long before pickup a cancellation is still free.
+ *
+ * One hour. A driver is typically allocated and heading out well inside that
+ * window, so a cancellation after it has already cost someone a trip — which is
+ * the thing the fee exists to cover.
+ *
+ * Overridable per environment rather than hardcoded: the number is a commercial
+ * decision, and changing it should not need a deploy. Whatever it is set to
+ * flows through the quote, the charge, and the policy text the app displays, so
+ * those three can never disagree.
+ */
+const FREE_MINUTES = Number(process.env.CANCEL_FREE_MINUTES || 60);
 
 /* ------------------------------------------------------------------ *
  * Quote a cancellation without performing it
@@ -92,7 +104,7 @@ async function quoteCancellation(bookingId, actor) {
  */
 function assess(booking, config, now = new Date()) {
   // FREE_MINUTES is passed as BOTH thresholds so the engine collapses to two
-  // bands, matching the confirmed policy: free at 30+, full fee under 30.
+  // bands, matching the confirmed policy: free at or above it, full fee below.
   const band = fareService.computeCancellationFee({
     pickupAt: booking.pickupAt,
     now,
