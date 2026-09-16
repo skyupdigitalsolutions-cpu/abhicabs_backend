@@ -32,6 +32,30 @@ router.get('/me/billing', ctrl.getMyBilling);
 
 /* ---------------- own addresses ---------------- */
 
+/* ---------------- corporate self-service ----------------
+ *
+ * A customer chooses retail or corporate for themselves, but choosing corporate
+ * only REGISTERS the company — it does not switch billing. Approval is an admin
+ * action, because activating an account grants post-paid credit and starts
+ * issuing tax invoices against the company's GSTIN.
+ */
+
+router.get('/me/account', ctrl.getMyAccountType);
+
+router.post(
+  '/me/corporate',
+  validate({ body: s.registerCorporateSelfSchema }),
+  ctrl.registerCorporate
+);
+
+router.patch(
+  '/me/corporate',
+  validate({ body: s.updateCorporateSelfSchema }),
+  ctrl.updateMyCorporate
+);
+
+router.delete('/me/corporate', ctrl.withdrawCorporate);
+
 router.get('/me/addresses', addressCtrl.list);
 router.post('/me/addresses', validate({ body: s.createAddressSchema }), addressCtrl.create);
 

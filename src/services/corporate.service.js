@@ -479,5 +479,6 @@ module.exports = {
   assertCreditAvailable,
   adjustCreditUsed,
   stateFromGstin,
+  assertGstinMatchesState,
   stats,
 };

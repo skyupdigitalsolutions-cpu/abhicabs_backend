@@ -112,6 +112,29 @@ const updateCorporateSchema = createCorporateSchema
   .partial()
   .refine((d) => Object.keys(d).length > 0, 'Provide at least one field to update');
 
+/**
+ * What a CUSTOMER may send when registering their own company.
+ *
+ * Deliberately the admin schema minus creditLimit. A limit is a commercial term
+ * the business grants; accepting it here would let the applicant write their own
+ * — and because assertCreditAvailable reads 0 as UNLIMITED, omitting the field
+ * is not enough on its own. The service pins it to 0 and leaves the account
+ * inactive, so the number cannot be used until a human has set it.
+ */
+const registerCorporateSelfSchema = createCorporateSchema.omit({ creditLimit: true });
+
+/**
+ * Corrections to an application that is still pending.
+ *
+ * GSTIN is not editable: it is the unique identity of the company and the thing
+ * the duplicate check ran against. Changing it means a different company, which
+ * is a new application rather than an edit.
+ */
+const updateCorporateSelfSchema = registerCorporateSelfSchema
+  .omit({ gstin: true })
+  .partial()
+  .refine((d) => Object.keys(d).length > 0, 'Provide at least one field to update');
+
 const listCorporateQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
@@ -170,6 +193,8 @@ module.exports = {
   listCustomersQuerySchema,
   createCorporateSchema,
   updateCorporateSchema,
+  registerCorporateSelfSchema,
+  updateCorporateSelfSchema,
   listCorporateQuerySchema,
   employeeSchema,
   createAddressSchema,

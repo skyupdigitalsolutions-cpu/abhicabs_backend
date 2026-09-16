@@ -10,6 +10,7 @@
  */
 
 const { z } = require('zod');
+const customerFields = require('./customer.schemas');
 
 const email = z
   .string()
@@ -47,14 +48,64 @@ const uuid = z.string().uuid('Invalid id');
 // Passwordless registration: name + email + mobile only. Phone is REQUIRED here
 // (unlike the shared optional `phone`) because it's the number the rider will
 // sign in with via OTP afterwards.
-const registerSchema = z.object({
-  name,
-  email,
-  phone: z
-    .string()
-    .trim()
-    .regex(/^[0-9+\-\s()]{7,20}$/, 'Enter a valid phone number'),
+/**
+ * Company details, required only when signing up as a business.
+ *
+ * Reuses the same field validators the admin corporate form uses, so a GSTIN
+ * typed at signup is held to exactly the same standard as one typed by staff.
+ */
+const registerCorporateBlock = z.object({
+  companyName: z.string().trim().min(2).max(180),
+  gstin: customerFields.gstin,
+  pan: customerFields.pan.optional().nullable(),
+  billingEmail: z.string().trim().toLowerCase().email().max(180),
+  billingPhone: z.string().trim().max(20).optional().nullable(),
+  billingAddress: z.string().trim().min(5).max(500),
+  billingCity: z.string().trim().min(2).max(80),
+  billingState: z.string().trim().min(2).max(80),
+  billingPincode: customerFields.pincode,
+  billingCycle: z.enum(['PER_TRIP', 'WEEKLY', 'MONTHLY']).default('PER_TRIP'),
+  // creditLimit is absent on purpose. A limit is a commercial term the business
+  // grants, and assertCreditAvailable reads 0 as UNLIMITED — so accepting it
+  // here would let an applicant write their own credit line at signup.
 });
+
+const registerSchema = z
+  .object({
+    name,
+    email,
+    phone: z
+      .string()
+      .trim()
+      .regex(/^[0-9+\-\s()]{7,20}$/, 'Enter a valid phone number'),
+
+    // Retail unless the person deliberately chooses otherwise. Defaulting here
+    // rather than in the service means an app that sends nothing at all still
+    // gets the safe answer.
+    accountType: z.enum(['RETAIL', 'CORPORATE']).default('RETAIL'),
+
+    corporate: registerCorporateBlock.optional(),
+  })
+  .superRefine((data, ctx) => {
+    // Choosing CORPORATE without the company details would create an account
+    // that claims to be a business and has nothing to bill.
+    if (data.accountType === 'CORPORATE' && !data.corporate) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['corporate'],
+        message: 'Company details are required to register a business account',
+      });
+    }
+    // Sending company details while asking for RETAIL is a client bug, and
+    // silently dropping them would lose data the person typed.
+    if (data.accountType !== 'CORPORATE' && data.corporate) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['accountType'],
+        message: 'Set accountType to CORPORATE to register company details',
+      });
+    }
+  });
 
 const loginSchema = z.object({
   email,

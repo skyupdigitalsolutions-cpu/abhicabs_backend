@@ -5,6 +5,7 @@
  */
 
 const customerService = require('../services/customer.service');
+const corporateSelf = require('../services/corporateSelfService.service');
 const { asyncHandler } = require('../utils/helpers');
 
 const meta = (req) => ({ ip: req.ip || '', userAgent: req.get('user-agent') || '' });
@@ -65,4 +66,37 @@ exports.getCustomerBilling = asyncHandler(async (req, res) => {
 exports.stats = asyncHandler(async (req, res) => {
   const data = await customerService.stats();
   res.json({ success: true, data });
+});
+
+/* ---------------- corporate self-service (customer-facing) ---------------- *
+ *
+ * Registering a company does NOT make the account corporate on its own — see
+ * the note at the top of corporateSelfService.service.js. These endpoints move
+ * an application between NONE, PENDING and ACTIVE; only an admin can reach
+ * ACTIVE, because that is the point at which trips start being billed on
+ * credit against a GSTIN.
+ */
+
+/** GET /customers/me/account — account type plus any corporate application. */
+exports.getMyAccountType = asyncHandler(async (req, res) => {
+  const data = await corporateSelf.getMyAccount(req.user.id);
+  res.json({ success: true, data });
+});
+
+/** POST /customers/me/corporate — register a company for this customer. */
+exports.registerCorporate = asyncHandler(async (req, res) => {
+  const data = await corporateSelf.registerCorporate(req.user.id, req.body, meta(req));
+  res.status(201).json({ success: true, message: data.message, data });
+});
+
+/** PATCH /customers/me/corporate — fix details while still pending. */
+exports.updateMyCorporate = asyncHandler(async (req, res) => {
+  const data = await corporateSelf.updateMyCorporate(req.user.id, req.body, meta(req));
+  res.json({ success: true, message: 'Application updated', data });
+});
+
+/** DELETE /customers/me/corporate — withdraw and stay retail. */
+exports.withdrawCorporate = asyncHandler(async (req, res) => {
+  const data = await corporateSelf.withdrawApplication(req.user.id, meta(req));
+  res.json({ success: true, message: 'Application withdrawn', data });
 });

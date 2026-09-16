@@ -12,6 +12,10 @@ const jwt = require('jsonwebtoken');
 const { prisma, isUniqueViolation } = require('../config/prisma');
 const tokens = require('../utils/tokens');
 const { ApiError, publicUser } = require('../utils/helpers');
+// Required lazily inside register() would be tidier, but this module is loaded
+// once at boot and corporateSelfService does not require auth.service back, so
+// a plain top-level require is safe here.
+const corporateSelf = require('./corporateSelfService.service');
 
 const BCRYPT_ROUNDS = 12;
 
@@ -40,7 +44,7 @@ async function issueTokens(user, meta = {}) {
  * Register
  * ---------------------------------------------------------------- */
 
-async function register({ name, email, phone }, meta) {
+async function register({ name, email, phone, accountType = 'RETAIL', corporate = null }, meta) {
   // Registration is passwordless — riders authenticate by OTP. The password
   // column is non-null, so we store an unguessable random hash that nobody can
   // ever log in with (there is no plaintext, so password login is impossible
@@ -61,8 +65,46 @@ async function register({ name, email, phone }, meta) {
     throw err;
   }
 
+  /**
+   * Account type.
+   *
+   * RETAIL unless the person chose otherwise — a customer row is created either
+   * way, so every account has the same shape from the first request.
+   *
+   * Choosing CORPORATE registers the company but does NOT switch billing to it.
+   * The customer stays RETAIL and the corporate row stays inactive until an
+   * admin verifies it, because activating one grants post-paid credit and starts
+   * issuing tax invoices against a GSTIN nobody has checked. Note that
+   * assertCreditAvailable treats a creditLimit of 0 as UNLIMITED, so a
+   * self-approved corporate account would mean uncapped credit — the inactive
+   * flag is what makes self-registration safe rather than generous.
+   *
+   * Registration must not fail because the company details were rejected: the
+   * person now has a working account either way, and being told "signed up, but
+   * check the GSTIN" is better than losing the whole signup.
+   */
+  let corporateStatus = 'NONE';
+  let corporateError = null;
+
+  await prisma.customer.create({ data: { userId: user.id, accountType: 'RETAIL' } });
+
+  if (accountType === 'CORPORATE' && corporate) {
+    try {
+      await corporateSelf.registerCorporate(user.id, corporate, meta);
+      corporateStatus = 'PENDING';
+    } catch (err) {
+      corporateError = err.message;
+    }
+  }
+
   const issued = await issueTokens(user, meta);
-  return { user: publicUser(user), ...issued };
+  return {
+    user: publicUser(user),
+    accountType: 'RETAIL',
+    corporateStatus,
+    ...(corporateError ? { corporateError } : {}),
+    ...issued,
+  };
 }
 
 /* ---------------------------------------------------------------- *

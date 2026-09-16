@@ -50,6 +50,34 @@ const MIN_TRIP_SEPARATION_KM = 0.25;
 const REQUIRES_DISTINCT_DROP = new Set(['ONE_WAY', 'AIRPORT']);
 
 /**
+ * Reject a point-to-point trip that does not actually go anywhere.
+ *
+ * This lives here, before routing, rather than relying on the SAME_LOCATION
+ * check inside getDistance. That one is a side effect of measuring a single
+ * leg, so it is skipped entirely once the trip has stops — pickup → stop → back
+ * to the same pickup would route fine and quote a fare. Checking the endpoints
+ * explicitly catches that, and it also saves a maps API call on a request that
+ * can never succeed.
+ */
+function assertDistinctEndpoints(tripType, pickupPoint, dropPoint) {
+  if (!REQUIRES_DISTINCT_DROP.has(tripType)) return;
+
+  const apartKm = geo.haversineKm(
+    pickupPoint.lat, pickupPoint.lng,
+    dropPoint.lat, dropPoint.lng
+  );
+
+  if (apartKm < MIN_TRIP_SEPARATION_KM) {
+    throw ApiError.badRequest(
+      tripType === 'AIRPORT'
+        ? 'Pickup and drop are the same place. Set the airport as one end of the trip.'
+        : 'Pickup and drop are the same place. Choose a different destination.',
+      'SAME_LOCATION'
+    );
+  }
+}
+
+/**
  * Trip types that must END OUTSIDE the pickup city — the outstation products.
  *
  * ONE_WAY and ROUND_TRIP are sold as intercity travel. Their whole rate card is
