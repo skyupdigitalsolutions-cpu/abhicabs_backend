@@ -3,35 +3,27 @@
 /**
  * src/services/corporateSelfService.service.js
  *
- * Lets a signed-in customer register their own company account, instead of an
- * admin having to create every one by hand.
+ * Lets a signed-in customer register their own company account and become a
+ * corporate account IMMEDIATELY — no admin approval step.
  *
  * ---------------------------------------------------------------------------
- * WHY REGISTRATION DOES NOT IMMEDIATELY MAKE SOMEONE CORPORATE
+ * INSTANT ACTIVATION (chosen behaviour)
  * ---------------------------------------------------------------------------
- * A corporate account is not a preference. It changes two things that cost real
- * money:
+ * Registering a company now switches the customer to CORPORATE and activates
+ * the account in the same transaction. From the next booking onward, billing
+ * routes to the company: invoices become TAX invoices carrying the GSTIN, and
+ * trips are billed to the company on credit, settled on a cycle.
  *
- *   1. Invoices become TAX invoices carrying the company's GSTIN, which is a
- *      filing the business makes to the tax authority.
- *   2. Billing moves to the company, on credit, settled on a cycle — the trip
- *      happens before the money does.
+ * The starter credit limit is 0, which `assertCreditAvailable` treats as
+ * UNLIMITED (corporate.service.js:366 — `if (limit <= 0) return { unlimited }`).
+ * That is deliberate per product decision: a self-registered company starts
+ * with uncapped post-paid credit. An admin can set a real limit later.
  *
- * Worse, `assertCreditAvailable` treats a creditLimit of 0 as UNLIMITED rather
- * than as blocked. So a customer who could flip their own account to CORPORATE
- * would be granting themselves uncapped post-paid credit and issuing tax
- * invoices against a GSTIN nobody checked. That is not a feature with a bug in
- * it; it is a way to take free rides.
- *
- * So registration creates the company and links it, but leaves
- * `customer.accountType` as RETAIL and the account inactive. Billing keeps
- * routing to the individual — resolveBillingEntity requires accountType ===
- * 'CORPORATE' AND corporate.isActive, and neither is true yet — so the rider
- * can carry on booking normally while the application is reviewed.
- *
- * An admin then activates the account and sets a credit limit, which is the
- * moment corporate billing actually begins. The customer-facing word for this
- * is "pending review", and the app shows it as such.
+ * SECURITY NOTE (intentional trade-off): because activation is instant and the
+ * GSTIN is only format/state-checked (not verified against the tax authority),
+ * this path grants uncapped credit against an unverified GSTIN. Before going to
+ * production, gate this behind GSTIN verification or a non-zero starter cap.
+ * The two switches for that are marked below with `PROD-GATE`.
  */
 
 const { prisma } = require('../config/prisma');
@@ -40,12 +32,18 @@ const corporateService = require('./corporate.service');
 const customerService = require('./customer.service');
 const audit = require('./audit.service');
 
+/** PROD-GATE: set true to require admin approval instead of instant activation. */
+const REQUIRE_ADMIN_APPROVAL = false;
+
+/** PROD-GATE: starter credit limit on instant activation. 0 = unlimited. */
+const STARTER_CREDIT_LIMIT = 0;
+
 /**
- * What a customer may see about their own application.
+ * What a customer may see about their own company.
  *
- * creditLimit and creditUsed are deliberately absent. They are commercial terms
- * set by the business, and showing a limit the customer did not agree to invites
- * an argument about a number they cannot change.
+ * creditLimit/creditUsed stay absent: they are commercial terms the customer
+ * cannot change, and surfacing a number they did not agree to invites an
+ * argument about it.
  */
 const SELF_CORPORATE_SELECT = {
   id: true,
@@ -64,10 +62,12 @@ const SELF_CORPORATE_SELECT = {
 };
 
 /**
- * Describes where the customer's application has got to.
+ * Where the customer's company stands.
  *
- * Three states rather than a boolean, because "no application", "waiting" and
- * "live" need three different screens and three different next actions.
+ * NONE    — no company registered
+ * PENDING — registered but not yet active (only reachable if an admin later
+ *           deactivates, or if REQUIRE_ADMIN_APPROVAL is turned on)
+ * ACTIVE  — corporate billing is live
  */
 function statusOf(customer, corporate) {
   if (!corporate) return 'NONE';
@@ -80,11 +80,11 @@ function statusOf(customer, corporate) {
  * ------------------------------------------------------------------ */
 
 /**
- * The customer's own account type and corporate application, if any.
+ * The customer's own account type and company, if any.
  *
- * Always returns a shape rather than 404ing on "no application" — the app needs
- * to render the "switch to corporate" choice, and an error is the wrong way to
- * say "nothing here yet".
+ * Always returns a shape rather than 404ing on "no company" — the app renders
+ * the retail/corporate choice off this, and an error is the wrong way to say
+ * "nothing here yet".
  */
 async function getMyAccount(userId) {
   const customer = await customerService.findOrCreate(userId);
@@ -104,18 +104,17 @@ async function getMyAccount(userId) {
 }
 
 /* ------------------------------------------------------------------ *
- * Register
+ * Register  (instant activation)
  * ------------------------------------------------------------------ */
 
 /**
- * Register a company for the signed-in customer.
+ * Register a company for the signed-in customer and switch them to corporate.
  *
- * The GSTIN is unique across corporate accounts, which is what stops two
- * employees of the same company each creating their own and splitting one
- * credit limit in half without anyone noticing. When the GSTIN already exists
- * the customer is told to ask their administrator rather than being handed the
- * existing account — joining a company is a decision that company makes, not
- * one a stranger with the right 15 characters makes.
+ * The GSTIN is unique across corporate accounts, which stops two employees of
+ * the same company each creating their own and splitting one credit line. When
+ * the GSTIN already exists the customer is told to ask their administrator
+ * rather than being handed the account — joining a company is that company's
+ * decision, not one a stranger with the right 15 characters makes.
  */
 async function registerCorporate(userId, input, meta = {}) {
   const customer = await customerService.findOrCreate(userId);
@@ -128,16 +127,16 @@ async function registerCorporate(userId, input, meta = {}) {
   }
   if (customer.corporateAccountId) {
     throw ApiError.badRequest(
-      'A corporate application is already under review for this account.',
-      'APPLICATION_PENDING'
+      'A company is already registered on this account.',
+      'CORPORATE_EXISTS'
     );
   }
 
   const gstin = String(input.gstin || '').trim().toUpperCase();
 
   // The state encoded in a GSTIN must match the billing state, or every invoice
-  // raised against it will apply the wrong tax split. Reused from the admin
-  // path so both doors enforce the same rule.
+  // raised against it applies the wrong tax split. Reused from the admin path
+  // so both doors enforce the same rule.
   corporateService.assertGstinMatchesState(gstin, input.billingState);
 
   const existing = await prisma.corporateAccount.findUnique({
@@ -150,6 +149,9 @@ async function registerCorporate(userId, input, meta = {}) {
       'CORPORATE_ALREADY_REGISTERED'
     );
   }
+
+  // Instant unless the prod gate is on.
+  const activate = !REQUIRE_ADMIN_APPROVAL;
 
   const created = await prisma.$transaction(async (tx) => {
     const corporate = await tx.corporateAccount.create({
@@ -165,23 +167,25 @@ async function registerCorporate(userId, input, meta = {}) {
         billingPincode: input.billingPincode,
         billingCycle: input.billingCycle || 'PER_TRIP',
 
-        // Set by an admin at approval, never by the applicant. Note that 0 means
-        // UNLIMITED to assertCreditAvailable — which is exactly why this account
-        // stays inactive until a human has looked at it.
-        creditLimit: 0,
+        // 0 = unlimited to assertCreditAvailable (see PROD-GATE above).
+        creditLimit: STARTER_CREDIT_LIMIT,
         creditUsed: 0,
 
-        // The whole safety of self-registration rests on this line.
-        isActive: false,
+        // Instant activation: the account is live the moment it is created.
+        isActive: activate,
       },
       select: SELF_CORPORATE_SELECT,
     });
 
-    // Linked, but NOT switched: accountType stays RETAIL, so billing keeps
-    // routing to the individual and the rider can book normally meanwhile.
+    // Link AND switch: the customer becomes CORPORATE now, so resolveBillingEntity
+    // (which needs accountType === 'CORPORATE' AND corporate.isActive) routes the
+    // next booking's billing to the company.
     await tx.customer.update({
       where: { userId },
-      data: { corporateAccountId: corporate.id },
+      data: {
+        corporateAccountId: corporate.id,
+        accountType: activate ? 'CORPORATE' : 'RETAIL',
+      },
     });
 
     return corporate;
@@ -192,43 +196,43 @@ async function registerCorporate(userId, input, meta = {}) {
     action: 'CORPORATE_SELF_REGISTERED',
     entityType: 'CorporateAccount',
     entityId: created.id,
-    after: { companyName: created.companyName, gstin: created.gstin, isActive: false },
+    after: {
+      companyName: created.companyName,
+      gstin: created.gstin,
+      isActive: activate,
+      activatedInstantly: activate,
+    },
     meta,
   });
 
   return {
-    accountType: 'RETAIL',
-    corporateStatus: 'PENDING',
+    accountType: activate ? 'CORPORATE' : 'RETAIL',
+    corporateStatus: activate ? 'ACTIVE' : 'PENDING',
     corporate: created,
-    message:
-      'Company registered. Trips stay billed to you personally until our team ' +
-      'verifies the details — usually within one working day.',
+    message: activate
+      ? 'Company registered. Your trips are now billed to ' + created.companyName + '.'
+      : 'Company registered. Trips stay billed to you personally until our team verifies the details.',
   };
 }
 
 /* ------------------------------------------------------------------ *
- * Update while pending
+ * Update
  * ------------------------------------------------------------------ */
 
 /**
- * Correct a typo in an application that has not been approved yet.
+ * Edit the company's billing details.
  *
- * Locked once the account is live: at that point the details are on issued tax
- * invoices, and changing the billing name or GSTIN under them would leave
- * documents that no longer match the entity they were raised against. After
- * approval this is an admin action with an audit trail.
+ * GSTIN is never editable here (it is not in the field list) — it sits on
+ * issued tax invoices. The other billing fields can be corrected even while the
+ * account is active, since instant self-service means the customer owns these
+ * details. Company name changes still land on future invoices, so treat with
+ * care, but they are allowed.
  */
 async function updateMyCorporate(userId, input, meta = {}) {
   const customer = await customerService.findOrCreate(userId);
 
   if (!customer.corporateAccountId) {
-    throw ApiError.notFound('No corporate application found for this account');
-  }
-  if (customer.accountType === 'CORPORATE') {
-    throw ApiError.badRequest(
-      'This company is already active. Contact support to change its billing details.',
-      'CORPORATE_ACTIVE'
-    );
+    throw ApiError.notFound('No company found on this account');
   }
 
   const patch = {};
@@ -267,34 +271,48 @@ async function updateMyCorporate(userId, input, meta = {}) {
     meta,
   });
 
-  return { accountType: customer.accountType, corporateStatus: 'PENDING', corporate: updated };
+  return {
+    accountType: customer.accountType,
+    corporateStatus: statusOf(customer, updated),
+    corporate: updated,
+  };
 }
 
 /* ------------------------------------------------------------------ *
- * Withdraw
+ * Switch back to retail
  * ------------------------------------------------------------------ */
 
 /**
- * Cancel a pending application and go back to a plain retail account.
+ * Turn the account back into a plain retail account.
  *
- * The corporate row is deactivated rather than deleted. It may already carry an
- * audit trail, and a GSTIN that was registered once is worth keeping a record
- * of — if the same company applies again, support can see what happened before.
+ * Blocked while the company still owes money: switching to retail must not be a
+ * way to walk away from an unpaid post-paid balance. creditUsed is a cache
+ * reconciled against the ledger on a schedule, so this is a first-line guard,
+ * not the final word — the ledger remains the source of truth.
+ *
+ * The corporate row is deactivated, not deleted: it may carry an audit trail
+ * and a GSTIN worth keeping a record of if the company registers again.
  */
 async function withdrawApplication(userId, meta = {}) {
   const customer = await customerService.findOrCreate(userId);
 
   if (!customer.corporateAccountId) {
-    throw ApiError.notFound('No corporate application found for this account');
-  }
-  if (customer.accountType === 'CORPORATE') {
-    throw ApiError.badRequest(
-      'This company is active. Contact support to close it.',
-      'CORPORATE_ACTIVE'
-    );
+    throw ApiError.notFound('No company found on this account');
   }
 
   const corporateAccountId = customer.corporateAccountId;
+
+  const corporate = await prisma.corporateAccount.findUnique({
+    where: { id: corporateAccountId },
+    select: { creditUsed: true, companyName: true },
+  });
+
+  if (corporate && Number(corporate.creditUsed) > 0) {
+    throw ApiError.badRequest(
+      'This company has an unsettled balance. Clear it before switching back to a personal account.',
+      'CORPORATE_BALANCE_DUE'
+    );
+  }
 
   await prisma.$transaction(async (tx) => {
     await tx.customer.update({
@@ -309,7 +327,7 @@ async function withdrawApplication(userId, meta = {}) {
 
   await audit.record(prisma, {
     actor: { id: userId },
-    action: 'CORPORATE_APPLICATION_WITHDRAWN',
+    action: 'CORPORATE_SWITCHED_TO_RETAIL',
     entityType: 'CorporateAccount',
     entityId: corporateAccountId,
     meta,
