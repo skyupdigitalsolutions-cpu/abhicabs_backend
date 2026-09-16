@@ -17,6 +17,7 @@
 const { prisma } = require('../config/prisma');
 const { runOnce } = require('./runOnce');
 const notifyProvider = require('../services/providers/notify.provider');
+const pushService = require('../services/push.service');
 
 /** Message templates by notification type. Params fill the template. */
 const TEMPLATES = {
@@ -35,6 +36,22 @@ const TEMPLATES = {
     template: 'booking_cancelled',
     render: (b) => ({ bookingNumber: b.bookingNumber, refund: b.refund || '0.00' }),
   },
+};
+
+/** Push (FCM) copy by notification type — title/body shown in the tray. */
+const PUSH = {
+  BOOKING_CONFIRMED: (b) => ({
+    title: 'Booking confirmed',
+    body: `Your booking ${b.bookingNumber} is confirmed.`,
+  }),
+  DRIVER_ASSIGNED: (b) => ({
+    title: 'Driver assigned',
+    body: `A driver has been assigned to booking ${b.bookingNumber}.`,
+  }),
+  BOOKING_CANCELLED: (b) => ({
+    title: 'Booking cancelled',
+    body: `Booking ${b.bookingNumber} was cancelled.`,
+  }),
 };
 
 /**
@@ -64,6 +81,7 @@ async function handle(job) {
 
       return {
         bookingNumber: booking.bookingNumber,
+        customerId: booking.customerId, // == User.id — the push target
         to: to || null,
         channel: tpl.channel,
         template: tpl.template,
@@ -85,12 +103,36 @@ async function handle(job) {
   // runOnce SKIPS the effect and (below) we still attempt the send. A rare
   // double-send is acceptable; a dropped confirmation is not.
   const rec = outcome.result;
+
+  // 1) WhatsApp/SMS (durable channel). Only when a phone number is present.
   if (rec.to) {
     const provider = notifyProvider.getProvider();
     await provider.send({ to: rec.to, channel: rec.channel, template: rec.template, params: rec.params });
   }
 
-  return { sent: !!rec.to, bookingNumber: rec.bookingNumber };
+  // 2) FCM push to the customer's devices. Independent of the phone channel and
+  //    best-effort: a push failure must NOT fail the job (a retry would only be
+  //    skipped by runOnce, and push is a lossy-tolerable channel). The SMS/
+  //    WhatsApp path above remains the durable one.
+  const pushTpl = PUSH[type];
+  if (rec.customerId && pushTpl) {
+    try {
+      const { title, body } = pushTpl(rec);
+      await pushService.pushToUser(rec.customerId, {
+        title,
+        body,
+        data: {
+          type,
+          bookingId: String(bookingId),
+          bookingNumber: String(rec.bookingNumber),
+        },
+      });
+    } catch (err) {
+      console.error(`[notification] push failed for ${type} ${bookingId}: ${err.message}`);
+    }
+  }
+
+  return { sent: !!rec.to, pushed: !!(rec.customerId && pushTpl), bookingNumber: rec.bookingNumber };
 }
 
 module.exports = { handle };

@@ -182,6 +182,7 @@ model User {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   refreshTokens RefreshToken[]
+  deviceTokens  DeviceToken[]
 
   // --- new relations ---
   customer          Customer?
@@ -218,6 +219,22 @@ model RefreshToken {
   @@map("refresh_tokens")
 }
 
+// FCM device/registration tokens for push notifications. Hangs off User so it
+// serves both the customer app and the driver app. `token` is globally unique:
+// if a device moves to another account the row is re-pointed, never duplicated.
+model DeviceToken {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  token      String   @unique @db.VarChar(512)
+  platform   String   @default("android") @db.VarChar(16) // android | ios | web
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("device_tokens")
+}
 // ===========================================================================
 // RBAC  (Day 2 uses this; the table exists from Day 1)
 // ===========================================================================

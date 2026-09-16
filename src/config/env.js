@@ -230,6 +230,23 @@ const env = {
     provider: (process.env.NOTIFY_PROVIDER || 'mock').toLowerCase(),
   },
 
+  /* ---------------- Push notifications (FCM / Firebase) ---------------- */
+  push: {
+    // 'mock' (default, offline no-op) or 'fcm'. Falls back to mock automatically
+    // if 'fcm' is selected without Firebase credentials — a missing key should
+    // disable push, not take the app down.
+    provider: (process.env.PUSH_PROVIDER || 'mock').toLowerCase(),
+
+    firebase: {
+      // The Firebase Admin service account, supplied as ONE env var so the JSON
+      // key file never lands in the repo. Prefer the base64 form for single-line
+      // dashboards (Render/Railway); raw JSON is also accepted.
+      serviceAccountBase64: process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || '',
+      serviceAccountJson: process.env.FIREBASE_SERVICE_ACCOUNT || '',
+      projectId: process.env.FIREBASE_PROJECT_ID || '',
+    },
+  },
+
   seedAdmin: {
     name: process.env.SEED_ADMIN_NAME || 'Super Admin',
     email: process.env.SEED_ADMIN_EMAIL || 'admin@example.com',

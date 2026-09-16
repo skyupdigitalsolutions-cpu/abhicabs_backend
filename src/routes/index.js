@@ -17,6 +17,7 @@ router.get('/', (req, res) => {
       auth: '/api/v1/auth',
       users: '/api/v1/users',
       customers: '/api/v1/customers',
+      deviceTokens: '/api/v1/device-tokens',
       fares: '/api/v1/fares',
       bookings: '/api/v1/bookings',
       payments: '/api/v1/payments',
@@ -41,6 +42,7 @@ router.use('/auth', require('./auth.routes'));
 
 router.use('/users', apiLimiter, require('./user.routes'));
 router.use('/customers', apiLimiter, require('./customer.routes'));
+router.use('/device-tokens', apiLimiter, require('./deviceToken.routes'));
 router.use('/fares', apiLimiter, require('./fare.routes'));
 router.use('/bookings', apiLimiter, require('./booking.routes'));
 router.use('/payments', apiLimiter, require('./payment.routes'));
