@@ -23,7 +23,121 @@ const fare = require('./fare.service');
 const geo = require('../lib/geo');
 const { ApiError } = require('../utils/helpers');
 
+/** Longest trip the router will price. Guards against an absurd destination. */
 const MAX_TRIP_KM = Number(process.env.MAX_TRIP_KM || 1500);
+
+/**
+ * How far apart pickup and drop must be before a trip counts as a real journey.
+ *
+ * 250 m rather than a few metres. Two pins dropped at opposite ends of one mall
+ * or airport terminal are ~150 m apart and are still the same place — a rider
+ * who did that has made a mistake, not a booking. Below this a driver would be
+ * dispatched to earn the minimum fare for a walk.
+ */
+const MIN_TRIP_SEPARATION_KM = 0.25;
+
+/**
+ * Trip types that must have a distinct destination.
+ *
+ * ONE_WAY and AIRPORT are point-to-point: same pickup and drop is meaningless.
+ *
+ * ROUND_TRIP is deliberately NOT here — "take me to the airport and back" is a
+ * legitimate booking whose drop equals its pickup, and the return leg is what is
+ * being paid for. HOURLY is not here either: a local rental has no destination
+ * at all, and the pipeline sets drop = pickup on purpose so the rest of the code
+ * has coordinates to work with.
+ */
+const REQUIRES_DISTINCT_DROP = new Set(['ONE_WAY', 'AIRPORT']);
+
+/**
+ * Trip types that must END OUTSIDE the pickup city — the outstation products.
+ *
+ * ONE_WAY and ROUND_TRIP are sold as intercity travel. Their whole rate card is
+ * built for it: returnEmptyPct pays for the driver's empty return leg,
+ * minKmPerDay bills a car held for days, driverAllowance is the per-day bata for
+ * a driver away from home. None of those make sense inside one city.
+ *
+ * AIRPORT and HOURLY are the local products and are deliberately absent. An
+ * airport run is a city trip by definition, and a local rental never leaves.
+ * Between them they cover everything a rider needs within the city, which is
+ * what makes restricting these two coherent rather than merely restrictive.
+ */
+const REQUIRES_OUTSTATION_DROP = new Set(['ONE_WAY', 'ROUND_TRIP']);
+
+/**
+ * Is this drop inside the pickup city?
+ *
+ * "Same city" is decided by the pickup city's own service radius, not by
+ * comparing address strings. The cities table already carries centreLat,
+ * centreLng and radiusKm, and isServiceable uses exactly that circle to decide
+ * whether a pickup is accepted — so the same boundary defines what counts as
+ * leaving. One definition of a city in the system, not two that can disagree.
+ *
+ * The alternative — reverse-geocoding the drop and comparing locality names —
+ * would cost an API call per quote and then hinge on whether a provider spells
+ * a suburb as its own locality or as part of the parent city.
+ */
+function isDropInsideCity(dropPoint, city) {
+  return geo.isWithinRadius(
+    dropPoint.lat, dropPoint.lng,
+    city.centreLat, city.centreLng,
+    Number(city.radiusKm)
+  );
+}
+
+/**
+ * An outstation request whose drop is inside the pickup city is answered with a
+ * LOCAL rental instead of an error.
+ *
+ * Rejecting would be easier and worse. The rider has a real, serviceable
+ * journey in mind — they have simply chosen the wrong product for it, usually
+ * because Outstation is the tab they happened to land on. An error asks them to
+ * work out which tab they should have used; switching answers the question they
+ * were actually asking and tells them what changed.
+ *
+ * The switch needs terms, because a rental is sold by duration rather than
+ * distance. The SHORTEST active package for the city is chosen — the smallest
+ * commitment that can serve the trip. Picking a larger one would quietly sell
+ * them more hours than they asked for.
+ *
+ * Returns null when no switch applies, so callers can treat it as "did anything
+ * change?" rather than having to know the rules.
+ */
+async function resolveLocalSwitch(tripType, dropPoint, city) {
+  if (!REQUIRES_OUTSTATION_DROP.has(tripType)) return null;
+  if (!isDropInsideCity(dropPoint, city)) return null;
+
+  const pkg = await prisma.rentalPackage.findFirst({
+    where: { cityId: Number(city.id), isActive: true },
+    orderBy: [{ includedHours: 'asc' }, { packageFare: 'asc' }],
+  });
+
+  if (!pkg) {
+    // A city with no rental packages cannot serve a local trip at all, so there
+    // is nothing to switch TO. Saying so is better than switching to a product
+    // that will fail at the next step.
+    throw ApiError.badRequest(
+      `Pickup and drop are both in ${city.name}, and no local rental is available here yet.`,
+      'LOCAL_UNAVAILABLE'
+    );
+  }
+
+  return {
+    from: tripType,
+    to: 'HOURLY',
+    reason: 'DROP_INSIDE_PICKUP_CITY',
+    // Copy for the app to show. Written here rather than in the client so every
+    // surface says the same thing.
+    title: 'Switched to Local',
+    message:
+      `Since your pickup and drop-off are both in ${city.name}, ` +
+      `we've switched your outstation trip to a local ride.`,
+    rentalPackageId: pkg.id,
+    rentalPackageLabel: pkg.label,
+    rentalHours: pkg.includedHours,
+  };
+}
+
 
 /* ------------------------------------------------------------------ *
  * Config loading
@@ -162,6 +276,10 @@ async function getQuote(input) {
     resolveLocation(effectiveDrop, 'drop'),
   ]);
 
+  // A point-to-point trip must actually go somewhere. Checked before any
+  // routing call, so a request that can never succeed costs no maps quota.
+  assertDistinctEndpoints(tripType, pickupPoint, dropPoint);
+
   // Intermediate stops (ignored for HOURLY, which prices by package not route).
   const stopPoints = isHourly
     ? []
@@ -175,35 +293,51 @@ async function getQuote(input) {
     );
   }
 
+  // An outstation request that never leaves the city becomes a local rental
+  // rather than an error. Everything below then prices the LOCAL product, and
+  // the switch is reported back so the app can say what changed.
+  const localSwitch = await resolveLocalSwitch(tripType, dropPoint, city);
+  const effectiveTripType = localSwitch ? localSwitch.to : tripType;
+  const effectivePackageId = localSwitch ? localSwitch.rentalPackageId : rentalPackageId;
+  const effectiveHours = localSwitch ? null : rentalHours;
+  const isHourlyNow = effectiveTripType === 'HOURLY';
+
   /* -- 2. distance -- */
 
   // HOURLY prices from the package/hours, not the route, so we skip the distance
   // call entirely (which also avoids the SAME_LOCATION check when drop==pickup).
   // With stops, the route is pickup → stop₁ → … → drop. getPathDistance sums the
   // legs, each Redis-cached exactly like a plain pickup→drop lookup.
-  const route = isHourly
+  // isHourlyNow, not isHourly: a switched trip is priced as a rental, so the
+  // route lookup is skipped and its SAME_LOCATION guard along with it.
+  const route = isHourlyNow
     ? { distanceKm: 0, durationMin: 0, provider: 'none', estimated: false }
     : stopPoints.length
       ? await maps.getPathDistance([pickupPoint, ...stopPoints, dropPoint], { maxKm: MAX_TRIP_KM })
       : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
 
-  // A round trip covers the route twice. The engine expects the TOTAL.
-  const distanceKm = tripType === 'ROUND_TRIP' ? route.distanceKm * 2 : route.distanceKm;
-  const durationMin = tripType === 'ROUND_TRIP' ? route.durationMin * 2 : route.durationMin;
+  // A round trip covers the route twice. The engine expects the TOTAL. A round
+  // trip that switched to local no longer has two legs, so it is excluded.
+  const doubled = effectiveTripType === 'ROUND_TRIP';
+  const distanceKm = doubled ? route.distanceKm * 2 : route.distanceKm;
+  const durationMin = doubled ? route.durationMin * 2 : route.durationMin;
 
   /* -- 3. rate card + pure computation -- */
 
-  const config = await getFareConfig(cityId, vehicleClass, tripType);
+  const config = await getFareConfig(cityId, vehicleClass, effectiveTripType);
 
-  // HOURLY: load the chosen fixed package (if any) so the engine can price it.
+  /* -- HOURLY: resolve which rental product is actually being bought -- */
+
   let rentalPackage = null;
-  if (tripType === 'HOURLY' && rentalPackageId) {
+  let matchedPackage = false;
+
+  if (isHourlyNow && effectivePackageId) {
     // The app stores a representative package id (from whichever class it listed
     // first). Resolve it to THIS booking's class: find the stored row to learn
     // its duration label, then match the same label for the booked class. So
     // "4hr/40km" works whatever class the user chooses.
     const requested = await prisma.rentalPackage.findFirst({
-      where: { id: Number(rentalPackageId), cityId: Number(cityId), isActive: true },
+      where: { id: Number(effectivePackageId), cityId: Number(cityId), isActive: true },
     });
     rentalPackage = requested && requested.vehicleClass === vehicleClass
       ? requested
@@ -215,6 +349,36 @@ async function getQuote(input) {
     if (!rentalPackage) {
       throw ApiError.badRequest('That rental package is not available', 'RENTAL_PACKAGE_NOT_FOUND');
     }
+  } else if (isHourlyNow && effectiveHours) {
+    /**
+     * Flexible hours that happen to equal a package.
+     *
+     * The rider used the stepper rather than tapping a package card, but asked
+     * for a duration a package already covers — 4, 8, 12 hours. Priced by the
+     * hourly rate that would usually cost MORE than the bundle for the exact
+     * same product, which the rider cannot see because the two options sit
+     * behind a toggle and are never compared.
+     *
+     * So an exact match on includedHours is priced as the package. Charging
+     * more for the identical thing because of which control was tapped is not
+     * a pricing decision, it is an accident of the UI.
+     *
+     * Only an EXACT match counts. 5 hours does not become the 4-hour package
+     * (the rider would be short an hour) and does not become the 8-hour one
+     * (they would be billed for three hours they did not ask for). Anything
+     * without a package falls through to the hourly rate, unchanged.
+     */
+    rentalPackage = await prisma.rentalPackage.findFirst({
+      where: {
+        cityId: Number(cityId),
+        vehicleClass,
+        includedHours: Number(effectiveHours),
+        isActive: true,
+      },
+      // Cheapest wins if a city ever seeds two packages of the same duration.
+      orderBy: { packageFare: 'asc' },
+    });
+    matchedPackage = Boolean(rentalPackage);
   }
 
   // The city's IANA timezone decides the night window and the calendar-day
@@ -222,8 +386,13 @@ async function getQuote(input) {
   // booking would price differently on a Bengaluru laptop and a UTC server.
   const priced = fare.computeFare(
     {
-      tripType, distanceKm, durationMin, pickupAt, returnAt, waitingMinutes, surge,
-      rentalPackage, rentalHours,
+      tripType: effectiveTripType,
+      distanceKm, durationMin, pickupAt,
+      // A switched trip has no return leg to price.
+      returnAt: localSwitch ? null : returnAt,
+      waitingMinutes, surge,
+      rentalPackage,
+      rentalHours: effectiveHours,
       timeZone: city.timezone,
     },
     config
@@ -233,10 +402,23 @@ async function getQuote(input) {
     quote: priced,
     // The rental package actually applied (resolved to this booking's class), so
     // the caller persists the correct class-specific id, not the raw app input.
+    // This is also set when the rider asked for flexible hours that happen to
+    // match a package — the booking then records the package it was priced as,
+    // not the stepper value, so the frozen fare stays explainable.
     rentalPackageId: rentalPackage ? rentalPackage.id : null,
     rentalHours: rentalHours || null,
+    // True only when a flexible-hours request was upgraded to a package. Lets
+    // the app tell the rider they got the bundle rate instead of silently
+    // showing a lower number than the one they were quoted a moment ago.
+    rentalPackageMatched: matchedPackage,
+    rentalPackageLabel: rentalPackage ? rentalPackage.label : null,
+    // Non-null only when an outstation request was answered with a local ride.
+    // Carries the copy for the dialog and the terms the app must adopt.
+    switchedToLocal: localSwitch,
     trip: {
-      tripType,
+      // What was PRICED, which may differ from what was asked for.
+      tripType: effectiveTripType,
+      requestedTripType: tripType,
       vehicleClass,
       cityId: city.id,
       cityName: city.name,
@@ -276,9 +458,24 @@ async function compareTripTypes(input) {
     resolveLocation(input.drop, 'drop'),
   ]);
 
+  // This endpoint compares ONE_WAY against ROUND_TRIP for the same route, so a
+  // same-place request is meaningless for the half of the comparison that is
+  // point-to-point. Guarded as ONE_WAY.
+  assertDistinctEndpoints('ONE_WAY', pickupPoint, dropPoint);
+
   const serviceable = maps.isServiceable(pickupPoint, city);
   if (!serviceable.ok) {
     throw ApiError.badRequest('Pickup is outside the service area', 'OUTSIDE_SERVICE_AREA');
+  }
+
+  // This endpoint exists to compare ONE_WAY against ROUND_TRIP for one route.
+  // Both are outstation products, so a same-city drop leaves nothing to
+  // compare — and unlike a quote there is no single answer to switch TO.
+  if (isDropInsideCity(dropPoint, city)) {
+    throw ApiError.badRequest(
+      `Both points are in ${city.name}. Ask for a local rental quote instead.`,
+      'DROP_INSIDE_PICKUP_CITY'
+    );
   }
 
   const route = await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
@@ -346,13 +543,26 @@ async function quoteAllClasses(input) {
     resolveLocation(effectiveDrop, 'drop'),
   ]);
 
+  // A point-to-point trip must actually go somewhere. Checked before any
+  // routing call, so a request that can never succeed costs no maps quota.
+  assertDistinctEndpoints(input.tripType, pickupPoint, dropPoint);
+
   const serviceable = maps.isServiceable(pickupPoint, city);
   if (!serviceable.ok) {
     throw ApiError.badRequest('Pickup is outside the service area', 'OUTSIDE_SERVICE_AREA');
   }
 
-  // HOURLY needs a package or an hours commitment, same rule as a single quote.
-  if (isHourly && !input.rentalPackageId && !input.rentalHours) {
+  // An outstation request that never leaves the city becomes a local rental.
+  // Everything below prices the LOCAL product and the switch is reported back.
+  const localSwitch = await resolveLocalSwitch(input.tripType, dropPoint, city);
+  const effectiveTripType = localSwitch ? localSwitch.to : input.tripType;
+  const effectivePackageId = localSwitch ? localSwitch.rentalPackageId : input.rentalPackageId;
+  const effectiveHours = localSwitch ? null : input.rentalHours;
+  const isHourlyNow = effectiveTripType === 'HOURLY';
+
+  // A switched request arrives with no rental terms by definition, so this only
+  // guards a request that asked for HOURLY in the first place.
+  if (isHourlyNow && !localSwitch && !effectivePackageId && !effectiveHours) {
     throw ApiError.badRequest(
       'An hourly rental needs a package or a number of hours',
       'RENTAL_TERMS_REQUIRED'
@@ -361,14 +571,14 @@ async function quoteAllClasses(input) {
 
   // HOURLY prices from the package, so skip the distance lookup (and its
   // SAME_LOCATION guard when drop==pickup).
-  const route = isHourly
+  const route = isHourlyNow
     ? { distanceKm: 0, durationMin: 0, provider: 'none', estimated: false }
     : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
 
   const configs = await prisma.fareConfig.findMany({
     where: {
       cityId: Number(input.cityId),
-      tripType: input.tripType,
+      tripType: effectiveTripType,
       isActive: true,
       effectiveFrom: { lte: new Date() },
     },
@@ -386,15 +596,23 @@ async function quoteAllClasses(input) {
   // A round trip covers the route twice; the engine expects the TOTAL distance.
   // HOURLY and AIRPORT use the one-way distance (the engine adds their own
   // package/surcharge logic on top).
-  const multiplier = input.tripType === 'ROUND_TRIP' ? 2 : 1;
+  const multiplier = effectiveTripType === 'ROUND_TRIP' ? 2 : 1;
 
   // HOURLY with a fixed package: load the package PER vehicle class, since each
   // class has its own package fares. Done once up front to avoid N queries.
   let packagesByClass = null;
-  if (input.tripType === 'HOURLY' && input.rentalPackageId) {
-    const pkgs = await prisma.rentalPackage.findMany({
-      where: { id: Number(input.rentalPackageId), cityId: Number(input.cityId), isActive: true },
+  if (isHourlyNow && effectivePackageId) {
+    // Resolve by LABEL, not by id. A package id belongs to one vehicle class,
+    // but this endpoint prices every class — so find the chosen package's label
+    // and fetch that same product for each class.
+    const chosen = await prisma.rentalPackage.findFirst({
+      where: { id: Number(effectivePackageId), cityId: Number(input.cityId), isActive: true },
     });
+    const pkgs = chosen
+      ? await prisma.rentalPackage.findMany({
+          where: { cityId: Number(input.cityId), label: chosen.label, isActive: true },
+        })
+      : [];
     packagesByClass = new Map(pkgs.map((p) => [p.vehicleClass, p]));
   }
 
@@ -430,7 +648,9 @@ async function quoteAllClasses(input) {
 
   return {
     trip: {
-      tripType: input.tripType,
+      // What was PRICED, which may differ from what was asked for.
+      tripType: effectiveTripType,
+      requestedTripType: input.tripType,
       cityName: city.name,
       oneWayKm: route.distanceKm,
       totalKm: route.distanceKm * multiplier,
@@ -440,6 +660,8 @@ async function quoteAllClasses(input) {
     },
     options,
     routing: { provider: route.provider, estimated: route.estimated },
+    // Non-null only when an outstation request was answered with a local ride.
+    switchedToLocal: localSwitch,
   };
 }
 

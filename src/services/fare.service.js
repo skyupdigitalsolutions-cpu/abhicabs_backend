@@ -431,6 +431,8 @@ function computeHourlyFare(input, config) {
     total: total.toFixed(2),
     meta: {
       rental: true,
+      // Hours the rider actually bought. computeExtraTimeCharge measures an
+      // overrun against THIS, so re-reporting a trip never compounds the charge.
       includedHours,
       includedKm,
       packageLabel: rentalPackage ? rentalPackage.label : null,
@@ -439,6 +441,28 @@ function computeHourlyFare(input, config) {
       touchesNightWindow,
       nightWindow: formatNightWindow(nightWindow),
       allowancesExempt: exemptFromAllowances,
+    },
+
+    /**
+     * The rates an overrun is settled at, frozen with the quote.
+     *
+     * A rental had no snapshot at all before this, so a trip that ran long had
+     * nothing to price the extra hours against and silently settled at zero.
+     * Only the overage rates are frozen here — the rest of the rate card never
+     * applies to a package, which is priced as a flat bundle.
+     */
+    configSnapshot: {
+      fareConfigId: config.id ?? null,
+      cityId: config.cityId ?? null,
+      vehicleClass: config.vehicleClass ?? null,
+      hourlyRate: M.toStr(config.hourlyRate ?? 0),
+      hourlyKmPerHour: Number(config.hourlyKmPerHour ?? 0),
+      perKm: M.toStr(config.perKm ?? 0),
+      // A package's own overage rates beat the generic ones, so both travel.
+      rentalExtraPerHour: M.toStr(rentalPackage ? rentalPackage.extraPerHour ?? 0 : 0),
+      rentalExtraPerKm: M.toStr(rentalPackage ? rentalPackage.extraPerKm ?? 0 : 0),
+      rentalPackageId: rentalPackage ? rentalPackage.id : null,
+      computedAt: new Date().toISOString(),
     },
     breakdown,
   };
@@ -571,27 +595,21 @@ function computeFare(input, config) {
     });
   }
 
-  /* -- 6. waiting (any trip type) ----------------------------------- *
-   * Waiting is charged whenever the vehicle is held idle beyond the free
-   * allowance, on ONE-WAY and ROUND trips alike (e.g. the driver waits while
-   * the customer runs an errand). It stays zero unless the config sets a
-   * waitingPerHour rate, so a class that shouldn't bill waiting simply leaves
-   * that rate at 0.
+  /* -- 6. waiting — NOT CHARGED ------------------------------------- *
+   *
+   * A trip starts when the driver reaches the pickup point, so there is no idle
+   * period to bill for. Time only costs the rider if the JOURNEY runs past the
+   * hours they booked, and that is settled at trip end by
+   * computeExtraTimeCharge, not guessed at quote time.
+   *
+   * Kept as a zero rather than deleted so every downstream consumer — the
+   * breakdown, the invoice, the frozen fareBasis of bookings already taken —
+   * keeps the same shape. A missing key would read as undefined and quietly
+   * poison a sum; an explicit zero cannot.
    */
 
-  let waitingCharge = M.dec(0);
-  let chargeableWaitMin = 0;
-  if (M.dec(config.waitingPerHour ?? 0).greaterThan(0)) {
-    const free = Number(config.freeWaitingMin ?? 0);
-    chargeableWaitMin = Math.max(0, Number(waitingMinutes) - free);
-    if (chargeableWaitMin > 0) {
-      waitingCharge = M.round2(M.mul(M.div(chargeableWaitMin, 60), config.waitingPerHour));
-      breakdown.push({
-        label: `Waiting (${chargeableWaitMin} min beyond ${free} free)`,
-        amount: M.toStr(waitingCharge),
-      });
-    }
-  }
+  const waitingCharge = M.dec(0);
+  const chargeableWaitMin = 0;
 
   /* -- 7. night allowance (every trip type EXCEPT airport) ---------- *
    *
@@ -784,8 +802,17 @@ function computeFare(input, config) {
       returnEmptyPct: M.toStr(config.returnEmptyPct ?? 0),
       minKmPerDay: Number(config.minKmPerDay ?? 0),
       driverAllowance: M.toStr(config.driverAllowance ?? 0),
+      // Waiting is no longer charged; both are frozen at their config values
+      // purely so an OLD booking's fareBasis still reads the same shape.
       waitingPerHour: M.toStr(config.waitingPerHour ?? 0),
       freeWaitingMin: Number(config.freeWaitingMin ?? 0),
+
+      // The rates an overrun is settled at. Frozen here so a rate card edited
+      // mid-trip cannot change what the trip ends up costing. No package rates:
+      // a package is only ever priced by computeHourlyFare, which freezes its
+      // own snapshot.
+      hourlyRate: M.toStr(config.hourlyRate ?? 0),
+      hourlyKmPerHour: Number(config.hourlyKmPerHour ?? 0),
       nightAllowance: M.toStr(config.nightAllowance ?? 0),
       nightChargePct: M.toStr(config.nightChargePct ?? 0),
       nightStartHour: Number(config.nightStartHour ?? 21),
@@ -921,10 +948,72 @@ function computeExtraDistanceCharge({ fareBasis, quotedKm, actualKm }) {
   };
 }
 
+/**
+ * Extra charge for a trip that ran past the hours it was booked for.
+ *
+ * The time counterpart of computeExtraDistanceCharge, and settled the same way:
+ * at trip end, from the FROZEN quote, never at booking time. Only the surplus
+ * is billable — finishing early is never a credit.
+ *
+ * Which rate applies depends on what was actually sold:
+ *
+ *   • A rental PACKAGE ("8 hrs / 80 km") carries its own extraPerHour. That
+ *     rate is part of the product the rider bought, so it wins.
+ *   • Flexible hours fall back to the rate card's hourlyRate — the rider is
+ *     simply buying more of the same thing.
+ *
+ * Both come from fareBasis rather than the live config, so a rate card edited
+ * after the booking cannot change what an in-flight trip costs.
+ *
+ * Partial hours are billed pro-rata rather than rounded up to a whole hour.
+ * Rounding up turns a nine-minute overrun into a full hour's charge, which is
+ * the kind of surprise that generates a refund request rather than a payment.
+ *
+ * @param {object} args
+ * @param {object} args.fareBasis    booking.fareBasis (the frozen quote)
+ * @param {number|string} args.bookedHours  hours the fare was quoted on
+ * @param {number|string} args.actualHours  hours the trip actually took
+ * @returns {{
+ *   bookedHours: string, actualHours: string, extraHours: string,
+ *   perHour: string, extraCharge: string, source: string, hasExtra: boolean
+ * }}
+ */
+function computeExtraTimeCharge({ fareBasis, bookedHours, actualHours }) {
+  const fb = fareBasis || {};
+  const quote = fb.components || fb;
+  const snap = quote.configSnapshot || fb.configSnapshot || {};
+
+  // A package's own overage rate beats the generic hourly rate.
+  const pkgRate = M.dec(snap.rentalExtraPerHour ?? quote.rentalExtraPerHour ?? 0);
+  const usePackageRate = M.gt(pkgRate, 0);
+  const perHour = usePackageRate ? pkgRate : M.dec(snap.hourlyRate ?? 0);
+
+  // Prefer the hours the frozen quote was priced on, so re-reporting the same
+  // trip never compounds the charge.
+  const bookedFromBasis =
+    quote.meta && quote.meta.includedHours != null ? quote.meta.includedHours : null;
+  const booked = M.dec(bookedFromBasis ?? bookedHours ?? 0);
+  const actual = M.dec(actualHours ?? 0);
+
+  const extraHours = M.max(M.sub(actual, booked), M.dec(0));
+  const extraCharge = M.round2(M.mul(extraHours, perHour));
+
+  return {
+    bookedHours: M.toStr(booked),
+    actualHours: M.toStr(actual),
+    extraHours: M.toStr(extraHours),
+    perHour: M.toStr(perHour),
+    extraCharge: M.toStr(extraCharge),
+    source: usePackageRate ? 'package' : 'hourly-rate',
+    hasExtra: M.gt(extraHours, 0) && M.gt(extraCharge, 0),
+  };
+}
+
 module.exports = {
   computeFare,
   computeCancellationFee,
   computeExtraDistanceCharge,
+  computeExtraTimeCharge,
   chargeableDays,
   isNightHour,
   isNightMinute,

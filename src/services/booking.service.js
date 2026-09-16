@@ -281,6 +281,24 @@ async function create(input, actor, meta = {}) {
       flightNumber: input.flightNumber || null,
     });
 
+    /**
+     * A quote may answer an outstation request with a LOCAL ride when both
+     * points are in the same city. That is the right behaviour while browsing
+     * fares — but a booking must never be created as a different product from
+     * the one the rider confirmed.
+     *
+     * So the switch is surfaced as an error here instead. The app has already
+     * shown the "Switched to Local" dialog at the quote step, and the rider's
+     * draft is HOURLY by the time they book; this only fires if something
+     * bypassed that, which is exactly when it should.
+     */
+    if (quote.switchedToLocal) {
+      throw ApiError.badRequest(
+        quote.switchedToLocal.message,
+        'SWITCH_TO_LOCAL_REQUIRED'
+      );
+    }
+
     const total = quote.quote.total;
     const { advanceDue, balanceDue } = splitPayment(total, input.paymentMode);
 
