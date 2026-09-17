@@ -27,6 +27,50 @@ const { ApiError } = require('../utils/helpers');
 const MAX_TRIP_KM = Number(process.env.MAX_TRIP_KM || 1500);
 
 /**
+ * A pickup this soon counts as immediate rather than scheduled.
+ *
+ * Thirty minutes is roughly how long it takes to find a driver, get them moving
+ * and have them reach a pickup point in city traffic. Inside that window the
+ * dispatcher has no slack: it must pull a driver who is free right now rather
+ * than planning around the booking.
+ */
+const IMMINENT_PICKUP_MINUTES = Number(process.env.SURGE_IMMINENT_MINUTES || 30);
+
+/** What that urgency costs — 5%. */
+const IMMINENT_PICKUP_SURGE = Number(process.env.SURGE_IMMINENT_MULTIPLIER || 1.05);
+
+/**
+ * Work out the surge multiplier for a quote.
+ *
+ * Decided HERE rather than taken from the request. The surge field is part of
+ * the fare schema and a client could send 1.0 for a pickup ten minutes away —
+ * the app has no reason to be trusted with a number that changes the price.
+ * Whatever arrives is treated as a floor, so an admin tool can still push surge
+ * up manually, but nothing can push it down below what the booking earns.
+ *
+ * Applies to every trip type. A rental or an airport run booked for twenty
+ * minutes' time costs the dispatcher exactly as much urgency as a one-way does.
+ *
+ * @param {Date|string} pickupAt   when the rider wants collecting
+ * @param {number} requestedSurge  whatever the caller asked for
+ * @returns {{ surge: number, imminent: boolean, minutesToPickup: number }}
+ */
+function resolveSurge(pickupAt, requestedSurge = 1) {
+  const when = pickupAt instanceof Date ? pickupAt : new Date(pickupAt);
+  const minutesToPickup = Math.round((when.getTime() - Date.now()) / 60000);
+
+  // A pickup already in the past is not "extra imminent" — it is a scheduling
+  // error the booking validator rejects. Clamped so it cannot read as negative
+  // urgency here.
+  const imminent = minutesToPickup <= IMMINENT_PICKUP_MINUTES;
+
+  const base = Number(requestedSurge) > 0 ? Number(requestedSurge) : 1;
+  const surge = imminent ? Math.max(base, IMMINENT_PICKUP_SURGE) : base;
+
+  return { surge, imminent, minutesToPickup: Math.max(0, minutesToPickup) };
+}
+
+/**
  * How far apart pickup and drop must be before a trip counts as a real journey.
  *
  * 250 m rather than a few metres. Two pins dropped at opposite ends of one mall
@@ -324,6 +368,9 @@ async function getQuote(input) {
   // An outstation request that never leaves the city becomes a local rental
   // rather than an error. Everything below then prices the LOCAL product, and
   // the switch is reported back so the app can say what changed.
+  // Server-decided, never taken on trust from the request.
+  const surgeInfo = resolveSurge(pickupAt, surge);
+
   const localSwitch = await resolveLocalSwitch(tripType, dropPoint, city);
   const effectiveTripType = localSwitch ? localSwitch.to : tripType;
   const effectivePackageId = localSwitch ? localSwitch.rentalPackageId : rentalPackageId;
@@ -418,7 +465,8 @@ async function getQuote(input) {
       distanceKm, durationMin, pickupAt,
       // A switched trip has no return leg to price.
       returnAt: localSwitch ? null : returnAt,
-      waitingMinutes, surge,
+      waitingMinutes,
+      surge: surgeInfo.surge,
       rentalPackage,
       rentalHours: effectiveHours,
       timeZone: city.timezone,
@@ -443,6 +491,18 @@ async function getQuote(input) {
     // Non-null only when an outstation request was answered with a local ride.
     // Carries the copy for the dialog and the terms the app must adopt.
     switchedToLocal: localSwitch,
+    /**
+     * Why the price carries a premium, so the app can say so rather than
+     * leaving the rider to notice a number they cannot account for.
+     */
+    surge: {
+      multiplier: surgeInfo.surge,
+      imminent: surgeInfo.imminent,
+      minutesToPickup: surgeInfo.minutesToPickup,
+      reason: surgeInfo.imminent
+        ? `Picking up in about ${surgeInfo.minutesToPickup} min`
+        : null,
+    },
     trip: {
       // What was PRICED, which may differ from what was asked for.
       tripType: effectiveTripType,
@@ -533,7 +593,7 @@ async function compareTripTypes(input) {
             distanceKm: route.distanceKm,
             durationMin: route.durationMin,
             pickupAt: input.pickupAt,
-            surge: input.surge,
+            surge: surgeInfo.surge,
             timeZone: city.timezone,
           },
           oneWayConfig
@@ -548,7 +608,7 @@ async function compareTripTypes(input) {
             pickupAt: input.pickupAt,
             returnAt,
             waitingMinutes: input.waitingMinutes || 0,
-            surge: input.surge,
+            surge: surgeInfo.surge,
             timeZone: city.timezone,
           },
           roundConfig
@@ -582,6 +642,10 @@ async function quoteAllClasses(input) {
 
   // An outstation request that never leaves the city becomes a local rental.
   // Everything below prices the LOCAL product and the switch is reported back.
+  // One decision for the whole list — every class on the screen must show the
+  // same urgency, or the surge looks like it depends on the car.
+  const surgeInfo = resolveSurge(input.pickupAt, input.surge);
+
   const localSwitch = await resolveLocalSwitch(input.tripType, dropPoint, city);
   const effectiveTripType = localSwitch ? localSwitch.to : input.tripType;
   const effectivePackageId = localSwitch ? localSwitch.rentalPackageId : input.rentalPackageId;
@@ -661,7 +725,7 @@ async function quoteAllClasses(input) {
             pickupAt: input.pickupAt,
             returnAt: input.returnAt,
             waitingMinutes: input.waitingMinutes || 0,
-            surge: input.surge,
+            surge: surgeInfo.surge,
             rentalPackage,
             rentalHours: input.rentalHours || null,
             timeZone: city.timezone,
@@ -690,6 +754,18 @@ async function quoteAllClasses(input) {
     routing: { provider: route.provider, estimated: route.estimated },
     // Non-null only when an outstation request was answered with a local ride.
     switchedToLocal: localSwitch,
+    /**
+     * Why the price carries a premium, so the app can say so rather than
+     * leaving the rider to notice a number they cannot account for.
+     */
+    surge: {
+      multiplier: surgeInfo.surge,
+      imminent: surgeInfo.imminent,
+      minutesToPickup: surgeInfo.minutesToPickup,
+      reason: surgeInfo.imminent
+        ? `Picking up in about ${surgeInfo.minutesToPickup} min`
+        : null,
+    },
   };
 }
 
