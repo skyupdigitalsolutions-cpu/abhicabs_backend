@@ -27,22 +27,23 @@
  * time, not five fragments of the same journey.
  *
  * "Open" means PENDING with no booking attached. Once a booking is created the
- * row is settled to COMPLETED by booking.service and a later session starts a
- * fresh one.
+ * row is settled to COMPLETED by booking.service (via closeForBooking) and a
+ * later session starts a fresh one.
  */
 
 const { prisma } = require('../config/prisma');
 const push = require('./push.service');
+const customerService = require('./customer.service');
 
 /**
  * How long a half-finished booking sits before it counts as abandoned.
  *
- * Fifteen minutes. Short enough that the trip is still relevant — someone who
- * picked a pickup point twenty minutes ago may well still want to travel —
- * and long enough that a rider comparing fares, taking a call, or walking to
- * the corner is not chased mid-decision.
+ * Thirty minutes — the standard cart-abandonment window. Long enough that a
+ * rider comparing fares, taking a call, or walking to the corner is not chased
+ * mid-decision; short enough that the trip is still relevant. Override with
+ * FUNNEL_ABANDON_MINUTES.
  */
-const ABANDON_AFTER_MINUTES = Number(process.env.FUNNEL_ABANDON_MINUTES || 15);
+const ABANDON_AFTER_MINUTES = Number(process.env.FUNNEL_ABANDON_MINUTES || 30);
 
 /**
  * How far back the sweeper looks.
@@ -78,6 +79,12 @@ const STAGES = ['STARTED', 'PICKUP_SET', 'DROP_SET', 'FARES_VIEWED', 'PAYMENT_CH
  * @param {object}  meta        ip / userAgent / source
  */
 async function track(customerId, input = {}, meta = {}) {
+  // customer_id is a FK to customers.user_id; an OTP-signup rider may have a
+  // users row but no customers row yet. Create it first, exactly as
+  // booking.service.create does — otherwise the insert below violates
+  // booking_attempts_customer_id_fkey.
+  await customerService.findOrCreate(customerId);
+
   const cutoff = new Date(Date.now() - ABANDON_LOOKBACK_HOURS * 3600 * 1000);
 
   const open = await prisma.bookingAttempt.findFirst({
@@ -131,6 +138,31 @@ async function track(customerId, input = {}, meta = {}) {
     },
     select: { id: true },
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * Close on booking
+ * ------------------------------------------------------------------ */
+
+/**
+ * Close the rider's open draft(s) the moment they actually book, so a completed
+ * booking is never chased by the sweeper.
+ *
+ * Called by booking.service after a successful create. Scoped to still-open rows
+ * (PENDING, no bookingId), so it only ever touches the funnel draft — the
+ * per-submit attempt row is already COMPLETED (it has a bookingId) by the time
+ * this runs. Best-effort: a failure here must not fail the booking.
+ */
+async function closeForBooking(customerId, bookingId) {
+  if (!customerId) return;
+  try {
+    await prisma.bookingAttempt.updateMany({
+      where: { customerId, outcome: 'PENDING', bookingId: null },
+      data: { outcome: 'COMPLETED', bookingId },
+    });
+  } catch (err) {
+    console.error('[funnel] closeForBooking failed:', err.message);
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -241,6 +273,7 @@ async function sweepAbandoned() {
 module.exports = {
   track,
   sweepAbandoned,
+  closeForBooking,
   STAGES,
   ABANDON_AFTER_MINUTES,
 };

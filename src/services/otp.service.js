@@ -3,13 +3,20 @@
 /**
  * src/services/otp.service.js
  *
- * Phone-based OTP login. State lives in Redis with TTLs, so nothing to clean up
- * and expiry is automatic.
+ * OTP login. State lives in Redis with TTLs, so nothing to clean up and expiry
+ * is automatic.
  *
- * Three Redis keys per phone number:
- *   otp:<phone>          hash { hash, attempts, createdAt }   TTL 5 min
- *   otp:cd:<phone>       resend cooldown marker               TTL 30 s
- *   otp:day:<phone>      daily request counter                TTL 24 h
+ * Three Redis keys per SUBJECT — an opaque string chosen by the caller, which
+ * is the user's id in practice:
+ *   otp:<subject>          hash { hash, attempts, createdAt }   TTL 5 min
+ *   otp:cd:<subject>       resend cooldown marker               TTL 30 s
+ *   otp:day:<subject>      daily request counter                TTL 24 h
+ *
+ * Keying by account id rather than by the typed identifier matters: a person
+ * can reach the same account by email today and by phone later, and codes must
+ * not fork into two independent buckets that each carry their own attempt
+ * counter. It also means the cap cannot be sidestepped by varying the spelling
+ * of an address.
  *
  * ---------------------------------------------------------------------------
  * WHY THE OTP IS HASHED
@@ -34,9 +41,9 @@ const COOLDOWN = env.otp.resendCooldownSeconds;
 const MAX_PER_DAY = env.otp.maxPerDay;
 const LENGTH = env.otp.length;
 
-const key = (phone) => `otp:${phone}`;
-const cooldownKey = (phone) => `otp:cd:${phone}`;
-const dailyKey = (phone) => `otp:day:${phone}`;
+const key = (subject) => `otp:${subject}`;
+const cooldownKey = (subject) => `otp:cd:${subject}`;
+const dailyKey = (subject) => `otp:day:${subject}`;
 
 /* ------------------------------------------------------------------ *
  * Generation
@@ -74,10 +81,10 @@ function safeEqual(a, b) {
  * console only as a development fallback, then give up.
  *
  * Email is the interim channel while the MSG91 DLT template is in approval. The
- * caller supplies the address because this service is keyed by phone number and
- * has no business reading the user table itself.
+ * caller supplies the address because this service is keyed by an opaque
+ * subject and has no business reading the user table itself.
  */
-async function deliver(phone, code, recipient = {}) {
+async function deliver(subject, code, recipient = {}) {
   const email = recipient.email;
 
   if (email && emailService.isConfigured()) {
@@ -93,7 +100,8 @@ async function deliver(phone, code, recipient = {}) {
   if (env.otp.devMode) {
     console.log('');
     console.log('  ┌──────────────────────────────────────────┐');
-    console.log(`  │  OTP for ${phone.padEnd(14)}  ${code.padEnd(8)} │`);
+    const label = String(recipient.email || subject).slice(0, 28);
+    console.log(`  │  OTP for ${label.padEnd(28)} ${code.padEnd(8)} │`);
     console.log(`  │  valid for ${String(OTP_TTL / 60).padEnd(28)}min │`);
     console.log('  └──────────────────────────────────────────┘');
     console.log('');
@@ -110,11 +118,11 @@ async function deliver(phone, code, recipient = {}) {
  * ------------------------------------------------------------------ */
 
 /**
- * Sends an OTP. The response is IDENTICAL whether or not the number is
- * registered, so this endpoint cannot be used to discover which phone numbers
- * have accounts.
+ * Sends an OTP for `subject` — an opaque key, not something the caller typed.
+ * Resolving an identifier to an account is the caller's job; this service only
+ * issues, stores and checks codes.
  */
-async function requestOtp(phone, recipient = {}) {
+async function requestOtp(subject, recipient = {}) {
   if (!isCacheUp()) {
     // Without Redis there is no attempt counter and no cooldown, so an OTP
     // issued now would be brute-forceable. Refuse rather than degrade.
@@ -122,9 +130,9 @@ async function requestOtp(phone, recipient = {}) {
   }
 
   // --- resend cooldown ---
-  const onCooldown = await redis.get(cooldownKey(phone));
+  const onCooldown = await redis.get(cooldownKey(subject));
   if (onCooldown) {
-    const ttl = await redis.ttl(cooldownKey(phone));
+    const ttl = await redis.ttl(cooldownKey(subject));
     throw new ApiError(
       429,
       'OTP_COOLDOWN',
@@ -132,11 +140,12 @@ async function requestOtp(phone, recipient = {}) {
     );
   }
 
-  // --- daily cap: SMS pumping fraud protection ---
-  // Attackers trigger OTPs to premium-rate numbers and take a share of the
-  // carrier revenue. Uncapped, this is a real and expensive attack.
-  const dailyCount = await redis.incr(dailyKey(phone));
-  if (dailyCount === 1) await redis.expire(dailyKey(phone), 86_400);
+  // --- daily cap ---
+  // Uncapped, this endpoint is a free mail cannon: an attacker can point it at
+  // one account and bury the real user, or burn through the sending quota so
+  // nobody's codes get through.
+  const dailyCount = await redis.incr(dailyKey(subject));
+  if (dailyCount === 1) await redis.expire(dailyKey(subject), 86_400);
   if (dailyCount > MAX_PER_DAY) {
     throw new ApiError(429, 'OTP_DAILY_LIMIT', 'Daily OTP limit reached. Try again tomorrow.');
   }
@@ -147,13 +156,13 @@ async function requestOtp(phone, recipient = {}) {
   // and resets the attempt counter.
   await redis
     .multi()
-    .hset(key(phone), {
+    .hset(key(subject), {
       hash: hashCode(code),
       attempts: 0,
       createdAt: Date.now(),
     })
-    .expire(key(phone), OTP_TTL)
-    .set(cooldownKey(phone), '1', 'EX', COOLDOWN)
+    .expire(key(subject), OTP_TTL)
+    .set(cooldownKey(subject), '1', 'EX', COOLDOWN)
     .exec();
 
   // If the mail server refuses the message, the code above is already stored
@@ -161,14 +170,14 @@ async function requestOtp(phone, recipient = {}) {
   // on an email that never left. So undo all three keys and fail loudly instead.
   let delivery;
   try {
-    delivery = await deliver(phone, code, recipient);
+    delivery = await deliver(subject, code, recipient);
   } catch (err) {
-    await redis.del(key(phone), cooldownKey(phone));
-    await redis.decr(dailyKey(phone));
+    await redis.del(key(subject), cooldownKey(subject));
+    await redis.decr(dailyKey(subject));
 
     if (err instanceof ApiError) throw err;
 
-    console.error(`[otp] delivery failed for ${phone}: ${err.message}`);
+    console.error(`[otp] delivery failed for ${recipient.email || subject}: ${err.message}`);
     throw new ApiError(
       502,
       'OTP_DELIVERY_FAILED',
@@ -199,12 +208,12 @@ async function requestOtp(phone, recipient = {}) {
  * Single-use is essential: without deletion a valid code could be replayed for
  * the rest of its five-minute window by anyone who saw it.
  */
-async function verifyOtp(phone, code) {
+async function verifyOtp(subject, code) {
   if (!isCacheUp()) {
     throw new ApiError(503, 'OTP_UNAVAILABLE', 'Login by OTP is temporarily unavailable');
   }
 
-  const record = await redis.hgetall(key(phone));
+  const record = await redis.hgetall(key(subject));
 
   if (!record || !record.hash) {
     throw ApiError.unauthorized('Code is invalid or has expired', 'OTP_INVALID');
@@ -215,16 +224,16 @@ async function verifyOtp(phone, code) {
   // hopeless; unlimited tries makes it trivial.
   const attempts = Number(record.attempts || 0);
   if (attempts >= MAX_ATTEMPTS) {
-    await redis.del(key(phone));
+    await redis.del(key(subject));
     throw ApiError.unauthorized('Too many incorrect attempts. Request a new code.', 'OTP_LOCKED');
   }
 
   if (!safeEqual(record.hash, hashCode(code))) {
-    const now = await redis.hincrby(key(phone), 'attempts', 1);
+    const now = await redis.hincrby(key(subject), 'attempts', 1);
     const remaining = Math.max(0, MAX_ATTEMPTS - now);
 
     if (remaining === 0) {
-      await redis.del(key(phone));
+      await redis.del(key(subject));
       throw ApiError.unauthorized('Too many incorrect attempts. Request a new code.', 'OTP_LOCKED');
     }
     throw ApiError.unauthorized(
@@ -234,14 +243,14 @@ async function verifyOtp(phone, code) {
   }
 
   // Success — consume the code and clear the cooldown.
-  await redis.del(key(phone), cooldownKey(phone));
+  await redis.del(key(subject), cooldownKey(subject));
   return true;
 }
 
 /** For support tooling: clear a stuck OTP state. Audit-log any use of this. */
-async function reset(phone) {
+async function reset(subject) {
   if (!isCacheUp()) return 0;
-  return redis.del(key(phone), cooldownKey(phone), dailyKey(phone));
+  return redis.del(key(subject), cooldownKey(subject), dailyKey(subject));
 }
 
 module.exports = {

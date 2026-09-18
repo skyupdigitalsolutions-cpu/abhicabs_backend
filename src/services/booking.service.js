@@ -28,6 +28,7 @@ const quoteService = require('./quote.service');
 const customerService = require('./customer.service');
 const corporateService = require('./corporate.service');
 const audit = require('./audit.service');
+const funnel = require('./funnel.service');
 const M = require('../lib/money');
 const { emit, EVENTS } = require('../lib/events');
 const { BOOKING_SELECT, BOOKING_LIST_SELECT } = require('../models/booking.model');
@@ -395,6 +396,8 @@ async function create(input, actor, meta = {}) {
       bookingId: booking.id,
       estimatedFare: total,
     });
+
+     await funnel.closeForBooking(customerId, booking.id);
 
     emit(EVENTS.BOOKING_CREATED, {
       bookingId: booking.id,

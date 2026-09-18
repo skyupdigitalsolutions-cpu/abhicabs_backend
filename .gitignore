@@ -1,5 +1,13 @@
 node_modules/
 .env
 .env.local
+.env.*.local
 dist/
 *.log
+
+# Prisma generated client (regenerated on the server by postinstall)
+/generated
+/prisma/generated
+
+# OS / editor noise
+.DS_Store

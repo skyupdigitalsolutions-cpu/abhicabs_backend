@@ -25,17 +25,29 @@ const indianPhone = z
     message: 'Enter a valid 10-digit Indian mobile number',
   });
 
+/**
+ * Login identifier. Lowercased before validation so "Shashi@Gmail.com" and
+ * "shashi@gmail.com" resolve to the same row — users.email is stored lowercase
+ * and a unique index is case-SENSITIVE, so without this the same person could
+ * be told their account does not exist.
+ */
+const loginEmail = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .email('Enter a valid email address')
+  .max(180);
+
 const otpRequestSchema = z.object({
-  phone: indianPhone,
+  email: loginEmail,
 });
 
 const otpVerifySchema = z.object({
-  phone: indianPhone,
+  email: loginEmail,
   code: z
     .string()
     .trim()
-    .regex(/^\d{4,8}$/, 'Enter the numeric code from your SMS'),
-  // Supplied on first-time signup only; ignored for an existing account.
+    .regex(/^\d{4,8}$/, 'Enter the numeric code from your email'),
   // Note there is deliberately NO role field here.
   name: z.string().trim().min(2).max(120).optional(),
 });
@@ -45,4 +57,4 @@ const grantPermissionSchema = z.object({
   permission: z.string().trim().min(3).max(48),
 });
 
-module.exports = { indianPhone, otpRequestSchema, otpVerifySchema, grantPermissionSchema };
+module.exports = { indianPhone, loginEmail, otpRequestSchema, otpVerifySchema, grantPermissionSchema };

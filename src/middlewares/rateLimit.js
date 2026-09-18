@@ -174,7 +174,7 @@ const otpRequestLimiter = make({
   name: 'otpreq',
   windowMs: 15 * 60 * 1000,
   max: 5,
-  keyGenerator: (req) => `${req.ip}:${req.body?.phone || 'none'}`,
+  keyGenerator: (req) => `${req.ip}:${req.body?.email || 'none'}`,
   msg: 'Too many code requests. Please wait before trying again.',
 });
 
@@ -183,7 +183,7 @@ const otpVerifyLimiter = make({
   name: 'otpver',
   windowMs: 15 * 60 * 1000,
   max: 15,
-  keyGenerator: (req) => `${req.ip}:${req.body?.phone || 'none'}`,
+  keyGenerator: (req) => `${req.ip}:${req.body?.email || 'none'}`,
   msg: 'Too many verification attempts. Request a new code.',
 });
 
