@@ -118,7 +118,31 @@ const numberParamSchema = z.object({
   bookingNumber: z.string().trim().min(3).max(20),
 });
 
+/**
+ * Progress through the booking form, before a booking exists.
+ *
+ * Everything is optional on purpose. This fires as the rider fills the form, so
+ * a partially-filled draft is the normal case — rejecting it would mean the only
+ * drafts recorded are the ones that were nearly complete anyway, which is the
+ * opposite of what the funnel is for.
+ */
+const trackDraftSchema = z.object({
+  stage: z
+    .enum(['STARTED', 'PICKUP_SET', 'DROP_SET', 'FARES_VIEWED', 'PAYMENT_CHOSEN'])
+    .optional(),
+  tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'HOURLY', 'AIRPORT']).optional(),
+  vehicleClass: z.string().trim().max(24).optional(),
+  pickupAddress: z.string().trim().max(500).optional(),
+  dropAddress: z.string().trim().max(500).optional(),
+  pickupAt: z.string().datetime().optional(),
+  estimatedFare: z.coerce.number().min(0).max(9999999).optional(),
+  pickup: z.object({ lat: z.number(), lng: z.number() }).optional(),
+  drop: z.object({ lat: z.number(), lng: z.number() }).optional(),
+  stops: z.array(z.object({ lat: z.number(), lng: z.number() })).max(5).optional(),
+});
+
 module.exports = {
+  trackDraftSchema,
   createBookingSchema,
   listBookingsQuerySchema,
   listAttemptsQuerySchema,

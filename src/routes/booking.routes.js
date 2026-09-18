@@ -38,6 +38,13 @@ router.post(
 
 /* ---------------- read ---------------- */
 
+/**
+ * Funnel tracking. Called as the rider fills the form, BEFORE a booking exists,
+ * so a drop-off can be chased. Placed above /:id so "draft" is never read as an
+ * id.
+ */
+router.post('/draft', validate({ body: s.trackDraftSchema }), ctrl.trackDraft);
+
 router.get('/', validate({ query: s.listBookingsQuerySchema }), ctrl.list);
 
 // Static segments must precede /:id or they are captured as a uuid parameter.

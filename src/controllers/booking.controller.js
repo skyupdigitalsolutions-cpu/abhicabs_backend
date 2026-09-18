@@ -5,6 +5,7 @@
  */
 
 const bookingService = require('../services/booking.service');
+const funnel = require('../services/funnel.service');
 const summaryService = require('../services/summary.service');
 const { asyncHandler, ApiError } = require('../utils/helpers');
 
@@ -61,4 +62,25 @@ exports.listAttempts = asyncHandler(async (req, res) => {
 exports.stats = asyncHandler(async (req, res) => {
   const data = await bookingService.stats(req.validatedQuery || req.query);
   res.json({ success: true, data });
+});
+
+/**
+ * POST /bookings/draft — record progress through the booking form.
+ *
+ * Fire-and-forget from the app's point of view: it returns 202 and never blocks
+ * the rider. A tracking call that can fail a booking form is worse than one
+ * that occasionally records nothing, so failures are swallowed rather than
+ * surfaced.
+ */
+exports.trackDraft = asyncHandler(async (req, res) => {
+  try {
+    await funnel.track(req.user.id, req.body, {
+      ip: req.ip || '',
+      userAgent: req.get('user-agent') || '',
+      source: req.get('x-client') || 'api',
+    });
+  } catch (err) {
+    console.error(`[funnel] track failed: ${err.message}`);
+  }
+  res.status(202).json({ success: true });
 });

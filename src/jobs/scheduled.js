@@ -18,6 +18,7 @@
 
 const { prisma } = require('../config/prisma');
 const env = require('../config/env');
+const funnel = require('../services/funnel.service');
 
 /* ---------------- reconciliation ---------------- */
 
@@ -60,6 +61,18 @@ async function reconciliation() {
  *      left as-is (a late webhook can still settle them); we only expire the
  *      BOOKING, not the payment, so a delayed capture is never lost.
  */
+/**
+ * Chase riders who filled in part of a booking and stopped.
+ *
+ * Marks stale drafts ABANDONED and sends one push each. Safe to run repeatedly:
+ * the claim is a guarded update on notifiedAt, so a redelivered run finds
+ * nothing left to do rather than messaging anyone twice.
+ */
+async function abandonedBookingSweeper() {
+  const { scanned, notified } = await funnel.sweepAbandoned();
+  return { scanned, notified };
+}
+
 async function pendingPaymentSweeper() {
   const lifecycle = require('../services/lifecycle.service');
 
@@ -153,6 +166,7 @@ async function reportPreaggregation() {
 const HANDLERS = {
   reconciliation,
   'pending-payment-sweeper': pendingPaymentSweeper,
+  'abandoned-booking-sweeper': abandonedBookingSweeper,
   'session-pruning': sessionPruning,
   'stale-driver-cleanup': staleDriverCleanup,
   'cache-warming': cacheWarming,
@@ -166,6 +180,7 @@ const HANDLERS = {
 const SCHEDULES = [
   { name: 'stale-driver-cleanup', pattern: '*/1 * * * *' },   // every minute
   { name: 'pending-payment-sweeper', pattern: '*/5 * * * *' }, // every 5 min
+  { name: 'abandoned-booking-sweeper', pattern: '*/5 * * * *' }, // every 5 min
   { name: 'cache-warming', pattern: '*/15 * * * *' },          // every 15 min
   { name: 'report-preaggregation', pattern: '*/10 * * * *' },  // every 10 min
   { name: 'session-pruning', pattern: '0 * * * *' },           // hourly
