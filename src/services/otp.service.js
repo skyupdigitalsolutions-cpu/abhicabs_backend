@@ -25,6 +25,7 @@
 const crypto = require('crypto');
 const { cache: redis, isCacheUp } = require('../config/redis');
 const env = require('../config/env');
+const emailService = require('./email.service');
 const { ApiError } = require('../utils/helpers');
 
 const OTP_TTL = env.otp.ttlSeconds;
@@ -69,10 +70,26 @@ function safeEqual(a, b) {
  * ------------------------------------------------------------------ */
 
 /**
- * Dev mode prints the code to the console instead of sending it. Swap in the
- * MSG91 call here once the DLT template is approved; nothing else changes.
+ * Channel order: email first when we have an address and a configured mailer,
+ * console only as a development fallback, then give up.
+ *
+ * Email is the interim channel while the MSG91 DLT template is in approval. The
+ * caller supplies the address because this service is keyed by phone number and
+ * has no business reading the user table itself.
  */
-async function deliver(phone, code) {
+async function deliver(phone, code, recipient = {}) {
+  const email = recipient.email;
+
+  if (email && emailService.isConfigured()) {
+    const result = await emailService.sendOtpEmail({
+      to: email,
+      name: recipient.name,
+      code,
+      ttlSeconds: OTP_TTL,
+    });
+    return { delivered: true, channel: 'email', to: result.to };
+  }
+
   if (env.otp.devMode) {
     console.log('');
     console.log('  ┌──────────────────────────────────────────┐');
@@ -83,7 +100,7 @@ async function deliver(phone, code) {
     return { delivered: true, channel: 'console' };
   }
 
-  // TODO Day 2+: MSG91 once the DLT template is approved.
+  // TODO: MSG91 SMS once the DLT template is approved.
   //   await axios.post('https://control.msg91.com/api/v5/otp', {...})
   throw ApiError.badRequest('OTP delivery is not configured', 'OTP_PROVIDER_MISSING');
 }
@@ -97,7 +114,7 @@ async function deliver(phone, code) {
  * registered, so this endpoint cannot be used to discover which phone numbers
  * have accounts.
  */
-async function requestOtp(phone) {
+async function requestOtp(phone, recipient = {}) {
   if (!isCacheUp()) {
     // Without Redis there is no attempt counter and no cooldown, so an OTP
     // issued now would be brute-forceable. Refuse rather than degrade.
@@ -139,14 +156,36 @@ async function requestOtp(phone) {
     .set(cooldownKey(phone), '1', 'EX', COOLDOWN)
     .exec();
 
-  await deliver(phone, code);
+  // If the mail server refuses the message, the code above is already stored
+  // and the cooldown already set — the user would be locked out for 30s waiting
+  // on an email that never left. So undo all three keys and fail loudly instead.
+  let delivery;
+  try {
+    delivery = await deliver(phone, code, recipient);
+  } catch (err) {
+    await redis.del(key(phone), cooldownKey(phone));
+    await redis.decr(dailyKey(phone));
+
+    if (err instanceof ApiError) throw err;
+
+    console.error(`[otp] delivery failed for ${phone}: ${err.message}`);
+    throw new ApiError(
+      502,
+      'OTP_DELIVERY_FAILED',
+      'We could not send your code right now. Please try again in a moment.'
+    );
+  }
 
   return {
     sent: true,
     expiresInSeconds: OTP_TTL,
     resendAfterSeconds: COOLDOWN,
+    // Which channel it actually went out on, and a masked address so the client
+    // can say "check a***@gmail.com" instead of leaving the user guessing.
+    channel: delivery.channel,
+    ...(delivery.to ? { sentTo: delivery.to } : {}),
     // Never return the code, even in dev — it would end up in a client log.
-    ...(env.otp.devMode ? { devHint: 'printed to server console' } : {}),
+    ...(delivery.channel === 'console' ? { devHint: 'printed to server console' } : {}),
   };
 }
 

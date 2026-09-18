@@ -186,6 +186,53 @@ const env = {
     },
   },
 
+  /* ---------------- Email (login OTP + future transactional mail) ---------------- */
+  mail: {
+    // console | smtp
+    //
+    // Defaults to console so a fresh clone still boots and still lets you log
+    // in. Set MAIL_PROVIDER=smtp with credentials and login codes go to the
+    // user's inbox instead of the server log.
+    //
+    // Falls back to console automatically if 'smtp' is selected without full
+    // credentials — a missing password should degrade delivery, not take the
+    // app down mid-flight.
+    provider: (process.env.MAIL_PROVIDER || 'console').toLowerCase(),
+
+    host: process.env.MAIL_HOST || '',
+    port: Number(process.env.MAIL_PORT || 587),
+
+    // Implicit TLS (465) vs STARTTLS (587). Derived from the port unless set
+    // explicitly, because getting this wrong hangs the connection rather than
+    // failing cleanly.
+    secure:
+      process.env.MAIL_SECURE !== undefined && process.env.MAIL_SECURE !== ''
+        ? process.env.MAIL_SECURE === 'true'
+        : Number(process.env.MAIL_PORT || 587) === 465,
+
+    user: process.env.MAIL_USER || '',
+    // For Gmail this is a 16-character App Password, NOT the account password —
+    // an account password will be rejected on any account with 2FA on.
+    pass: process.env.MAIL_PASS || '',
+
+    fromName: process.env.MAIL_FROM_NAME || 'AbhiCabs',
+    // Most providers reject a From that is not the authenticated mailbox, so
+    // default to the login user rather than something invented.
+    from:
+      process.env.MAIL_FROM ||
+      `${process.env.MAIL_FROM_NAME || 'AbhiCabs'} <${process.env.MAIL_USER || 'no-reply@localhost'}>`,
+    replyTo: process.env.MAIL_REPLY_TO || '',
+
+    // Certificate verification. Defaults to ON and should stay that way: with
+    // it off, anyone who can intercept the connection can read every code you
+    // send. Only turn it off against a local catcher or a host with a
+    // known-broken chain, and never in production.
+    tlsRejectUnauthorized: process.env.MAIL_TLS_REJECT_UNAUTHORIZED !== 'false',
+
+    // A slow SMTP server must not become a slow login endpoint.
+    timeoutMs: Number(process.env.MAIL_TIMEOUT_MS || 10_000),
+  },
+
   /* ---------------- MSG91 (unused until DLT approval) ---------------- */
   msg91: {
     authKey: process.env.MSG91_AUTH_KEY || '',
@@ -265,10 +312,18 @@ if (env.isProd && env.payment.provider === 'mock') {
   );
 }
 
-if (env.isProd && env.otp.devMode) {
+// Dev mode is only dangerous in production when there is no real channel behind
+// it. With SMTP configured the console is just an unused fallback, so the guard
+// checks for an actual delivery path rather than the flag alone.
+const mailConfigured =
+  env.mail.provider === 'smtp' && env.mail.host && env.mail.user && env.mail.pass;
+
+if (env.isProd && env.otp.devMode && !mailConfigured) {
   throw new Error(
-    '[env] OTP_DEV_MODE must be "false" in production — otherwise codes are ' +
-    'only printed to the server console and nobody can log in.'
+    '[env] OTP_DEV_MODE must be "false" in production, or a real delivery ' +
+    'channel must be configured (MAIL_PROVIDER=smtp with MAIL_HOST / MAIL_USER / ' +
+    'MAIL_PASS) — otherwise codes are only printed to the server console and ' +
+    'nobody can log in.'
   );
 }
 

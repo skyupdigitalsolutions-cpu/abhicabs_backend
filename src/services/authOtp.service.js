@@ -31,7 +31,12 @@ const { ApiError, publicUser } = require('../utils/helpers');
 async function requestOtp(phone) {
   const existing = await prisma.user.findFirst({
     where: { phone, role: { in: ['USER', 'DRIVER'] } },
-    select: { id: true },
+    // The email is fetched here, not inside otp.service: that service is keyed
+    // by phone number and has no business touching the user table.
+    select: { id: true, email: true, name: true },
+    // Same ordering as verifyAndLogin. Without it a number shared by two rows
+    // could be mailed at one account's address and logged in as the other.
+    orderBy: { createdAt: 'asc' },
   });
   if (!existing) {
     throw ApiError.notFound(
@@ -40,8 +45,17 @@ async function requestOtp(phone) {
     );
   }
 
-  const result = await otpService.requestOtp(phone);
-  return { ...result, message: 'A verification code has been sent' };
+  const result = await otpService.requestOtp(phone, {
+    email: existing.email,
+    name: existing.name,
+  });
+
+  return {
+    ...result,
+    message: result.sentTo
+      ? `A verification code has been sent to ${result.sentTo}`
+      : 'A verification code has been sent',
+  };
 }
 
 /* ------------------------------------------------------------------ *
