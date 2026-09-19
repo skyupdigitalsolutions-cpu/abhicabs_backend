@@ -616,7 +616,25 @@ model Booking {
   cancellationReason String?      @map("cancellation_reason")
 
   specialRequests String? @map("special_requests")
-  meta            Json    @default("{}")
+
+  // --- trip start code ---------------------------------------------------
+  // The six digits the rider reads out to the driver at pickup. Proves the
+  // rider is PRESENT when the meter starts — not who they are, which booking
+  // already established.
+  //
+  // PLAIN TEXT, deliberately. A login code is hashed because the server only
+  // ever compares it; this one has to be displayed to the rider on demand, so
+  // a hash cannot work. The trade is acceptable because of what it protects:
+  // knowing it lets someone start a trip that is already booked, paid for and
+  // assigned to a named driver. It is not a credential and is worthless once
+  // the trip is ONGOING. Excluded from every select except the owning
+  // customer's own booking detail.
+  startOtp           String?   @map("start_otp") @db.VarChar(8)
+  startOtpIssuedAt   DateTime? @map("start_otp_issued_at")
+  startOtpVerifiedAt DateTime? @map("start_otp_verified_at")
+  startOtpAttempts   Int       @default(0) @map("start_otp_attempts")
+
+  meta Json @default("{}")
 
   confirmedAt DateTime? @map("confirmed_at")
   reachedAt   DateTime? @map("reached_at")

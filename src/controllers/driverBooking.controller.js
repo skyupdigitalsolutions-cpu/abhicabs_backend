@@ -114,3 +114,28 @@ exports.recordOdometer = asyncHandler(async (req, res) => {
   });
   res.json({ success: true, message: 'Odometer reading recorded', data: result });
 });
+
+/**
+ * POST /driver/bookings/:bookingId/start  — begin the trip.
+ *
+ * The rider reads their six-digit code out; the driver types it here. The code
+ * is checked inside lifecycle.startTrip, so this route cannot bypass it.
+ *
+ * This is the first FORWARD transition a driver can drive themselves. Until
+ * now the only trip actions on this router were /reached, /collect-cash and
+ * /odometer — none of which move the booking — so a trip could not leave
+ * ALLOCATED without an ops user clicking. See B-5 in the handoff document; this
+ * closes the /start half of it.
+ */
+exports.startTrip = asyncHandler(async (req, res) => {
+  await assertDriverOnBooking(req.params.bookingId, req.user.id);
+
+  const booking = await lifecycleService.startTrip(req.params.bookingId, req.user, meta(req), {
+    lat: req.body?.lat ?? null,
+    lng: req.body?.lng ?? null,
+    odometerKm: req.body?.odometerKm ?? null,
+    startOtp: req.body?.startOtp ?? req.body?.otp ?? null,
+  });
+
+  res.json({ success: true, message: 'Trip started', data: { booking } });
+});

@@ -36,6 +36,7 @@ const { emit, EVENTS } = require('../lib/events');
 const billing = require('./billing.service');
 const allocationService = require('./allocation.service');
 const tripService = require('./trip.service');
+const tripOtpService = require('./tripOtp.service');
 const fare = require('./fare.service');
 const M = require('../lib/money');
 const { BOOKING_SELECT, STATUS_FLOW, ACTIVE_STATUSES } = require('../models/booking.model');
@@ -255,7 +256,25 @@ async function markReached(bookingId, actor, meta, { lat = null, lng = null } = 
   return booking;
 }
 
-async function startTrip(bookingId, actor, meta, { lat = null, lng = null, odometerKm = null } = {}) {
+async function startTrip(
+  bookingId,
+  actor,
+  meta,
+  { lat = null, lng = null, odometerKm = null, startOtp = null } = {},
+) {
+  /**
+   * The rider's code gates the DRIVER, not ops.
+   *
+   * A driver has to prove the rider is in the car. An ops user starting a trip
+   * from the console is already exercising a privileged override — they are on
+   * the phone to someone — and demanding a code they cannot see would only
+   * teach them to ask the rider to read it out, which is the same trust with
+   * more steps.
+   */
+  if (actor.role === 'DRIVER') {
+    await tripOtpService.verify(bookingId, startOtp);
+  }
+
   const booking = await transition(bookingId, 'ONGOING', actor, { meta });
 
   // Day 11: one durable TripEvent marking where the trip began. This is a

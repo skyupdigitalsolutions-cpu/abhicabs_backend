@@ -47,7 +47,13 @@ exports.enRoute = asyncHandler(async (req, res) => {
 });
 
 exports.start = asyncHandler(async (req, res) => {
-  const booking = await lifecycle.startTrip(req.params.id, req.user, meta(req));
+  const booking = await lifecycle.startTrip(req.params.id, req.user, meta(req), {
+    lat: req.body?.lat ?? null,
+    lng: req.body?.lng ?? null,
+    odometerKm: req.body?.odometerKm ?? null,
+    // Required when the caller is a DRIVER; ignored for ops. See startTrip.
+    startOtp: req.body?.startOtp ?? req.body?.otp ?? null,
+  });
   res.json({ success: true, message: 'Trip started', data: { booking } });
 });
 

@@ -23,6 +23,7 @@
  */
 
 const { prisma } = require('../config/prisma');
+const tripOtp = require('./tripOtp.service');
 const { ApiError, paginated } = require('../utils/helpers');
 const quoteService = require('./quote.service');
 const customerService = require('./customer.service');
@@ -420,6 +421,35 @@ async function create(input, actor, meta = {}) {
       pickupAt: booking.pickupAt,
     });
 
+  /**
+   * The code the rider reads out to the driver at pickup.
+   *
+   * Minted here rather than at allocation so it exists for the whole life of
+   * the booking — the rider can find it the moment they book, and a trip
+   * assigned five minutes before pickup does not race the email.
+   *
+   * Never allowed to fail the booking: the code is on the row and visible in
+   * the app, so a bounced email is an inconvenience, not a reason to lose a
+   * paid booking.
+   */
+  try {
+    // Looked up here rather than threaded through the creation path: this is
+    // one query on a path that already does several, and it keeps the OTP
+    // feature from touching the booking transaction at all.
+    const customerUser = await prisma.user.findUnique({
+      where: { id: customerId },
+      select: { name: true, email: true },
+    });
+
+    await tripOtp.issue(booking.id, {
+      customer: customerUser,
+      bookingNumber: booking.bookingNumber,
+      pickupAt: booking.pickupAt,
+    });
+  } catch (err) {
+    console.error(`[booking] could not issue start code for ${booking.bookingNumber}: ${err.message}`);
+  }
+
     // Pay-later was confirmed inline above — fire the same event a payment
     // confirmation would, so the customer gets the "booking confirmed" notice.
     if (input.paymentMode === 'ZERO') {
@@ -467,6 +497,27 @@ async function findById(id, actor) {
 
   const booking = await prisma.booking.findFirst({ where, select: BOOKING_SELECT });
   if (!booking) throw ApiError.notFound('Booking not found');
+
+  /**
+   * The start code, for the OWNING CUSTOMER only.
+   *
+   * Fetched as a second query rather than added to BOOKING_SELECT, because
+   * that select is shared with the list endpoints and with staff reads — one
+   * field added there would leak the code into every one of them. The role
+   * check here is the whole point: a driver reading this booking must not be
+   * able to see the code they are supposed to be told.
+   *
+   * Dropped once the trip has started; it has done its job, and a code still
+   * on screen invites a rider to read out a stale one on their next trip.
+   */
+  if (actor.role === 'USER' && booking.status !== 'COMPLETED' && booking.status !== 'CANCELLED') {
+    const otp = await prisma.booking.findUnique({
+      where: { id: booking.id },
+      select: { startOtp: true, startOtpVerifiedAt: true },
+    });
+    if (otp && !otp.startOtpVerifiedAt) booking.startOtp = otp.startOtp;
+  }
+
   return booking;
 }
 

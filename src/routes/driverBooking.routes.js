@@ -27,6 +27,16 @@ router.post(
   ctrl.recordReached
 );
 
+// POST /api/v1/driver/bookings/:bookingId/start  — begin the trip.
+//
+// Body: { startOtp, lat?, lng?, odometerKm? }. The code is the rider's, read
+// out at pickup; lifecycle.startTrip refuses without it for a DRIVER caller.
+router.post(
+  '/:bookingId/start',
+  validate({ params: s.bookingIdParamSchema }),
+  ctrl.startTrip
+);
+
 // POST /api/v1/driver/bookings/:bookingId/collect-cash
 router.post(
   '/:bookingId/collect-cash',
