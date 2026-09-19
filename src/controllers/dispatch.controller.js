@@ -51,15 +51,6 @@ exports.assign = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, message: 'Vehicle allocated', data: { allocation: alloc } });
 });
 
-exports.autoAssign = asyncHandler(async (req, res) => {
-  const alloc = await allocation.autoAssign(req.params.bookingId, req.user, meta(req));
-  res.status(201).json({
-    success: true,
-    message: 'Vehicle auto-assigned',
-    data: { allocation: alloc },
-  });
-});
-
 exports.reassign = asyncHandler(async (req, res) => {
   const alloc = await allocation.reassign(
     req.params.bookingId,
@@ -73,21 +64,4 @@ exports.reassign = asyncHandler(async (req, res) => {
 exports.getForBooking = asyncHandler(async (req, res) => {
   const alloc = await allocation.getForBooking(req.params.bookingId);
   res.json({ success: true, data: { allocation: alloc } });
-});
-
-exports.expireOffers = asyncHandler(async (req, res) => {
-  const result = await allocation.expireStaleOffers();
-  res.json({ success: true, message: 'Stale offers swept', data: result });
-});
-
-/* ---------------- driver accept / decline ---------------- */
-
-exports.accept = asyncHandler(async (req, res) => {
-  const alloc = await allocation.accept(req.params.allocationId, req.user.id, meta(req));
-  res.json({ success: true, message: 'Offer accepted', data: { allocation: alloc } });
-});
-
-exports.decline = asyncHandler(async (req, res) => {
-  const result = await allocation.decline(req.params.allocationId, req.user.id, meta(req));
-  res.json({ success: true, message: 'Offer declined', data: result });
 });

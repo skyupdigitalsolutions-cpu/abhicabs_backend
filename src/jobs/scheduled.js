@@ -124,13 +124,12 @@ async function sessionPruning() {
  */
 async function staleDriverCleanup() {
   const location = require('../services/location.service');
-  const allocation = require('../services/allocation.service');
 
-  const [drivers, offers] = await Promise.all([
-    location.sweepStaleDrivers(),
-    allocation.expireStaleOffers(),
-  ]);
-  return { driversSwept: drivers.swept, offersReleased: offers.released };
+  // The offer-timeout sweep is gone with the offer flow. Nothing releases an
+  // allocation automatically any more: dispatch commits the car, and only a
+  // human reassigning it can take it back.
+  const drivers = await location.sweepStaleDrivers();
+  return { driversSwept: drivers.swept };
 }
 
 /* ---------------- cache warming ---------------- */

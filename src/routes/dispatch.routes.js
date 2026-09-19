@@ -13,7 +13,7 @@ const express = require('express');
 
 const ctrl = require('../controllers/dispatch.controller');
 const { validate } = require('../middlewares/validate');
-const { requireAuth, requirePermission, requireRole } = require('../middlewares/auth');
+const { requireAuth, requirePermission } = require('../middlewares/auth');
 const s = require('../validators/dispatch.schemas');
 
 /* ---------------- ops: /admin/dispatch ---------------- */
@@ -33,10 +33,6 @@ ops.get('/live', requirePermission('DISPATCH_MANAGE'),
 ops.get('/vehicles', requirePermission('DISPATCH_MANAGE'),
   validate({ query: s.availableVehiclesQuerySchema }), ctrl.availableVehicles);
 
-// Rule-assisted auto-assign — picks a matching, free vehicle.
-ops.post('/bookings/:bookingId/auto-assign', requirePermission('DISPATCH_MANAGE'),
-  validate({ params: s.bookingIdParamSchema }), ctrl.autoAssign);
-
 // Manual assign — dispatcher names the vehicle (and optionally driver).
 ops.post('/bookings/:bookingId/assign', requirePermission('DISPATCH_MANAGE'),
   validate({ params: s.bookingIdParamSchema, body: s.assignSchema }), ctrl.assign);
@@ -49,18 +45,15 @@ ops.patch('/bookings/:bookingId/reassign', requirePermission('DISPATCH_MANAGE'),
 ops.get('/bookings/:bookingId/allocation', requirePermission('DISPATCH_MANAGE'),
   validate({ params: s.bookingIdParamSchema }), ctrl.getForBooking);
 
-// Manual trigger for the offer-timeout sweep (Day 12 will schedule this).
-ops.post('/expire-offers', requirePermission('DISPATCH_MANAGE'), ctrl.expireOffers);
-
-/* ---------------- driver: /driver/offers ---------------- */
-
+/**
+ * The driver router is GONE, and with it /driver/offers/:id/accept and
+ * /decline.
+ *
+ * Dispatch assigns; the driver is told, not asked. Kept as an empty router
+ * rather than deleted from the export so src/routes/index.js keeps mounting
+ * something — a missing export there is a boot crash, not a 404, and the trade
+ * is one dead mount against the whole API failing to start.
+ */
 const driver = express.Router();
-driver.use(requireAuth, requireRole('DRIVER'));
-
-driver.post('/:allocationId/accept',
-  validate({ params: s.allocationIdParamSchema }), ctrl.accept);
-
-driver.post('/:allocationId/decline',
-  validate({ params: s.allocationIdParamSchema }), ctrl.decline);
 
 module.exports = { ops, driver };

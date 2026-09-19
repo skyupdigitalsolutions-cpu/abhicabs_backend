@@ -226,10 +226,22 @@ function validateTiming({ pickupAt, returnAt, tripType, scheduled }) {
 async function create(input, actor, meta = {}) {
   const customerId = input.customerId || actor.id;
 
-  // HOURLY (local rental) has no fixed destination. If the app sent no drop,
-  // use the pickup as the drop so the rest of the pipeline has coordinates —
-  // the fare comes from the package, not the route, so this doesn't affect price.
-  if (input.tripType === 'HOURLY' && !input.drop) {
+  /**
+   * A rental ALWAYS ends where it started.
+   *
+   * The car is hired for a block of hours and returns to the pickup point; that
+   * return leg is inside the package, which is why the included km cover a round
+   * journey. Where the passenger happens to step out is irrelevant to the
+   * booking — they may be dropped anywhere along the way, and the car still
+   * drives back.
+   *
+   * So the drop is OVERWRITTEN with the pickup, not merely defaulted to it when
+   * absent. A supplied drop would otherwise be stored as the trip's endpoint and
+   * every downstream reader — the dispatch board, the driver's app, the
+   * invoice — would show the car finishing somewhere it does not finish, and
+   * the km back to the pickup would look like unexplained extra distance.
+   */
+  if (input.tripType === 'HOURLY') {
     input = { ...input, drop: input.pickup };
   }
 

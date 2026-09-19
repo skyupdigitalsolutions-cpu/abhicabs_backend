@@ -192,112 +192,41 @@ async function allocate(bookingId, { vehicleId, driverId = null }, actor = null,
 }
 
 /* ------------------------------------------------------------------ *
- * Rule-assisted auto-assign
- * ------------------------------------------------------------------ */
-
-/**
- * Picks a vehicle for a booking by rule — matching class, in the same city,
- * in service, and with NO overlapping active hold — then allocates it.
- *
- * The candidate query is a hint, not a guarantee: between choosing a vehicle
- * and inserting, another attempt may take it. That is fine — allocate() will
- * lose at the constraint and we move to the next candidate. We try candidates
- * in turn until one sticks or we run out.
- */
-async function autoAssign(bookingId, actor = null, meta = {}) {
-  const booking = await prisma.booking.findUnique({
-    where: { id: bookingId },
-    select: {
-      id: true,
-      status: true,
-      vehicleClass: true,
-      cityId: true,
-      tripType: true,
-      pickupAt: true,
-      returnAt: true,
-      durationMinutes: true,
-    },
-  });
-  if (!booking) throw ApiError.notFound('Booking not found');
-  if (!ASSIGNABLE_BOOKING_STATUSES.includes(booking.status)) {
-    throw ApiError.conflict(
-      `A ${booking.status} booking cannot be allocated`,
-      'BOOKING_NOT_ASSIGNABLE'
-    );
-  }
-
-  const window = computeHoldWindow(booking, {
-    bufferMinutes: env.dispatch.holdBufferMinutes,
-    defaultTripMinutes: env.dispatch.defaultTripMinutes,
-  });
-
-  // Candidate vehicles: right class, right city, in service, and free across
-  // the window (no ACTIVE allocation that intersects it). The NOT EXISTS is the
-  // round-trip hold in action — a vehicle committed for an overlapping journey
-  // is excluded from the candidate list.
-  const candidates = await prisma.$queryRaw`
-    SELECT v.id
-    FROM "vehicles" v
-    WHERE v."vehicle_class" = ${booking.vehicleClass}
-      AND v."city_id" = ${booking.cityId}
-      AND v."is_active" = TRUE
-      AND v."status" NOT IN ('MAINTENANCE', 'INACTIVE')
-      AND NOT EXISTS (
-        SELECT 1 FROM "allocations" a
-        WHERE a."vehicle_id" = v.id
-          AND a."status" = 'ACTIVE'
-          AND tsrange(a."starts_at", a."ends_at", '[)')
-              && tsrange(${window.startsAt}::timestamp, ${window.endsAt}::timestamp, '[)')
-      )
-    ORDER BY v."odometer_km" ASC
-    LIMIT 5
-  `;
-
-  if (!candidates.length) {
-    throw ApiError.conflict(
-      'No available vehicle of the required class for this window',
-      'NO_VEHICLE_AVAILABLE'
-    );
-  }
-
-  let lastErr = null;
-  for (const { id: vehicleId } of candidates) {
-    try {
-      const allocation = await allocate(bookingId, { vehicleId }, actor, meta);
-      emit(EVENTS.ALLOCATION_MADE, {
-        bookingId,
-        allocationId: allocation.id,
-        vehicleId,
-        auto: true,
-      });
-      return allocation;
-    } catch (err) {
-      // A candidate got taken by a concurrent attempt between query and insert.
-      // Try the next one rather than failing the whole request.
-      if (
-        isExclusionViolation(err) ||
-        err.code === 'VEHICLE_UNAVAILABLE' ||
-        err.errorCode === 'VEHICLE_UNAVAILABLE'
-      ) {
-        lastErr = err;
-        continue;
-      }
-      throw err;
-    }
-  }
-
-  throw ApiError.conflict(
-    'All candidate vehicles were taken concurrently; retry',
-    'ALLOCATION_CONTENDED'
-  );
-}
-
-/* ------------------------------------------------------------------ *
  * Manual assign (thin wrapper that emits)
  * ------------------------------------------------------------------ */
 
+/**
+ * The ONLY way a booking gets a car. A dispatcher names the vehicle and driver.
+ *
+ * ---------------------------------------------------------------------------
+ * ASSIGNMENT IS FINAL — THERE IS NO OFFER
+ * ---------------------------------------------------------------------------
+ * The allocation is marked accepted at the moment it is created. The driver is
+ * told which trip is theirs; they are not asked.
+ *
+ * `acceptedAt` is stamped rather than dropped so that every downstream reader —
+ * the dispatch board, the audit trail, historical allocations — keeps the shape
+ * it already had, and so an allocation made today still reads the same as one
+ * made before the offer flow was removed. It now records WHEN DISPATCH COMMITTED
+ * the car, not when a driver agreed.
+ *
+ * The consequence to be awake to: a driver who is asleep, off shift or out of
+ * signal no longer surfaces themselves by letting an offer lapse. The timeout
+ * sweep that used to release those holds is gone with the offer, so nothing
+ * self-corrects. A bad assignment stays on the board until a human reassigns it.
+ */
 async function assignManually(bookingId, payload, actor = null, meta = {}) {
   const allocation = await allocate(bookingId, payload, actor, meta);
+
+  // Stamped after the insert rather than inside allocate(), so the exclusion
+  // constraint still referees the insert exactly as before — the concurrency
+  // guarantee this service is built on is untouched by the offer removal.
+  const accepted = await prisma.allocation.update({
+    where: { id: allocation.id },
+    data: { acceptedAt: new Date() },
+    select: ALLOCATION_SELECT,
+  });
+
   emit(EVENTS.ALLOCATION_MADE, {
     bookingId,
     allocationId: allocation.id,
@@ -305,89 +234,12 @@ async function assignManually(bookingId, payload, actor = null, meta = {}) {
     driverId: payload.driverId || null,
     auto: false,
   });
-  return allocation;
+
+  return accepted;
 }
 
 /* ------------------------------------------------------------------ *
- * Driver accept / decline
- * ------------------------------------------------------------------ */
-
-/**
- * Driver accepts the offer. Conditional update: only an ACTIVE, not-yet-accepted
- * allocation for THIS driver can be accepted, so a stale or reassigned offer is
- * a clean no-op rather than a wrongful accept.
- */
-async function accept(allocationId, driverUserId, meta = {}) {
-  const { count } = await prisma.allocation.updateMany({
-    where: { id: allocationId, driverId: driverUserId, status: 'ACTIVE', acceptedAt: null, declinedAt: null },
-    data: { acceptedAt: new Date() },
-  });
-  if (count === 0) {
-    throw ApiError.conflict('Offer is no longer available to accept', 'OFFER_NOT_ACCEPTABLE');
-  }
-
-  // Record where the driver was when they took the trip — their starting point,
-  // for ETA-to-pickup and analytics. Best-effort: a missing live fix (driver
-  // offline) or a Redis hiccup must never fail the acceptance, so it's wrapped
-  // and lazily required to avoid any import cycle.
-  try {
-    const { driverLocation } = require('./location.service');
-    const pos = await driverLocation(driverUserId);
-    if (pos && Number.isFinite(pos.lat) && Number.isFinite(pos.lng)) {
-      await prisma.allocation.update({
-        where: { id: allocationId },
-        data: {
-          driverStartLat: pos.lat.toFixed(7),
-          driverStartLng: pos.lng.toFixed(7),
-          driverStartAt: new Date(),
-        },
-      });
-    }
-  } catch (err) {
-    if (process.env.NODE_ENV !== 'production') {
-      // eslint-disable-next-line no-console
-      console.warn('[allocation] could not capture driver start location:', err.message);
-    }
-  }
-
-  return prisma.allocation.findUnique({ where: { id: allocationId }, select: ALLOCATION_SELECT });
-}
-
-/**
- * Driver declines. Releases the hold so the booking can be reallocated: the
- * allocation goes RELEASED (which drops out of the EXCLUDE constraint, freeing
- * the vehicle window), the vehicle returns to AVAILABLE, and the booking is
- * pulled back to CONFIRMED for another dispatch attempt.
- */
-async function decline(allocationId, driverUserId, meta = {}) {
-  return prisma.$transaction(async (tx) => {
-    const alloc = await tx.allocation.findUnique({
-      where: { id: allocationId },
-      select: { id: true, driverId: true, status: true, acceptedAt: true, bookingId: true, vehicleId: true },
-    });
-    if (!alloc) throw ApiError.notFound('Allocation not found');
-    if (alloc.driverId !== driverUserId) {
-      throw ApiError.forbidden('Not your allocation', 'NOT_YOUR_OFFER');
-    }
-    if (alloc.status !== 'ACTIVE') {
-      throw ApiError.conflict('Offer is no longer active', 'OFFER_NOT_ACTIVE');
-    }
-    // Accept and decline are mutually exclusive: once accepted, this is no longer
-    // a decline. Dropping an accepted trip must go through the explicit cancel /
-    // reassign flow, not a silent release that leaves both timestamps set.
-    if (alloc.acceptedAt) {
-      throw ApiError.conflict('You have already accepted this trip', 'ALREADY_ACCEPTED');
-    }
-
-    await releaseInTx(tx, alloc, 'declined', meta);
-    // Day 14: a vehicle returned to AVAILABLE — refresh the fleet list.
-    cache.delByPrefix(cache.keys.vehiclesAvailablePrefix()).catch(() => {});
-    return { released: true, bookingId: alloc.bookingId };
-  });
-}
-
-/* ------------------------------------------------------------------ *
- * Release (decline / timeout / manual) + timeout sweep
+ * Release
  * ------------------------------------------------------------------ */
 
 async function releaseInTx(tx, alloc, reason, meta = {}) {
@@ -444,28 +296,6 @@ async function releaseVehicleForBooking(tx, bookingId, reason, meta = {}) {
   });
 
   return alloc;
-}
-
-/**
- * Releases allocations that were offered to a driver but not accepted within the
- * timeout. Intended to be called by the Day 12 sweeper; exposed now so it can be
- * triggered manually in testing.
- */
-async function expireStaleOffers(now = new Date()) {
-  const cutoff = new Date(now.getTime() - env.dispatch.offerTimeoutMinutes * 60000);
-
-  const stale = await prisma.allocation.findMany({
-    where: { status: 'ACTIVE', acceptedAt: null, driverId: { not: null }, createdAt: { lt: cutoff } },
-    select: { id: true, bookingId: true, vehicleId: true },
-  });
-
-  let released = 0;
-  for (const alloc of stale) {
-    await prisma.$transaction((tx) => releaseInTx(tx, alloc, 'timeout')).then(() => {
-      released += 1;
-    }).catch(() => {});
-  }
-  return { released, scanned: stale.length };
 }
 
 /* ------------------------------------------------------------------ *
@@ -597,12 +427,8 @@ async function reassign(bookingId, { vehicleId, driverId = null }, actor = null,
 
 module.exports = {
   allocate,
-  autoAssign,
   assignManually,
   reassign,
-  accept,
-  decline,
   releaseVehicleForBooking,
-  expireStaleOffers,
   getForBooking,
 };
