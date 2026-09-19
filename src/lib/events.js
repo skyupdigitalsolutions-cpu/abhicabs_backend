@@ -44,6 +44,9 @@ bus.setMaxListeners(50);
 const EVENTS = Object.freeze({
   BOOKING_ATTEMPTED: 'booking.attempted',
   BOOKING_CREATED: 'booking.created',
+  // An enquiry for a route outside the service states. Not a booking — nothing
+  // is held, nothing is priced.
+  BOOKING_REQUEST_CREATED: 'booking_request.created',
   BOOKING_CONFIRMED: 'booking.confirmed',
   BOOKING_CANCELLED: 'booking.cancelled',
   BOOKING_STATUS_CHANGED: 'booking.status_changed',

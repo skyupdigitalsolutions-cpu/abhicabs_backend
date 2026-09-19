@@ -186,6 +186,13 @@ const env = {
     },
   },
 
+  /* ---------------- Service area ---------------- */
+  serviceArea: {
+    // Comma-separated state names. Blank = the four in src/lib/serviceArea.js.
+    // Opening a new state is a config change and a restart, not a deploy.
+    states: process.env.SERVICE_STATES || '',
+  },
+
   /* ---------------- Email (login OTP + future transactional mail) ---------------- */
   mail: {
     // console | smtp

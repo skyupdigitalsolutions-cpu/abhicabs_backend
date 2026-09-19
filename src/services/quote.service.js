@@ -22,6 +22,7 @@ const maps = require('./maps.service');
 const fare = require('./fare.service');
 const geo = require('../lib/geo');
 const { ApiError } = require('../utils/helpers');
+const serviceArea = require('../lib/serviceArea');
 
 /** Longest trip the router will price. Guards against an absurd destination. */
 const MAX_TRIP_KM = Number(process.env.MAX_TRIP_KM || 1500);
@@ -294,6 +295,51 @@ async function resolveLocation(input, label) {
   throw ApiError.badRequest(`Provide ${label} coordinates or an address`, 'LOCATION_REQUIRED');
 }
 
+
+/* ------------------------------------------------------------------ *
+ * Service states
+ * ------------------------------------------------------------------ */
+
+/**
+ * Refuse a route that touches a state the fleet does not operate in.
+ *
+ * Checked SEPARATELY from maps.isServiceable, which asks a different question:
+ * that one measures distance from a city centre, which is right for a local
+ * ride and wrong for an outstation drop. Bengaluru to Hyderabad is 570 km from
+ * any centre and is a trip the fleet runs; Bengaluru to Chennai is closer and
+ * is not, because there is no presence in Tamil Nadu. Radius cannot express
+ * that — the constraint is permits and recovery, not geometry.
+ *
+ * Throws OUTSIDE_SERVICE_STATES, a code the app keys on to offer "send a
+ * booking request" instead of a fare. The offending state and the allowlist
+ * both travel in `details`, so the app can name them without hardcoding a list
+ * that would drift the day a fifth state opens.
+ */
+async function assertWithinServiceStates(points) {
+  const offending = [];
+
+  for (const { label, point } of points) {
+    if (!point) continue;
+    const check = await serviceArea.checkPlace(point);
+    if (!check.ok) offending.push({ label, state: check.state });
+  }
+
+  if (offending.length === 0) return;
+
+  const allowed = await serviceArea.allowedStateNames();
+  const named = offending
+    .map((o) => (o.state ? `${o.label} (${o.state})` : o.label))
+    .join(' and ');
+
+  throw new ApiError(
+    400,
+    'OUTSIDE_SERVICE_STATES',
+    `We do not operate in that area yet — ${named}. We currently serve ${allowed.join(', ')}. ` +
+      'You can send this as a booking request and our team will get back to you.',
+    { offending, allowedStates: allowed, canRequest: true },
+  );
+}
+
 /* ------------------------------------------------------------------ *
  * Quote
  * ------------------------------------------------------------------ */
@@ -356,6 +402,14 @@ async function getQuote(input) {
   const stopPoints = isHourly
     ? []
     : await Promise.all((stops || []).map((s, i) => resolveLocation(s, `stop ${i + 1}`)));
+
+  // Jurisdiction before geometry: a route into a state we do not serve is
+  // refused here, with a code the app turns into "send a booking request".
+  await assertWithinServiceStates([
+    { label: 'pickup', point: pickupPoint },
+    // null for HOURLY, which has no destination — checkPlace skips it.
+    { label: 'drop', point: dropPoint || null },
+  ]);
 
   const serviceable = maps.isServiceable(pickupPoint, city);
   if (!serviceable.ok) {
@@ -551,6 +605,14 @@ async function compareTripTypes(input) {
   // point-to-point. Guarded as ONE_WAY.
   assertDistinctEndpoints('ONE_WAY', pickupPoint, dropPoint);
 
+  // Jurisdiction before geometry: a route into a state we do not serve is
+  // refused here, with a code the app turns into "send a booking request".
+  await assertWithinServiceStates([
+    { label: 'pickup', point: pickupPoint },
+    // null for HOURLY, which has no destination — checkPlace skips it.
+    { label: 'drop', point: dropPoint || null },
+  ]);
+
   const serviceable = maps.isServiceable(pickupPoint, city);
   if (!serviceable.ok) {
     throw ApiError.badRequest('Pickup is outside the service area', 'OUTSIDE_SERVICE_AREA');
@@ -634,6 +696,14 @@ async function quoteAllClasses(input) {
   // A point-to-point trip must actually go somewhere. Checked before any
   // routing call, so a request that can never succeed costs no maps quota.
   assertDistinctEndpoints(input.tripType, pickupPoint, dropPoint);
+
+  // Jurisdiction before geometry: a route into a state we do not serve is
+  // refused here, with a code the app turns into "send a booking request".
+  await assertWithinServiceStates([
+    { label: 'pickup', point: pickupPoint },
+    // null for HOURLY, which has no destination — checkPlace skips it.
+    { label: 'drop', point: dropPoint || null },
+  ]);
 
   const serviceable = maps.isServiceable(pickupPoint, city);
   if (!serviceable.ok) {

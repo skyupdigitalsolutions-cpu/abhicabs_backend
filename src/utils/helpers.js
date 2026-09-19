@@ -16,11 +16,19 @@ const asyncHandler = (fn) => (req, res, next) =>
 
 /** A thrown error the client is allowed to see. */
 class ApiError extends Error {
-  constructor(statusCode, code, message) {
+  /**
+   * @param {object} [details] Structured data the CLIENT needs to act on the
+   *   error, not just describe it — e.g. OUTSIDE_SERVICE_STATES carries which
+   *   states are served, so the app can name them without shipping its own copy
+   *   of a list that changes. Serialised by the error middleware; omit it for
+   *   errors where the message is the whole story.
+   */
+  constructor(statusCode, code, message, details = undefined) {
     super(message);
     this.name = 'ApiError';
     this.statusCode = statusCode;
     this.code = code;
+    this.details = details;
     this.expose = true;
   }
 

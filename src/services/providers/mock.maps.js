@@ -67,6 +67,10 @@ async function geocode(address) {
     lat: Number(lat.toFixed(6)),
     lng: Number(lng.toFixed(6)),
     formattedAddress: String(address),
+    // The mock pretends everything is in Karnataka so the dev flow is the
+    // SERVICEABLE one by default. Put a state name in the address string to
+    // exercise the out-of-area path: geocode('Chennai, Tamil Nadu').
+    state: 'Karnataka',
     placeId: `mock_${seed}`,
     provider: NAME,
     estimated: true,
@@ -78,6 +82,7 @@ async function reverseGeocode(lat, lng) {
     lat: Number(lat),
     lng: Number(lng),
     formattedAddress: `Near ${Number(lat).toFixed(4)}, ${Number(lng).toFixed(4)}, Bengaluru`,
+    state: 'Karnataka',
     placeId: `mock_rev_${geo.coordKey({ lat, lng })}`,
     provider: NAME,
     estimated: true,

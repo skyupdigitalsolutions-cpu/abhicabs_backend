@@ -13,6 +13,7 @@
 const db = require('../config/prisma');
 const env = require('../config/env');
 const { redactError } = require('../lib/redact');
+const { ApiError } = require('../utils/helpers');
 
 function notFound(req, res) {
   res.status(404).json({
@@ -93,6 +94,13 @@ function errorHandler(err, req, res, next) {
   };
 
   if (fields) body.error.fields = fields;
+
+  // Structured data an ApiError chose to expose. Only ever set deliberately at
+  // the throw site — never from a Prisma or system error, which would leak
+  // schema internals under the same key.
+  if (err instanceof ApiError && err.details !== undefined && status < 500) {
+    body.error.details = err.details;
+  }
   if (!env.isProd && status >= 500) body.error.stack = err.stack;
 
   res.status(status).json(body);

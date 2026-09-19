@@ -185,12 +185,14 @@ model User {
   deviceTokens  DeviceToken[]
 
   // --- new relations ---
-  customer          Customer?
-  driver            Driver?
-  ledgerEntries     LedgerEntry[]
-  auditLogs         AuditLog[]
-  idempotencyKeys   IdempotencyKey[]
-  cancelledBookings Booking[]        @relation("BookingCancelledBy")
+  customer               Customer?
+  driver                 Driver?
+  ledgerEntries          LedgerEntry[]
+  auditLogs              AuditLog[]
+  idempotencyKeys        IdempotencyKey[]
+  cancelledBookings      Booking[]        @relation("BookingCancelledBy")
+  bookingRequests        BookingRequest[] @relation("BookingRequestCustomer")
+  handledBookingRequests BookingRequest[] @relation("BookingRequestHandler")
 
   @@index([role])
   @@index([createdAt])
@@ -235,6 +237,7 @@ model DeviceToken {
   @@index([userId])
   @@map("device_tokens")
 }
+
 // ===========================================================================
 // RBAC  (Day 2 uses this; the table exists from Day 1)
 // ===========================================================================
@@ -981,4 +984,122 @@ model Contact {
   @@index([status])
   @@index([createdAt])
   @@map("contacts")
+}
+
+/// Where a booking request stands with the ops team.
+enum BookingRequestStatus {
+  NEW
+  REVIEWING
+  QUOTED
+  ACCEPTED
+  DECLINED
+  CANCELLED
+}
+
+/// An enquiry for a trip OUTSIDE the states the fleet operates in.
+///
+/// Deliberately NOT a Booking. A Booking holds a vehicle, carries a frozen fare
+/// and enters the dispatch board — none of which can be honoured for a route
+/// with no rate card and no permit. So this is a separate thing with its own
+/// lifecycle that an admin services by hand.
+///
+/// It keeps no fare fields at all. Pricing one means an admin quoting it
+/// manually; a nullable estimate would only invite the app to show a number
+/// nobody stands behind.
+model BookingRequest {
+  id            String @id @default(uuid()) @db.Uuid
+  requestNumber String @unique @map("request_number") @db.VarChar(20)
+
+  customerId String @map("customer_id") @db.Uuid
+
+  tripType     TripType @map("trip_type")
+  vehicleClass String?  @map("vehicle_class") @db.VarChar(24)
+
+  // Coordinates are OPTIONAL: an out-of-area place may never have been
+  // geocoded, and demanding a lat/lng would reject the enquiries this exists
+  // to capture.
+  pickupAddress String   @map("pickup_address")
+  pickupLat     Decimal? @map("pickup_lat") @db.Decimal(10, 7)
+  pickupLng     Decimal? @map("pickup_lng") @db.Decimal(10, 7)
+  pickupState   String?  @map("pickup_state") @db.VarChar(64)
+
+  dropAddress String   @map("drop_address")
+  dropLat     Decimal? @map("drop_lat") @db.Decimal(10, 7)
+  dropLng     Decimal? @map("drop_lng") @db.Decimal(10, 7)
+  dropState   String?  @map("drop_state") @db.VarChar(64)
+
+  pickupAt DateTime  @map("pickup_at")
+  returnAt DateTime? @map("return_at")
+
+  passengers Int?    @db.SmallInt
+  note       String? @db.VarChar(500)
+
+  /// Copied at submission. These are worked days later by phone, and a customer
+  /// who changes their number meanwhile must not become unreachable.
+  contactName  String? @map("contact_name") @db.VarChar(120)
+  contactPhone String? @map("contact_phone") @db.VarChar(20)
+  contactEmail String? @map("contact_email") @db.VarChar(180)
+
+  /// WHY this could not be booked. Stored rather than recomputed, so a request
+  /// still explains itself after the allowlist changes.
+  reason String? @db.VarChar(200)
+
+  status    BookingRequestStatus @default(NEW)
+  adminNote String?              @map("admin_note") @db.VarChar(1000)
+
+  handledById String?   @map("handled_by_id") @db.Uuid
+  handledAt   DateTime? @map("handled_at")
+
+  /// Set when an admin turns this into a real Booking.
+  convertedBookingId String? @map("converted_booking_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  customer  User  @relation("BookingRequestCustomer", fields: [customerId], references: [id])
+  handledBy User? @relation("BookingRequestHandler", fields: [handledById], references: [id])
+
+  @@index([status, createdAt])
+  @@index([customerId, createdAt])
+  @@map("booking_requests")
+}
+
+/// The states the fleet operates in — the allowlist a quote is checked against.
+///
+/// A table rather than a constant because opening a state is an OPERATIONAL
+/// decision, usually made the week a permit clears. It should not need a
+/// developer, a deploy and a release window.
+///
+/// src/lib/serviceArea.js caches these; adding a row takes effect within the
+/// cache TTL, and immediately when written through the admin endpoint.
+model ServiceState {
+  id Int @id @default(autoincrement())
+
+  /// Canonical name, exactly as it should be shown to a customer.
+  name String @unique @db.VarChar(64)
+
+  /// Two-letter code, for reference. Matching uses `aliases`, not this.
+  code String? @db.VarChar(8)
+
+  /// Alternative spellings a maps provider might return: ["ap", "andhra"].
+  ///
+  /// Not cosmetic. Google is inconsistent about long vs short names, and real
+  /// data contains misspellings like "Telengana" and "Maharastra". Without
+  /// aliases, a rider standing in Hyderabad is refused service because a
+  /// response spelled their state differently this week.
+  aliases Json @default("[]")
+
+  /// Deactivate rather than delete. A closed state still has to explain the
+  /// requests it produced while it was open.
+  isActive Boolean @default(true) @map("is_active")
+
+  /// Free text for ops: why it opened, which permit, who approved it.
+  note String? @db.VarChar(500)
+
+  createdById String?  @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([isActive])
+  @@map("service_states")
 }

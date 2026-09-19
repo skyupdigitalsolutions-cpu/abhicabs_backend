@@ -63,6 +63,16 @@ router.use('/admin/payments', apiLimiter, require('./adminPayment.routes'));
 router.use('/admin/invoices', apiLimiter, require('./invoice.routes'));
 router.use('/admin/reports', apiLimiter, require('./report.routes'));
 
+// Out-of-area enquiries. Three audiences, three routers — see the route file.
+const bookingRequestRoutes = require('./bookingRequest.routes');
+router.use('/', bookingRequestRoutes.pub);
+router.use('/booking-requests', apiLimiter, bookingRequestRoutes.customer);
+router.use('/admin/booking-requests', apiLimiter, bookingRequestRoutes.ops);
+
+// The state allowlist. Public READ is on /service-states above; these are the
+// admin writes.
+router.use('/admin/service-states', apiLimiter, require('./serviceState.routes'));
+
 const dispatchRoutes = require('./dispatch.routes');
 router.use('/admin/dispatch', apiLimiter, dispatchRoutes.ops);
 router.use('/driver/offers', apiLimiter, dispatchRoutes.driver);

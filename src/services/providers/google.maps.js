@@ -16,6 +16,7 @@
 
 const axios = require('axios');
 const env = require('../../config/env');
+const { stateFromComponents } = require('../../lib/serviceArea');
 
 const NAME = 'google';
 const BASE = 'https://maps.googleapis.com/maps/api';
@@ -88,6 +89,9 @@ async function geocode(address) {
     lng: result.geometry.location.lng,
     formattedAddress: result.formatted_address,
     placeId: result.place_id,
+    // administrative_area_level_1 — the state. Carried through so the caller
+    // can decide serviceability without a second billed lookup.
+    state: stateFromComponents(result.address_components),
     provider: NAME,
     estimated: false,
   };
@@ -106,6 +110,7 @@ async function reverseGeocode(lat, lng) {
     lng: Number(lng),
     formattedAddress: result?.formatted_address || `${lat}, ${lng}`,
     placeId: result?.place_id || null,
+    state: stateFromComponents(result?.address_components),
     provider: NAME,
     estimated: false,
   };
