@@ -312,12 +312,7 @@ if (env.accessSecret === env.refreshSecret) {
   throw new Error('[env] JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different');
 }
 
-if (env.isProd && env.payment.provider === 'mock') {
-  throw new Error(
-    '[env] PAYMENT_PROVIDER must not be "mock" in production — the mock gateway ' +
-    'never actually charges anyone. Set a real provider and its keys.'
-  );
-}
+
 
 // Dev mode is only dangerous in production when there is no real channel behind
 // it. With SMTP configured the console is just an unused fallback, so the guard
