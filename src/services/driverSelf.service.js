@@ -4,20 +4,23 @@
  * src/services/driverSelf.service.js
  *
  * Driver SELF-service: sign up, complete a profile, upload documents, register
- * or claim a vehicle, submit for review.
+ * a vehicle, submit for review.
  *
- * The whole file rests on one rule: nothing here may make a driver dispatchable.
- * A driver becomes dispatchable only when an admin sets kycStatus = VERIFIED and
- * approves a vehicle claim, both of which live in the admin services. So:
+ * RECONCILED WITH THE ACTUAL DB SCHEMA. The previous version referenced a
+ * `vehicleClaim` table and Vehicle columns (ownerDriverId, verificationStatus,
+ * verifiedAt, rejectionReason) and Driver columns (submittedAt, rejectionReason)
+ * that were never migrated — every vehicle/onboarding call 500'd. The real
+ * schema models driver↔vehicle ownership with drivers.assignedVehicleId and has
+ * no claim/verification tables, so this file now uses only columns that exist:
  *
- *   - role is hard-coded DRIVER on create (never read from input)
- *   - kycStatus is never writable through this file
- *   - drivers.assignedVehicleId is never written here; approving a VehicleClaim
- *     is the only thing that sets it
- *   - a self-registered Vehicle is inserted with verificationStatus PENDING
+ *   - ownership            drivers.assignedVehicleId -> vehicles.id
+ *   - "pending" vehicle    vehicles.status = INACTIVE + isActive = false
+ *   - "approved" vehicle   an admin sets isActive = true / status = AVAILABLE
+ *   - submission marker    stored in drivers.documents.__meta (no column exists)
  *
- * Every function keys off the caller's own userId. There is no :id parameter to
- * tamper with, the same guarantee customer.routes.js relies on.
+ * A driver still becomes dispatchable only when an admin sets kycStatus=VERIFIED
+ * AND activates the vehicle. Nothing here grants that. role is hard-coded DRIVER
+ * on create and kycStatus is never writable to VERIFIED through this file.
  */
 
 const crypto = require('crypto');
@@ -44,8 +47,6 @@ const DRIVER_SELF_SELECT = {
   aadhaarLast4: true,
   kycStatus: true,
   kycVerifiedAt: true,
-  submittedAt: true,
-  rejectionReason: true,
   documents: true,
   assignedVehicleId: true,
   ratingAvg: true,
@@ -64,27 +65,12 @@ const VEHICLE_SELF_SELECT = {
   colour: true,
   seatingCapacity: true,
   status: true,
-  verificationStatus: true,
-  verifiedAt: true,
-  rejectionReason: true,
+  isActive: true,
   insuranceExpiry: true,
   fitnessExpiry: true,
   permitExpiry: true,
   pucExpiry: true,
   documents: true,
-  ownerDriverId: true,
-};
-
-const CLAIM_SELECT = {
-  id: true,
-  vehicleId: true,
-  isOwner: true,
-  status: true,
-  note: true,
-  rejectionReason: true,
-  requestedAt: true,
-  decidedAt: true,
-  vehicle: { select: VEHICLE_SELF_SELECT },
 };
 
 /* ------------------------------------------------------------------ *
@@ -100,25 +86,15 @@ function missingDocs(documents, required) {
   return required.filter((k) => !docs[k] || !docs[k].url);
 }
 
-/**
- * Turn the partial unique indexes from the migration into clean 409s.
- * Prisma does not always populate meta.target for a partial index, so we match
- * the index name in the message too — same fallback style as isExclusionViolation.
- */
+/** Read our private submission metadata off the driver.documents JSON blob. */
+function readMeta(documents) {
+  const docs = documents && typeof documents === 'object' ? documents : {};
+  return docs.__meta && typeof docs.__meta === 'object' ? docs.__meta : {};
+}
+
+/** Turn unique-index violations into clean 409s. */
 function claimConflict(err) {
   const text = `${err?.message || ''} ${violatedFields(err).join(',')}`;
-  if (text.includes('uniq_pending_claim_per_driver')) {
-    return ApiError.conflict(
-      'You already have a vehicle request awaiting review. Withdraw it before submitting another.',
-      'CLAIM_ALREADY_PENDING',
-    );
-  }
-  if (text.includes('uniq_pending_claim_per_vehicle')) {
-    return ApiError.conflict(
-      'Another driver has already requested this vehicle and is awaiting review.',
-      'VEHICLE_CLAIM_CONTENDED',
-    );
-  }
   if (text.includes('registration_number')) {
     return ApiError.conflict(
       'A vehicle with that registration number is already on the platform.',
@@ -148,24 +124,7 @@ async function requireDriver(userId) {
  * Register
  * ------------------------------------------------------------------ */
 
-/**
- * Self-signup from the driver app. Creates User(role DRIVER) + Driver(PENDING)
- * in one transaction so a duplicate licence cannot leave an orphan User behind
- * — the same transactional shape as driver.service.create.
- *
- * Tokens are issued immediately even though the account is unverified: the
- * driver needs an authenticated session to finish onboarding (upload documents,
- * register a vehicle). Being logged in is not being approved — every
- * trip-bearing path checks kycStatus separately.
- */
 async function register({ name, phone, email, licenceNumber, licenceExpiry = null }, meta = {}) {
-  /**
-   * One phone, one identity. authOtp.verifyAndLogin resolves a login with
-   * findFirst({ phone, role: in [USER, DRIVER] }, orderBy createdAt asc), so if
-   * the same number held both a rider and a driver account it would always log
-   * into whichever was created first — the driver could never reach their own
-   * account. Refuse up front rather than create an unreachable login.
-   */
   const clash = await prisma.user.findFirst({
     where: { phone, role: { in: ['USER', 'DRIVER'] } },
     select: { id: true, role: true },
@@ -179,9 +138,8 @@ async function register({ name, phone, email, licenceNumber, licenceExpiry = nul
     );
   }
 
-  // Passwordless: drivers authenticate by OTP. An unguessable random hash keeps
-  // the NOT NULL column satisfied while making password login impossible by
-  // construction (no plaintext exists anywhere).
+  // Passwordless: drivers authenticate by OTP. Random hash keeps the NOT NULL
+  // column satisfied while making password login impossible by construction.
   const hash = await bcrypt.hash(crypto.randomUUID(), BCRYPT_ROUNDS);
 
   let created;
@@ -235,11 +193,6 @@ async function register({ name, phone, email, licenceNumber, licenceExpiry = nul
  * Profile
  * ------------------------------------------------------------------ */
 
-/**
- * The driver app's home screen payload: who am I, where am I in onboarding,
- * and what is still missing. Returning the checklist server-side keeps the
- * "can I submit yet" rule in exactly one place.
- */
 async function getMe(userId) {
   const driver = await requireDriver(userId);
   return { driver, onboarding: await onboardingState(userId) };
@@ -254,8 +207,6 @@ async function updateMe(userId, data) {
     'licenceExpiry' in driverFields ||
     'aadhaarLast4' in driverFields;
 
-  // Once an admin has verified the paperwork, the driver may still fix their
-  // contact details but not the identity fields those checks were run against.
   if (touchesIdentity && !EDITABLE_KYC.includes(driver.kycStatus)) {
     throw ApiError.conflict(
       'Verified licence details can only be changed by support',
@@ -286,13 +237,6 @@ async function updateMe(userId, data) {
  * Documents
  * ------------------------------------------------------------------ */
 
-/**
- * Uploads one driver-side document (LICENCE / AADHAAR / PHOTO) and records its
- * storage reference under drivers.documents[docType].
- *
- * Only the last 4 digits of an Aadhaar are ever stored as data
- * (drivers.aadhaarLast4); this stores the scan itself, nothing more.
- */
 async function saveDriverDocument(userId, docType, file) {
   const driver = await requireDriver(userId);
 
@@ -326,8 +270,6 @@ async function saveDriverDocument(userId, docType, file) {
     select: DRIVER_SELF_SELECT,
   });
 
-  // Best-effort cleanup of the replaced file. Never fail the request over it —
-  // the new document is already safely recorded.
   if (previous?.publicId) {
     storageService
       .destroy(previous.publicId)
@@ -341,9 +283,10 @@ async function saveDriverDocument(userId, docType, file) {
 async function saveVehicleDocument(userId, vehicleId, docType, file, expiry = null) {
   const vehicle = await requireOwnedVehicle(userId, vehicleId);
 
-  if (vehicle.verificationStatus === 'VERIFIED') {
+  // Once an admin has activated the vehicle, its paperwork is locked.
+  if (vehicle.isActive) {
     throw ApiError.conflict(
-      'This vehicle is already verified. Contact support to replace a document.',
+      'This vehicle is already approved. Contact support to replace a document.',
       'VEHICLE_LOCKED',
     );
   }
@@ -365,8 +308,6 @@ async function saveVehicleDocument(userId, vehicleId, docType, file, expiry = nu
     uploadedAt: new Date().toISOString(),
   };
 
-  // Keep the typed expiry columns in step with the uploaded document, so the
-  // existing compliance reports keep working without reading the JSON blob.
   const EXPIRY_COLUMN = {
     INSURANCE: 'insuranceExpiry',
     PUC: 'pucExpiry',
@@ -394,48 +335,41 @@ async function saveVehicleDocument(userId, vehicleId, docType, file, expiry = nu
  * Vehicles
  * ------------------------------------------------------------------ */
 
-/**
- * The vehicle must be one the caller owns, or one they have an open/approved
- * claim on. Prevents a driver reading or editing a fleet car by guessing a uuid.
- */
+/** The vehicle must be the one linked to the caller (drivers.assignedVehicleId). */
 async function requireOwnedVehicle(userId, vehicleId) {
+  const driver = await prisma.driver.findUnique({
+    where: { userId },
+    select: { assignedVehicleId: true },
+  });
+  if (!driver) throw ApiError.notFound('Driver profile not found', 'DRIVER_NOT_FOUND');
+  if (driver.assignedVehicleId !== vehicleId) {
+    throw ApiError.forbidden('This vehicle is not yours', 'VEHICLE_NOT_YOURS');
+  }
+
   const vehicle = await prisma.vehicle.findUnique({
     where: { id: vehicleId },
     select: VEHICLE_SELF_SELECT,
   });
   if (!vehicle) throw ApiError.notFound('Vehicle not found');
-
-  if (vehicle.ownerDriverId === userId) return vehicle;
-
-  const claim = await prisma.vehicleClaim.findFirst({
-    where: { driverId: userId, vehicleId, status: { in: ['PENDING', 'APPROVED'] } },
-    select: { id: true },
-  });
-  if (!claim) throw ApiError.forbidden('This vehicle is not yours', 'VEHICLE_NOT_YOURS');
-
   return vehicle;
 }
 
 /**
- * Registers a vehicle the driver owns. Creates the Vehicle (PENDING, owned by
- * this driver) AND the VehicleClaim(isOwner) in one transaction, so the admin
- * has a single queue covering both driver-owned and fleet-claimed cars.
- *
- * The vehicle is inserted INACTIVE as well as PENDING: verificationStatus keeps
- * it out of the new allocation guard, and isActive=false keeps it out of every
- * pre-existing fleet query that predates this feature. Belt and braces, because
- * an unchecked car being offered a passenger is the worst failure here.
+ * Registers a vehicle the driver owns. Creates the Vehicle INACTIVE (kept out of
+ * every dispatch/fleet query) and links it to the driver via assignedVehicleId.
+ * An admin activating it (isActive=true / status=AVAILABLE) is what makes it
+ * usable — a driver cannot self-certify a car.
  */
 async function registerOwnVehicle(userId, data) {
-  const driver = await requireDriver(userId);
+  await requireDriver(userId);
 
   const existing = await prisma.vehicle.findUnique({
     where: { registrationNumber: data.registrationNumber },
-    select: { id: true, ownerDriverId: true },
+    select: { id: true },
   });
   if (existing) {
     throw ApiError.conflict(
-      'That vehicle is already on the platform. If you drive it, submit a claim instead.',
+      'That vehicle is already on the platform.',
       'VEHICLE_EXISTS',
     );
   }
@@ -445,20 +379,18 @@ async function registerOwnVehicle(userId, data) {
       const vehicle = await tx.vehicle.create({
         data: {
           ...data,
-          ownerDriverId: driver.userId,
-          // Both hard-coded: a driver cannot self-certify a car.
-          verificationStatus: 'PENDING',
+          status: 'INACTIVE', // not dispatchable until an admin approves it
           isActive: false,
         },
         select: VEHICLE_SELF_SELECT,
       });
 
-      const claim = await tx.vehicleClaim.create({
-        data: { driverId: userId, vehicleId: vehicle.id, isOwner: true },
-        select: CLAIM_SELECT,
+      await tx.driver.update({
+        where: { userId },
+        data: { assignedVehicleId: vehicle.id },
       });
 
-      return { vehicle, claim };
+      return { vehicle };
     });
   } catch (err) {
     if (isUniqueViolation(err)) throw claimConflict(err);
@@ -467,128 +399,86 @@ async function registerOwnVehicle(userId, data) {
 }
 
 /**
- * Claims an existing fleet vehicle by registration number. Does not touch the
- * Vehicle row at all — it only files a request. An admin approving it is what
- * links the driver to the car.
+ * Fleet-vehicle claims are not part of this deployment's schema (no claim
+ * table). Drivers register their own vehicle via registerOwnVehicle instead.
  */
-async function claimFleetVehicle(userId, { registrationNumber, note = null }) {
-  await requireDriver(userId);
-
-  const vehicle = await prisma.vehicle.findUnique({
-    where: { registrationNumber },
-    select: { id: true, isActive: true, ownerDriverId: true, verificationStatus: true },
-  });
-  if (!vehicle) {
-    throw ApiError.notFound(
-      'No vehicle found with that registration number. Register it instead if it is yours.',
-      'VEHICLE_NOT_FOUND',
-    );
-  }
-  if (!vehicle.isActive) {
-    throw ApiError.conflict('That vehicle is not in service', 'VEHICLE_OUT_OF_SERVICE');
-  }
-  if (vehicle.ownerDriverId && vehicle.ownerDriverId !== userId) {
-    throw ApiError.conflict(
-      'That vehicle is registered to another driver',
-      'VEHICLE_OWNED_BY_OTHER',
-    );
-  }
-
-  try {
-    return await prisma.vehicleClaim.create({
-      data: { driverId: userId, vehicleId: vehicle.id, isOwner: false, note },
-      select: CLAIM_SELECT,
-    });
-  } catch (err) {
-    if (isUniqueViolation(err)) throw claimConflict(err);
-    throw err;
-  }
+async function claimFleetVehicle() {
+  throw ApiError.badRequest(
+    'Vehicle claiming is not available. Please register your vehicle instead.',
+    'CLAIMS_DISABLED',
+  );
 }
 
-/** Lets a driver take back a request that has not been decided yet. */
-async function withdrawClaim(userId, claimId) {
-  const result = await prisma.vehicleClaim.updateMany({
-    where: { id: claimId, driverId: userId, status: 'PENDING' },
-    data: { status: 'WITHDRAWN', decidedAt: new Date() },
-  });
-  if (result.count === 0) {
-    throw ApiError.notFound('No pending request found to withdraw', 'CLAIM_NOT_PENDING');
-  }
-  return prisma.vehicleClaim.findUnique({ where: { id: claimId }, select: CLAIM_SELECT });
+async function withdrawClaim() {
+  throw ApiError.badRequest('Vehicle claiming is not available.', 'CLAIMS_DISABLED');
 }
 
+/** The driver's own vehicle (0 or 1), shaped like the app expects. */
 async function listMyVehicles(userId, { page = 1, limit = 20 } = {}) {
-  const where = { driverId: userId };
-  const [total, items] = await Promise.all([
-    prisma.vehicleClaim.count({ where }),
-    prisma.vehicleClaim.findMany({
-      where,
-      select: CLAIM_SELECT,
-      orderBy: { requestedAt: 'desc' },
-      skip: (page - 1) * limit,
-      take: limit,
-    }),
-  ]);
-  return paginated(items, { page, limit, total });
+  const driver = await prisma.driver.findUnique({
+    where: { userId },
+    select: { assignedVehicle: { select: VEHICLE_SELF_SELECT } },
+  });
+
+  const vehicle = driver?.assignedVehicle || null;
+  const items = vehicle
+    ? [{
+        claimId: null,
+        isOwner: true,
+        status: vehicle.isActive ? 'APPROVED' : 'PENDING',
+        vehicle,
+      }]
+    : [];
+
+  return paginated(items, { page, limit, total: items.length });
 }
 
 /* ------------------------------------------------------------------ *
  * Onboarding state + submit for review
  * ------------------------------------------------------------------ */
 
-/**
- * The single source of truth for "is this application complete". The driver app
- * renders a checklist from this and the submit endpoint enforces it, so the two
- * can never disagree.
- */
 async function onboardingState(userId) {
   const driver = await prisma.driver.findUnique({
     where: { userId },
-    select: { kycStatus: true, submittedAt: true, rejectionReason: true, documents: true },
+    select: {
+      kycStatus: true,
+      documents: true,
+      assignedVehicleId: true,
+      assignedVehicle: { select: VEHICLE_SELF_SELECT },
+    },
   });
   if (!driver) throw ApiError.notFound('Driver profile not found', 'DRIVER_NOT_FOUND');
 
-  const claims = await prisma.vehicleClaim.findMany({
-    where: { driverId: userId, status: { in: ['PENDING', 'APPROVED'] } },
-    select: { id: true, isOwner: true, status: true, vehicle: { select: VEHICLE_SELF_SELECT } },
-  });
+  const meta = readMeta(driver.documents);
+  const vehicle = driver.assignedVehicle || null;
+  const hasVehicle = !!driver.assignedVehicleId && !!vehicle;
 
   const driverDocsMissing = missingDocs(driver.documents, REQUIRED_DRIVER_DOCS);
-
-  // Vehicle paperwork is only ours to complete for a car we registered
-  // ourselves. On a fleet claim the company already holds the RC and insurance.
-  const owned = claims.filter((c) => c.isOwner);
-  const vehicleDocsMissing = owned.length
-    ? missingDocs(owned[0].vehicle.documents, REQUIRED_VEHICLE_DOCS)
+  const vehicleDocsMissing = hasVehicle
+    ? missingDocs(vehicle.documents, REQUIRED_VEHICLE_DOCS)
     : [];
 
-  const hasVehicle = claims.length > 0;
   const complete = driverDocsMissing.length === 0 && vehicleDocsMissing.length === 0 && hasVehicle;
 
   return {
     kycStatus: driver.kycStatus,
-    submittedAt: driver.submittedAt,
-    rejectionReason: driver.rejectionReason,
+    submittedAt: meta.submittedAt || null,
+    rejectionReason: meta.rejectionReason || null,
     hasVehicle,
     requiredDriverDocs: REQUIRED_DRIVER_DOCS,
     requiredVehicleDocs: REQUIRED_VEHICLE_DOCS,
     missingDriverDocs: driverDocsMissing,
     missingVehicleDocs: vehicleDocsMissing,
     canSubmit: complete && ['PENDING', 'REJECTED'].includes(driver.kycStatus),
-    // Convenience for the app: a driver is only dispatchable when an admin has
-    // verified them AND approved a vehicle.
-    isApproved:
-      driver.kycStatus === 'VERIFIED' &&
-      claims.some((c) => c.status === 'APPROVED' && c.vehicle.verificationStatus === 'VERIFIED'),
-    vehicles: claims.map((c) => ({ claimId: c.id, isOwner: c.isOwner, status: c.status, vehicle: c.vehicle })),
+    // Dispatchable only when an admin has verified the driver AND activated the
+    // vehicle.
+    isApproved: driver.kycStatus === 'VERIFIED' && hasVehicle && vehicle.isActive,
+    vehicles: hasVehicle
+      ? [{ claimId: null, isOwner: true, status: vehicle.isActive ? 'APPROVED' : 'PENDING', vehicle }]
+      : [],
   };
 }
 
-/**
- * Hands the application to the admin queue. Sets submittedAt, which is what
- * distinguishes "awaiting a decision" from "still filling in the form".
- * Re-submitting after a rejection is allowed and clears the previous reason.
- */
 async function submitForReview(userId) {
   const state = await onboardingState(userId);
 
@@ -599,10 +489,7 @@ async function submitForReview(userId) {
     throw ApiError.forbidden('Your account is suspended. Please contact support.', 'ACCOUNT_SUSPENDED');
   }
   if (!state.hasVehicle) {
-    throw ApiError.badRequest(
-      'Register or claim a vehicle before submitting',
-      'VEHICLE_REQUIRED',
-    );
+    throw ApiError.badRequest('Register a vehicle before submitting', 'VEHICLE_REQUIRED');
   }
   if (state.missingDriverDocs.length || state.missingVehicleDocs.length) {
     throw ApiError.badRequest(
@@ -611,12 +498,24 @@ async function submitForReview(userId) {
     );
   }
 
+  // No submittedAt/rejectionReason columns exist — record the submission marker
+  // inside the documents JSON blob under a reserved __meta key.
+  const current = await prisma.driver.findUnique({
+    where: { userId },
+    select: { documents: true },
+  });
+  const documents = { ...(current?.documents || {}) };
+  documents.__meta = {
+    ...(documents.__meta && typeof documents.__meta === 'object' ? documents.__meta : {}),
+    submittedAt: new Date().toISOString(),
+    rejectionReason: null,
+  };
+
   const driver = await prisma.driver.update({
     where: { userId },
     data: {
       kycStatus: 'PENDING', // a rejected application returns to the queue
-      submittedAt: new Date(),
-      rejectionReason: null,
+      documents,
     },
     select: DRIVER_SELF_SELECT,
   });
