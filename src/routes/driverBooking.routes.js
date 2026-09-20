@@ -3,9 +3,12 @@
 /**
  * src/routes/driverBooking.routes.js   ->  /api/v1/driver/bookings
  *
- * Driver-authenticated actions on their own trips. Authorisation to a specific
- * booking is enforced in the service (the caller must be the assigned driver),
- * not by a dispatch permission — this is the driver acting on their own ride.
+ * Driver-authenticated reads + actions on the driver's OWN trips. Authorisation
+ * to a specific booking is enforced in the controller (caller must be the
+ * allocated driver), not by a dispatch permission.
+ *
+ * Route order matters: the literal '/active' is declared BEFORE '/:bookingId'
+ * so it is not swallowed by the param route.
  */
 
 const express = require('express');
@@ -20,33 +23,55 @@ const router = express.Router();
 
 router.use(requireAuth, requireRole('DRIVER'));
 
-// POST /api/v1/driver/bookings/:bookingId/reached  — driver arrived at pickup
+/* ---------------- reads ---------------- */
+
+// GET /api/v1/driver/bookings?page=&limit=  — paginated trip history
+router.get('/', ctrl.list);
+
+// GET /api/v1/driver/bookings/active  — the single live trip, or null
+router.get('/active', ctrl.active);
+
+// GET /api/v1/driver/bookings/:bookingId  — one trip the driver is on
+router.get('/:bookingId', validate({ params: s.bookingIdParamSchema }), ctrl.getById);
+
+/* ---------------- lifecycle ---------------- */
+
+// ALLOCATED -> EN_ROUTE
+router.post(
+  '/:bookingId/en-route',
+  validate({ params: s.bookingIdParamSchema }),
+  ctrl.enRoute
+);
+
+// EN_ROUTE -> REACHED (issues the customer OTP)
 router.post(
   '/:bookingId/reached',
   validate({ params: s.bookingIdParamSchema }),
   ctrl.recordReached
 );
 
-// POST /api/v1/driver/bookings/:bookingId/start  — begin the trip.
-//
-// Body: { startOtp, lat?, lng?, odometerKm? }. The code is the rider's, read
-// out at pickup; lifecycle.startTrip refuses without it for a DRIVER caller.
+// REACHED -> ONGOING. Body: { otp | startOtp, lat?, lng?, odometerKm? }
 router.post(
   '/:bookingId/start',
   validate({ params: s.bookingIdParamSchema }),
   ctrl.startTrip
 );
 
-// POST /api/v1/driver/bookings/:bookingId/collect-cash
+// ARRIVED -> COMPLETED. Body: { actualKm?, odometerKm?, finalFare?, lat?, lng? }
+router.post(
+  '/:bookingId/complete',
+  validate({ params: s.bookingIdParamSchema }),
+  ctrl.complete
+);
+
+// ARRIVED | COMPLETED — collect outstanding cash balance
 router.post(
   '/:bookingId/collect-cash',
   validate({ params: s.bookingIdParamSchema }),
   ctrl.collectCash
 );
 
-// POST /api/v1/driver/bookings/:bookingId/odometer  — final reading after trip.
-// Accepts multipart with an optional `photo` file (uploaded to storage), plus
-// odometerKm. multer runs before validate so text fields land in req.body.
+// ARRIVED | COMPLETED — final odometer reading (+ optional photo)
 router.post(
   '/:bookingId/odometer',
   uploadSingle('photo'),
