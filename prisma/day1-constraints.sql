@@ -114,12 +114,16 @@ ALTER TABLE "bookings"
   ADD CONSTRAINT "chk_booking_surge_band"
   CHECK ("surge_multiplier" >= 0.5 AND "surge_multiplier" <= 2.0);
 
--- A round trip must have a return time, and it must be after pickup.
+-- A round trip must have a return time, and it must be after pickup. Every
+-- other trip type has no return leg to schedule, so return_at must be null.
+-- Written as "<> 'ROUND_TRIP'" rather than naming ONE_WAY: the original named
+-- it explicitly, so AIRPORT and HOURLY satisfied neither branch and every such
+-- booking was refused at insert while quoting fine.
 ALTER TABLE "bookings"
   ADD CONSTRAINT "chk_booking_round_trip_return"
   CHECK (
-    ("trip_type" = 'ONE_WAY'    AND "return_at" IS NULL) OR
-    ("trip_type" = 'ROUND_TRIP' AND "return_at" IS NOT NULL AND "return_at" > "pickup_at")
+    ("trip_type" = 'ROUND_TRIP' AND "return_at" IS NOT NULL AND "return_at" > "pickup_at") OR
+    ("trip_type" <> 'ROUND_TRIP' AND "return_at" IS NULL)
   );
 
 ALTER TABLE "ledger_entries"
@@ -230,7 +234,7 @@ INSERT INTO "fare_configs"
    "minimum_fare", "cancellation_fee", "return_empty_pct",
    "driver_allowance", "night_allowance", "night_charge_pct",
    "night_start_hour", "night_start_minute", "night_end_hour", "night_end_minute")
-SELECT c."id", v.cls, 'ONE_WAY', v.base, v.km, v.min_rate, v.min_fare, v.cancel, 40.00,
+SELECT c."id", v.cls, 'ONE_WAY', v.base, v.km, 0, v.min_fare, v.cancel, 40.00,
        v.bata, v.night_flat, 10.00,
        21, 55, 6, 0
 FROM "cities" c
@@ -317,3 +321,23 @@ INSERT INTO "role_permissions" ("role", "permission") VALUES
   ('USER', 'BOOKING_CREATE'),
   ('DRIVER', 'TRIP_MANAGE')
 ON CONFLICT ("role", "permission") DO NOTHING;
+
+
+
+-- ---------------------------------------------------------------------------
+-- 7. NO TIME-BASED PRICING
+--
+-- Deliberately at the END of this file, after the fare_config seeds in section
+-- 6. A check constraint is validated against existing rows the moment it is
+-- added, so placing this up in section 3 with the other checks would make the
+-- file reject its own inserts.
+--
+-- Distance and the fixed base carry the fare; a per-minute charge on top
+-- double-counts the traffic that per_km already absorbs. Enforced in the
+-- database rather than left to config so nothing — admin panel, seed file or a
+-- later migration — can quietly reintroduce it.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE "fare_configs"
+  ADD CONSTRAINT "chk_fare_config_no_time_charge"
+  CHECK ("per_minute" = 0);
