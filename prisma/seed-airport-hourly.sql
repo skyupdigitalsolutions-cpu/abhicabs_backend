@@ -29,7 +29,7 @@ INSERT INTO "fare_configs"
    "driver_allowance", "night_allowance", "night_charge_pct",
    "night_start_hour", "night_start_minute", "night_end_hour", "night_end_minute",
    "effective_from")
-SELECT c."id", v.cls, 'AIRPORT', v.base, v.km, v.min_rate, v.min_fare, v.cancel, v.surcharge,
+SELECT c."id", v.cls, 'AIRPORT', v.base, v.km, 0, v.min_fare, v.cancel, v.surcharge,
        0, 0, 0,
        21, 55, 6, 0,
        TIMESTAMPTZ '2020-01-01 00:00:00+00'
