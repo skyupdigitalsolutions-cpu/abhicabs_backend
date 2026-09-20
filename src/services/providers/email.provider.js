@@ -12,6 +12,16 @@
  *   send({ to, subject, text, html }) -> { messageId, channel }
  *
  * ---------------------------------------------------------------------------
+ * WHY THERE ARE TWO REAL PROVIDERS
+ * ---------------------------------------------------------------------------
+ * 'smtp' is the classic path and works fine locally. It does NOT work on
+ * Railway's Free/Trial/Hobby plans, which block outbound ports 25/465/587/2525
+ * at the network level — nodemailer then hangs until timeoutMs and every OTP
+ * fails with a connection timeout, which looks like a credentials problem but
+ * is not. 'brevo' talks to api.brevo.com over ordinary HTTPS on 443 and is
+ * unaffected. Both satisfy the same contract, so nothing upstream changes.
+ *
+ * ---------------------------------------------------------------------------
  * WHY NODEMAILER IS REQUIRED LAZILY
  * ---------------------------------------------------------------------------
  * The require() sits inside the factory, not at the top of the file. If the
@@ -90,6 +100,75 @@ function buildSmtp() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Brevo (HTTPS)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Brevo wants the sender as a structured object, but env.mail.from is an
+ * RFC-5322 string ("AbhiCabs <abhicabs2026@gmail.com>") because that is what
+ * nodemailer takes. Split it here rather than adding a second from-config that
+ * can drift out of sync with the SMTP path.
+ */
+function splitFrom(value) {
+  const match = /^\s*(.*?)\s*<\s*([^>]+)\s*>\s*$/.exec(value || '');
+  if (match) return { name: match[1] || env.mail.fromName, email: match[2] };
+  return { name: env.mail.fromName, email: (value || '').trim() };
+}
+
+function buildBrevo() {
+  const ENDPOINT = 'https://api.brevo.com/v3/smtp/email';
+  const sender = splitFrom(env.mail.from);
+
+  return {
+    name: 'brevo',
+    configured: true,
+    async send({ to, subject, text, html }) {
+      // Node 20 ships global fetch, so there is nothing extra to install. The
+      // abort timer mirrors the SMTP timeouts — a stalled mail API must not
+      // hold an OTP request open.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), env.mail.timeoutMs);
+
+      try {
+        const res = await fetch(ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'api-key': env.mail.brevoApiKey,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            sender,
+            to: [{ email: to }],
+            subject,
+            textContent: text,
+            ...(html ? { htmlContent: html } : {}),
+            ...(env.mail.replyTo ? { replyTo: { email: env.mail.replyTo } } : {}),
+          }),
+          signal: controller.signal,
+        });
+
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          // Brevo returns { code, message }. An unverified sender and a bad key
+          // are the two you will actually hit, and they are indistinguishable
+          // from the caller unless the reason is surfaced.
+          throw new Error(body?.message || `brevo responded ${res.status}`);
+        }
+
+        return { messageId: body.messageId, channel: 'email' };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    /** Optional health check — the key's shape is all that can be checked offline. */
+    async verify() {
+      return Boolean(env.mail.brevoApiKey);
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * Factory
  * ------------------------------------------------------------------ */
 
@@ -99,6 +178,18 @@ function getProvider() {
   if (cached) return cached;
 
   const name = env.mail.provider;
+
+  if (name === 'brevo') {
+    if (env.mail.brevoApiKey) {
+      cached = buildBrevo();
+      console.log(`[mail] brevo ready from ${env.mail.from}`);
+    } else {
+      console.warn('[mail] brevo selected but BREVO_API_KEY missing — using console');
+      cached = consoleProvider;
+    }
+    return cached;
+  }
+
   const hasCreds = Boolean(env.mail.host && env.mail.user && env.mail.pass);
 
   if (name === 'smtp' && hasCreds) {

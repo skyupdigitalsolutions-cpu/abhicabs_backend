@@ -195,15 +195,21 @@ const env = {
 
   /* ---------------- Email (login OTP + future transactional mail) ---------------- */
   mail: {
-    // console | smtp
+    // console | smtp | brevo
     //
     // Defaults to console so a fresh clone still boots and still lets you log
-    // in. Set MAIL_PROVIDER=smtp with credentials and login codes go to the
+    // in. Set MAIL_PROVIDER=brevo with BREVO_API_KEY and login codes go to the
     // user's inbox instead of the server log.
     //
-    // Falls back to console automatically if 'smtp' is selected without full
-    // credentials — a missing password should degrade delivery, not take the
-    // app down mid-flight.
+    // NOTE ON HOSTING: Railway blocks outbound SMTP (ports 25/465/587/2525) on
+    // Free, Trial and Hobby plans. The 'smtp' path therefore hangs until
+    // timeoutMs and every send fails with a connection timeout there — use
+    // 'brevo', which is an ordinary HTTPS call on 443. The smtp path is kept
+    // for local development and for hosts that permit SMTP.
+    //
+    // Falls back to console automatically if a provider is selected without its
+    // credentials — a missing key should degrade delivery, not take the app
+    // down mid-flight.
     provider: (process.env.MAIL_PROVIDER || 'console').toLowerCase(),
 
     host: process.env.MAIL_HOST || '',
@@ -225,6 +231,10 @@ const env = {
     fromName: process.env.MAIL_FROM_NAME || 'AbhiCabs',
     // Most providers reject a From that is not the authenticated mailbox, so
     // default to the login user rather than something invented.
+    //
+    // With MAIL_PROVIDER=brevo there is no MAIL_USER to fall back to, so set
+    // MAIL_FROM explicitly to a sender you have verified in Brevo — otherwise
+    // this defaults to no-reply@localhost and every send is rejected.
     from:
       process.env.MAIL_FROM ||
       `${process.env.MAIL_FROM_NAME || 'AbhiCabs'} <${process.env.MAIL_USER || 'no-reply@localhost'}>`,
@@ -236,8 +246,15 @@ const env = {
     // known-broken chain, and never in production.
     tlsRejectUnauthorized: process.env.MAIL_TLS_REJECT_UNAUTHORIZED !== 'false',
 
-    // A slow SMTP server must not become a slow login endpoint.
+    // A slow SMTP server must not become a slow login endpoint. Reused as the
+    // fetch abort timeout on the HTTPS providers.
     timeoutMs: Number(process.env.MAIL_TIMEOUT_MS || 10_000),
+
+    // Brevo: HTTPS transactional email (api.brevo.com). This is the API key
+    // from SMTP & API -> API Keys, prefixed 'xkeysib-'. It is NOT the SMTP
+    // credential shown on the neighbouring tab — that one drives the blocked
+    // smtp-relay.brevo.com path.
+    brevoApiKey: process.env.BREVO_API_KEY || '',
   },
 
   /* ---------------- MSG91 (unused until DLT approval) ---------------- */
@@ -315,17 +332,18 @@ if (env.accessSecret === env.refreshSecret) {
 
 
 // Dev mode is only dangerous in production when there is no real channel behind
-// it. With SMTP configured the console is just an unused fallback, so the guard
-// checks for an actual delivery path rather than the flag alone.
+// it. With a provider configured the console is just an unused fallback, so the
+// guard checks for an actual delivery path rather than the flag alone.
 const mailConfigured =
-  env.mail.provider === 'smtp' && env.mail.host && env.mail.user && env.mail.pass;
+  (env.mail.provider === 'smtp' && env.mail.host && env.mail.user && env.mail.pass) ||
+  (env.mail.provider === 'brevo' && env.mail.brevoApiKey);
 
 if (env.isProd && env.otp.devMode && !mailConfigured) {
   throw new Error(
     '[env] OTP_DEV_MODE must be "false" in production, or a real delivery ' +
-    'channel must be configured (MAIL_PROVIDER=smtp with MAIL_HOST / MAIL_USER / ' +
-    'MAIL_PASS) — otherwise codes are only printed to the server console and ' +
-    'nobody can log in.'
+    'channel must be configured (MAIL_PROVIDER=brevo with BREVO_API_KEY, or ' +
+    'MAIL_PROVIDER=smtp with MAIL_HOST / MAIL_USER / MAIL_PASS) — otherwise ' +
+    'codes are only printed to the server console and nobody can log in.'
   );
 }
 
