@@ -28,6 +28,7 @@ router.get('/', (req, res) => {
       adminPayments: '/api/v1/admin/payments',
       invoices: '/api/v1/admin/invoices',
       reports: '/api/v1/admin/reports',
+      fareConfigs: '/api/v1/admin/fare-configs',
       dispatch: '/api/v1/admin/dispatch',
       location: '/api/v1/admin/location',
       driverLocation: '/api/v1/driver/location',
@@ -62,6 +63,11 @@ router.use('/admin/fleet', apiLimiter, require('./fleet.routes'));
 router.use('/admin/payments', apiLimiter, require('./adminPayment.routes'));
 router.use('/admin/invoices', apiLimiter, require('./invoice.routes'));
 router.use('/admin/reports', apiLimiter, require('./report.routes'));
+
+// Rate cards. Mounted BEFORE the bare '/admin' router would matter if that one
+// had a catch-all; it does not, but keeping the admin mounts grouped is what
+// stops the next one from being forgotten the way this one was.
+router.use('/admin/fare-configs', apiLimiter, require('./fareConfig.routes'));
 
 // Out-of-area enquiries. Three audiences, three routers — see the route file.
 const bookingRequestRoutes = require('./bookingRequest.routes');
