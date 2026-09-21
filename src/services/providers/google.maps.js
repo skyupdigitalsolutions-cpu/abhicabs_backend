@@ -181,7 +181,27 @@ async function searchAirports({ query, lat, lng, radiusM = 80_000 } = {}) {
   const { data } = await http.get(endpoint, { params });
   assertOk(data, q ? 'textsearch' : 'nearbysearch');
 
-  return (data.results || []).map(toPlace);
+  return (data.results || []).filter(isRealAirport).map(toPlace);
+}
+
+/**
+ * Places that are NOT an airport, however they are named or classified.
+ *
+ * Google's `type=airport` filter is far looser than it sounds: a Nearby Search
+ * around Bengaluru returns a hotel on the airport road, a heliport on a hotel
+ * roof, and at least one private individual's saved place, all tagged airport.
+ * Filtering on the returned `types` is the only reliable way to drop them.
+ */
+const NOT_AN_AIRPORT = [
+  'lodging', 'store', 'restaurant', 'cafe', 'food', 'bar', 'meal_takeaway',
+  'shopping_mall', 'school', 'gym', 'bank', 'atm', 'parking',
+  'travel_agency', 'car_rental', 'tourist_attraction', 'real_estate_agency',
+];
+
+function isRealAirport(r) {
+  const types = r.types || [];
+  if (!types.includes('airport')) return false;
+  return !types.some((t) => NOT_AN_AIRPORT.includes(t));
 }
 
 /**
@@ -203,11 +223,36 @@ async function searchTerminals(airportName, { lat, lng } = {}) {
   });
   assertOk(data, 'textsearch:terminals');
 
-  return (data.results || [])
-    // Keep only records that actually name a terminal. Text Search always
-    // returns the parent airport too, and often a cargo depot or a hotel.
-    .filter((r) => /terminal|\bT[0-9]\b/i.test(r.name || ''))
-    .map(toPlace);
+  return (data.results || []).filter(isTerminalRecord).map(toPlace);
+}
+
+/**
+ * Is this record the terminal itself, rather than a shop inside it?
+ *
+ * Searching "<airport> terminal" returns every business whose address contains
+ * a terminal — a coffee counter at T1 arrivals, a luggage shop at T2 departures.
+ * Their names genuinely contain "T1" and "Terminal 2", so a name match alone
+ * lets them through, and a rider sent to a coffee counter's pin is dropped at
+ * the wrong door.
+ *
+ * Two tests, both of which must pass:
+ *   1. the NAME names a terminal, not merely the address
+ *   2. the TYPES do not mark it as a business
+ */
+function isTerminalRecord(r) {
+  const name = String(r.name || '');
+  if (!/\b(?:terminal[\s-]*[0-9A-Z]{1,2}|T[0-9]{1,2})\b/i.test(name)) return false;
+
+  const types = r.types || [];
+  if (types.some((t) => NOT_AN_AIRPORT.includes(t))) return false;
+
+  // A retailer's name reads "Brand - Airport T2": a brand, a SPACED separator,
+  // then the location. The separator must be spaced — Google writes the real
+  // thing as "Terminal-1", and matching a bare hyphen rejected the actual
+  // terminals along with the shops.
+  if (/\s[-–|:]\s/.test(name)) return false;
+
+  return true;
 }
 
 /** Shared shape for both airport calls. */
@@ -219,6 +264,9 @@ function toPlace(r) {
     address: r.formatted_address || r.vicinity || null,
     lat: loc.lat,
     lng: loc.lng,
+    // Carried through so the service layer can tell an airport from a hotel
+    // without a second lookup.
+    types: r.types || [],
     provider: NAME,
   };
 }

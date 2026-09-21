@@ -429,36 +429,89 @@ async function airports({ q, lat, lng, radiusKm = 80, limit = 12 } = {}) {
           ),
         );
 
-        const out = [];
-        const seen = new Set();
+        /*
+         * Group by airport, then dedupe terminals within each.
+         *
+         * Both are needed because the same terminal arrives more than once and
+         * in more than one shape. Bengaluru returned "Kempegowda International
+         * Airport Terminal-1" as a top-level result AND "Terminal 1" as a
+         * child of the parent airport — two records, two place ids, one
+         * building. Deduping on place id alone kept both.
+         */
+        const groups = new Map();
 
-        const push = (place, parent) => {
-          if (!place || !place.placeId || seen.has(place.placeId)) return;
-          seen.add(place.placeId);
-          const terminal = extractTerminal(place.name);
-          out.push({
+        const add = (place, fallbackAirport) => {
+          if (!place || !place.placeId || !place.lat || !place.lng) return;
+
+          const { airportName, terminal } = splitTerminal(place.name, fallbackAirport);
+          const groupKey = normaliseAirport(airportName);
+
+          /*
+           * Match on PREFIX, not equality.
+           *
+           * One airport comes back under names of different lengths —
+           * "Kempegowda International Airport Bengaluru" for the airport
+           * itself, "Kempegowda International Airport" once a terminal suffix
+           * is stripped off. Exact-key grouping split those into two entries
+           * and the rider saw the same airport twice.
+           */
+          let key = groupKey;
+          for (const existing of groups.keys()) {
+            if (existing.startsWith(groupKey) || groupKey.startsWith(existing)) {
+              key = existing;
+              break;
+            }
+          }
+
+          let group = groups.get(key);
+          if (!group) {
+            group = { airportName, parent: null, terminals: new Map() };
+            groups.set(key, group);
+          } else if (airportName.length > group.airportName.length) {
+            // Prefer the fuller name: "…Airport Bengaluru" over "…Airport".
+            group.airportName = airportName;
+          }
+
+          const entry = {
             placeId: place.placeId,
-            // The parent's name, so "Terminal 2" is never shown on its own.
-            airportName: parent ? parent.name : place.name,
+            airportName: group.airportName,
             terminal,
-            label: place.name,
+            label: terminal ? `${group.airportName} — ${terminal}` : group.airportName,
             address: place.address,
             lat: place.lat,
             lng: place.lng,
             isTerminal: Boolean(terminal),
-          });
+          };
+
+          if (!terminal) {
+            // Keep the first airport-level record; later ones are the same
+            // building described differently.
+            if (!group.parent) group.parent = entry;
+          } else if (!group.terminals.has(terminal)) {
+            group.terminals.set(terminal, entry);
+          }
         };
 
         parents.forEach((parent, i) => {
-          push(parent, null);
+          add(parent, null);
           const res = settled[i];
           if (res && res.status === 'fulfilled') {
-            (res.value || []).forEach((t) => push(t, parent));
+            (res.value || []).forEach((t) => add(t, parent.name));
           }
         });
 
-        // Terminals of the nearest airport first — that is what the rider is
-        // most likely reaching for — but keep each airport's group together.
+        const out = [];
+        for (const group of groups.values()) {
+          // The airport itself first, then its terminals in order — T1 before
+          // T2, which is what a rider scanning the list expects.
+          if (group.parent) out.push(group.parent);
+          out.push(
+            ...[...group.terminals.values()].sort((a, b) =>
+              (a.terminal ?? '').localeCompare(b.terminal ?? '', undefined, { numeric: true }),
+            ),
+          );
+        }
+
         return out.slice(0, limit);
       } catch (err) {
         return [];
@@ -468,99 +521,46 @@ async function airports({ q, lat, lng, radiusKm = 80, limit = 12 } = {}) {
   );
 }
 
-/** "…Airport Terminal 2" -> "Terminal 2". Null when the name has no terminal. */
-function extractTerminal(name) {
-  const m = String(name || '').match(/\b(?:terminal\s*([0-9A-Z]{1,2})|T([0-9]{1,2}))\b/i);
-  if (!m) return null;
-  return `Terminal ${m[1] || m[2]}`.replace(/\s+/g, ' ');
-}
-
-/* ------------------------------------------------------------------ *
- * Service area
- * ------------------------------------------------------------------ */
-
 /**
- * Is a point inside a city's service area?
+ * "…Airport Terminal-1" -> "Terminal 1". Null when the name has no terminal.
  *
- * Pure arithmetic against the city's centre and radius — no API call. This runs
- * before anything else in the booking flow, so an out-of-area request costs
- * nothing at all.
+ * The separator class is `[\s-]` rather than `\s`: Google writes Bengaluru's
+ * as "Terminal-1" with a hyphen, and a whitespace-only pattern silently
+ * classified both of its terminals as plain airports.
  */
-function isServiceable(point, city) {
-  if (!geo.isValidCoordinate(point)) return { ok: false, reason: 'INVALID_COORDINATES' };
-
-  const centre = { lat: Number(city.centreLat), lng: Number(city.centreLng) };
-  const distanceKm = geo.haversineKm(point, centre);
-
-  if (distanceKm > Number(city.radiusKm)) {
-    return {
-      ok: false,
-      reason: 'OUTSIDE_SERVICE_AREA',
-      distanceKm: Number(distanceKm.toFixed(2)),
-      radiusKm: Number(city.radiusKm),
-    };
-  }
-  return { ok: true, distanceKm: Number(distanceKm.toFixed(2)) };
-}
-
-function health() {
-  const geoTotal = metrics.geocodeHits + metrics.geocodeMisses;
-  const dmTotal = metrics.distanceHits + metrics.distanceMisses;
-
-  return {
-    provider: getProvider().name,
-    breaker: breaker.state,
-    geocodeHitRate: geoTotal ? Number((metrics.geocodeHits / geoTotal).toFixed(3)) : null,
-    distanceHitRate: dmTotal ? Number((metrics.distanceHits / dmTotal).toFixed(3)) : null,
-    metrics: { ...metrics },
-  };
-}
-
-/** Test hook. */
-function resetBreaker() {
-  breaker.state = 'closed';
-  breaker.failures = 0;
+function extractTerminal(name) {
+  const m = String(name || '').match(/\b(?:terminal[\s-]*([0-9A-Z]{1,2})|T([0-9]{1,2}))\b/i);
+  if (!m) return null;
+  return `Terminal ${(m[1] || m[2]).toUpperCase()}`;
 }
 
 /**
- * Road route geometry (the driving path that follows streets) between two
- * points, for drawing on the map. Cached like distance (roads rarely change),
- * breaker-wrapped, and falls back to a straight 2-point line on any failure so
- * the map always has *something* to draw.
+ * Split a place name into its airport and its terminal.
+ *
+ * Needed because a terminal reaches us in two different shapes: sometimes as
+ * its own record named just "Terminal 1", and sometimes as a top-level search
+ * result named "Kempegowda International Airport Terminal-1". The second was
+ * being listed as if it were a separate airport, so one airport appeared three
+ * times in the dropdown.
  */
-async function getRoute(origin, destination, opts = {}) {
-  if (!geo.isValidCoordinate(origin) || !geo.isValidCoordinate(destination)) {
-    throw ApiError.badRequest('Invalid pickup or drop coordinates', 'INVALID_COORDINATES');
-  }
+/** Lower-case, letters and digits only — the grouping key. */
+function normaliseAirport(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 
-  const key = `maps:route:${geo.coordKey(origin)}:${geo.coordKey(destination)}`;
+function splitTerminal(name, fallbackAirport) {
+  const terminal = extractTerminal(name);
+  if (!terminal) return { airportName: name, terminal: null };
 
-  if (!opts.fresh) {
-    const hit = await cache.get(key);
-    if (hit) return { ...hit, cached: true };
-  }
+  const stripped = String(name)
+    .replace(/[\s,–|-]*\b(?:terminal[\s-]*[0-9A-Z]{1,2}|T[0-9]{1,2})\b.*$/i, '')
+    .trim();
 
-  try {
-    const result = await callProvider(
-      () => getProvider().getRoute(origin, destination),
-      'route'
-    );
-    await cache.set(key, result, TTL.DISTANCE);
-    return { ...result, cached: false };
-  } catch (err) {
-    // Never block the UI over a missing route line — draw the straight line.
-    return {
-      points: [
-        { lat: Number(origin.lat), lng: Number(origin.lng) },
-        { lat: Number(destination.lat), lng: Number(destination.lng) },
-      ],
-      distanceKm: Number(geo.haversineKm(origin, destination).toFixed(2)),
-      durationMin: null,
-      provider: 'fallback',
-      estimated: true,
-      cached: false,
-    };
-  }
+  // "Terminal 1" on its own strips to nothing, so fall back to the parent.
+  return {
+    airportName: stripped.length >= 4 ? stripped : (fallbackAirport || name),
+    terminal,
+  };
 }
 
 module.exports = {
