@@ -198,10 +198,39 @@ const NOT_AN_AIRPORT = [
   'travel_agency', 'car_rental', 'tourist_attraction', 'real_estate_agency',
 ];
 
+/**
+ * The name of a place that flies passengers.
+ *
+ * Indian airports are named "<something> Airport", near-universally, and the
+ * search path appends the word anyway. Requiring it is what finally removes
+ * the results Google tags `airport` with no other type to catch them by — a
+ * private individual's saved place, a firm called "G Enterprises", a downtown
+ * spot called "Banaras".
+ */
+const AIRPORT_NAME = /\b(airport|aerodrome|airfield|air\s?base|airstrip)\b/i;
+
+/**
+ * Names that contain an aviation word but are not somewhere a cab can drop you.
+ *
+ * Two kinds. Helipads, which Google files under `airport` and which no cab
+ * passenger is catching a flight from. And businesses that sell aviation
+ * services — "SAN AIRPORT SERVICES", "Aviationskybiz Pvt Ltd - helipad
+ * consulting" — whose names pass AIRPORT_NAME but whose pins are an office
+ * floor in the city.
+ */
+const NOT_A_TERMINAL_BUILDING =
+  /\b(helipad|heliport|services|consulting|agency|travel|taxi|cab|transfer|parking|hotel|lounge|cargo|freight|academy|training|club)\b/i;
+
 function isRealAirport(r) {
   const types = r.types || [];
   if (!types.includes('airport')) return false;
-  return !types.some((t) => NOT_AN_AIRPORT.includes(t));
+  if (types.some((t) => NOT_AN_AIRPORT.includes(t))) return false;
+
+  const name = String(r.name || '');
+  if (!AIRPORT_NAME.test(name)) return false;
+  if (NOT_A_TERMINAL_BUILDING.test(name)) return false;
+
+  return true;
 }
 
 /**
@@ -245,6 +274,7 @@ function isTerminalRecord(r) {
 
   const types = r.types || [];
   if (types.some((t) => NOT_AN_AIRPORT.includes(t))) return false;
+  if (NOT_A_TERMINAL_BUILDING.test(name)) return false;
 
   // A retailer's name reads "Brand - Airport T2": a brand, a SPACED separator,
   // then the location. The separator must be spaced — Google writes the real

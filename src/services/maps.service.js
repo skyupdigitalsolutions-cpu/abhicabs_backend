@@ -63,11 +63,11 @@ const keys = {
   reverse: (lat, lng) => `maps:rev:${geo.coordKey({ lat, lng })}`,
   distance: (o, d) => `maps:dm:${geo.coordKey(o)}:${geo.coordKey(d)}`,
   autocomplete: (q) => `maps:ac:${String(q).toLowerCase().trim().slice(0, 40)}`,
-  // v2: the v1 keys cached results from before the airport/terminal filters
-  // existed, and they live for 30 days. Bumping the prefix retires them
-  // instantly instead of waiting a month or flushing Redis by hand.
+  // Version the prefix. These entries live for 30 days, so a filtering fix
+  // would otherwise not be visible until they expired; bumping the version
+  // retires the old answers instantly, with no Redis surgery.
   airports: (q, lat, lng) =>
-    `maps:air:v2:${String(q || '').toLowerCase().trim().slice(0, 32)}:${
+    `maps:air:v3:${String(q || '').toLowerCase().trim().slice(0, 32)}:${
       lat && lng ? geo.coordKey({ lat, lng }) : 'any'}`,
 };
 
