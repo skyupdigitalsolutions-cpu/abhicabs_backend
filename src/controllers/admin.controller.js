@@ -23,7 +23,7 @@ exports.getUser = asyncHandler(async (req, res) => {
 });
 
 exports.createUser = asyncHandler(async (req, res) => {
-  const user = await userService.create(req.body);
+  const user = await userService.create(req.body, req.user);
   res.status(201).json({ success: true, message: 'User created', data: { user } });
 });
 

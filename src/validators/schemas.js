@@ -165,12 +165,31 @@ const updateProfileSchema = z
  * Admin
  * ---------------------------------------------------------------- */
 
+/**
+ * Roles an admin may hand out through /admin/users.
+ *
+ * DRIVER is deliberately absent. A driver is created by driver.service, which
+ * writes the users row AND the drivers extension (licence, KYC, documents) in
+ * one transaction. A bare DRIVER user made here would authenticate and then
+ * fail everywhere the driver profile is read, because no drivers row exists.
+ */
+const ASSIGNABLE_ROLES = ['USER', 'ADMIN', 'OPS', 'FINANCE', 'FLEET', 'SUPPORT'];
+
+/**
+ * Roles that carry staff access. Creating one of these is a privilege grant,
+ * not a sign-up, so user.service guards it independently of route permissions.
+ */
+const PRIVILEGED_ROLES = ['ADMIN', 'OPS', 'FINANCE', 'FLEET', 'SUPPORT'];
+
+/** Filtering the list is read-only, so every role is fair game here. */
+const FILTERABLE_ROLES = [...ASSIGNABLE_ROLES, 'DRIVER'];
+
 const createUserSchema = z.object({
   name,
   email,
   password,
   phone,
-  role: z.enum(['USER', 'ADMIN']).default('USER'),
+  role: z.enum(ASSIGNABLE_ROLES).default('USER'),
   isActive: z.boolean().default(true),
 });
 
@@ -181,7 +200,7 @@ const updateUserSchema = z
     name: name.optional(),
     email: email.optional(),
     phone,
-    role: z.enum(['USER', 'ADMIN']).optional(),
+    role: z.enum(ASSIGNABLE_ROLES).optional(),
     isActive: z.boolean().optional(),
     password: password.optional(),
   })
@@ -193,7 +212,7 @@ const listUsersQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   search: z.string().trim().max(120).optional(),
-  role: z.enum(['USER', 'ADMIN']).optional(),
+  role: z.enum(FILTERABLE_ROLES).optional(),
   isActive: z
     .enum(['true', 'false'])
     .transform((v) => v === 'true')
@@ -217,4 +236,7 @@ module.exports = {
   updateUserSchema,
   listUsersQuerySchema,
   idParamSchema,
+  ASSIGNABLE_ROLES,
+  PRIVILEGED_ROLES,
+  FILTERABLE_ROLES,
 };

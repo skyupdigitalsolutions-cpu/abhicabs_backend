@@ -12,6 +12,7 @@ const { prisma, isUniqueViolation, isNotFound } = require('../config/prisma');
 const { ApiError, publicUser, paginated } = require('../utils/helpers');
 
 const { SAFE_SELECT } = require('../models/user.model');
+const { PRIVILEGED_ROLES } = require('../validators/schemas');
 
 const BCRYPT_ROUNDS = 12;
 
@@ -57,7 +58,21 @@ async function list({ page, limit, search, role, isActive, sortBy, order }) {
  * CREATE  (admin only)
  * ---------------------------------------------------------------- */
 
-async function create({ name, email, password, phone, role, isActive }) {
+async function create({ name, email, password, phone, role, isActive }, actor) {
+  // Creating a staff account is a privilege grant, not a sign-up.
+  //
+  // USER_MANAGE is ADMIN-only in today's seed, so this is defence in depth —
+  // but role_permissions is data, and the day someone grants USER_MANAGE to
+  // OPS so they can add customers, that role must not also be able to mint
+  // itself a FINANCE account with payment access. The guard belongs next to
+  // the write, where it cannot be separated from it by a config change.
+  if (PRIVILEGED_ROLES.includes(role) && actor?.role !== 'ADMIN') {
+    throw ApiError.forbidden(
+      `Only an admin can create a ${role} account`,
+      'ROLE_ESCALATION_DENIED',
+    );
+  }
+
   try {
     const user = await prisma.user.create({
       data: {
@@ -109,6 +124,16 @@ async function update(id, data, actor) {
     if (patch.isActive === false) {
       throw ApiError.badRequest('You cannot deactivate your own account', 'SELF_DEACTIVATION');
     }
+  }
+
+  // Same escalation guard as create(): promoting someone into a staff role is
+  // a privilege grant. Non-admins already had `role` stripped above; this
+  // catches the case where USER_MANAGE has been widened beyond ADMIN.
+  if (patch.role && PRIVILEGED_ROLES.includes(patch.role) && actor.role !== 'ADMIN') {
+    throw ApiError.forbidden(
+      `Only an admin can grant the ${patch.role} role`,
+      'ROLE_ESCALATION_DENIED',
+    );
   }
 
   if (patch.role && patch.role !== 'ADMIN' && target.role === 'ADMIN') {
