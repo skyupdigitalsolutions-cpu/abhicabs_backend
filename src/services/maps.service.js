@@ -63,8 +63,11 @@ const keys = {
   reverse: (lat, lng) => `maps:rev:${geo.coordKey({ lat, lng })}`,
   distance: (o, d) => `maps:dm:${geo.coordKey(o)}:${geo.coordKey(d)}`,
   autocomplete: (q) => `maps:ac:${String(q).toLowerCase().trim().slice(0, 40)}`,
+  // v2: the v1 keys cached results from before the airport/terminal filters
+  // existed, and they live for 30 days. Bumping the prefix retires them
+  // instantly instead of waiting a month or flushing Redis by hand.
   airports: (q, lat, lng) =>
-    `maps:air:${String(q || '').toLowerCase().trim().slice(0, 32)}:${
+    `maps:air:v2:${String(q || '').toLowerCase().trim().slice(0, 32)}:${
       lat && lng ? geo.coordKey({ lat, lng }) : 'any'}`,
 };
 
@@ -534,6 +537,11 @@ function extractTerminal(name) {
   return `Terminal ${(m[1] || m[2]).toUpperCase()}`;
 }
 
+/** Lower-case, letters and digits only — the grouping key. */
+function normaliseAirport(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
 /**
  * Split a place name into its airport and its terminal.
  *
@@ -543,11 +551,6 @@ function extractTerminal(name) {
  * being listed as if it were a separate airport, so one airport appeared three
  * times in the dropdown.
  */
-/** Lower-case, letters and digits only — the grouping key. */
-function normaliseAirport(name) {
-  return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
 function splitTerminal(name, fallbackAirport) {
   const terminal = extractTerminal(name);
   if (!terminal) return { airportName: name, terminal: null };
@@ -561,6 +564,94 @@ function splitTerminal(name, fallbackAirport) {
     airportName: stripped.length >= 4 ? stripped : (fallbackAirport || name),
     terminal,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Service area
+ * ------------------------------------------------------------------ */
+
+/**
+ * Is a point inside a city's service area?
+ *
+ * Pure arithmetic against the city's centre and radius — no API call. This runs
+ * before anything else in the booking flow, so an out-of-area request costs
+ * nothing at all.
+ */
+function isServiceable(point, city) {
+  if (!geo.isValidCoordinate(point)) return { ok: false, reason: 'INVALID_COORDINATES' };
+
+  const centre = { lat: Number(city.centreLat), lng: Number(city.centreLng) };
+  const distanceKm = geo.haversineKm(point, centre);
+
+  if (distanceKm > Number(city.radiusKm)) {
+    return {
+      ok: false,
+      reason: 'OUTSIDE_SERVICE_AREA',
+      distanceKm: Number(distanceKm.toFixed(2)),
+      radiusKm: Number(city.radiusKm),
+    };
+  }
+  return { ok: true, distanceKm: Number(distanceKm.toFixed(2)) };
+}
+
+function health() {
+  const geoTotal = metrics.geocodeHits + metrics.geocodeMisses;
+  const dmTotal = metrics.distanceHits + metrics.distanceMisses;
+
+  return {
+    provider: getProvider().name,
+    breaker: breaker.state,
+    geocodeHitRate: geoTotal ? Number((metrics.geocodeHits / geoTotal).toFixed(3)) : null,
+    distanceHitRate: dmTotal ? Number((metrics.distanceHits / dmTotal).toFixed(3)) : null,
+    metrics: { ...metrics },
+  };
+}
+
+/** Test hook. */
+function resetBreaker() {
+  breaker.state = 'closed';
+  breaker.failures = 0;
+}
+
+/**
+ * Road route geometry (the driving path that follows streets) between two
+ * points, for drawing on the map. Cached like distance (roads rarely change),
+ * breaker-wrapped, and falls back to a straight 2-point line on any failure so
+ * the map always has *something* to draw.
+ */
+async function getRoute(origin, destination, opts = {}) {
+  if (!geo.isValidCoordinate(origin) || !geo.isValidCoordinate(destination)) {
+    throw ApiError.badRequest('Invalid pickup or drop coordinates', 'INVALID_COORDINATES');
+  }
+
+  const key = `maps:route:${geo.coordKey(origin)}:${geo.coordKey(destination)}`;
+
+  if (!opts.fresh) {
+    const hit = await cache.get(key);
+    if (hit) return { ...hit, cached: true };
+  }
+
+  try {
+    const result = await callProvider(
+      () => getProvider().getRoute(origin, destination),
+      'route'
+    );
+    await cache.set(key, result, TTL.DISTANCE);
+    return { ...result, cached: false };
+  } catch (err) {
+    // Never block the UI over a missing route line — draw the straight line.
+    return {
+      points: [
+        { lat: Number(origin.lat), lng: Number(origin.lng) },
+        { lat: Number(destination.lat), lng: Number(destination.lng) },
+      ],
+      distanceKm: Number(geo.haversineKm(origin, destination).toFixed(2)),
+      durationMin: null,
+      provider: 'fallback',
+      estimated: true,
+      cached: false,
+    };
+  }
 }
 
 module.exports = {
