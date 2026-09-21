@@ -48,8 +48,6 @@ const baseQuote = {
   returnAt: z.string().datetime({ offset: true }).or(z.string().min(10)).optional().nullable(),
   waitingMinutes: z.coerce.number().int().min(0).max(10080).default(0),
   surge,
-  // AIRPORT
-  flightNumber: z.string().trim().max(16).optional().nullable(),
   // HOURLY: a fixed package id OR a flexible hours commitment.
   rentalPackageId: z.coerce.number().int().positive().optional().nullable(),
   rentalHours: z.coerce.number().int().min(1).max(24).optional().nullable(),
@@ -103,6 +101,23 @@ const autocompleteSchema = z.object({
   sessionToken: z.string().trim().max(64).optional(),
 });
 
+/**
+ * GET /fares/airports
+ *
+ * `q` is optional here, unlike autocomplete: with no query the endpoint
+ * answers "what airports are near this city", which is what fills the dropdown
+ * before the rider types anything. Either q or cityId/lat+lng must be present,
+ * and the service returns [] rather than erroring when neither is.
+ */
+const airportsQuerySchema = z.object({
+  q: z.string().trim().max(120).optional(),
+  cityId: z.coerce.number().int().positive().optional(),
+  lat: latitude.optional(),
+  lng: longitude.optional(),
+  radiusKm: z.coerce.number().positive().max(300).default(80),
+  limit: z.coerce.number().int().positive().max(25).default(12),
+});
+
 const distanceSchema = z.object({
   origin: location,
   destination: location,
@@ -126,6 +141,7 @@ module.exports = {
   geocodeSchema,
   reverseGeocodeSchema,
   autocompleteSchema,
+  airportsQuerySchema,
   distanceSchema,
   cancellationSchema,
 };

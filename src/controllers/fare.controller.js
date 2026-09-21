@@ -7,6 +7,7 @@
 const quote = require('../services/quote.service');
 const fare = require('../services/fare.service');
 const maps = require('../services/maps.service');
+const { prisma } = require('../config/prisma');
 const { asyncHandler } = require('../utils/helpers');
 
 /** POST /fares/estimate — one trip, one class, one price. */
@@ -66,6 +67,40 @@ exports.autocomplete = asyncHandler(async (req, res) => {
     sessionToken: q.sessionToken,
   });
   res.json({ success: true, data: { suggestions } });
+});
+
+/**
+ * Airports and terminals for the Airport tab's picker.
+ *
+ * Location comes from cityId when given — the rider's GPS is the wrong centre
+ * for this, since someone booking an airport drop from 60 km outside the city
+ * still wants that city's airport. An explicit lat/lng wins if supplied, and
+ * a bare `q` searches nationally.
+ */
+exports.airports = asyncHandler(async (req, res) => {
+  const q = req.validatedQuery || req.query;
+
+  let { lat, lng } = q;
+  if ((!lat || !lng) && q.cityId) {
+    const city = await prisma.city.findUnique({
+      where: { id: Number(q.cityId) },
+      select: { centreLat: true, centreLng: true, radiusKm: true },
+    });
+    if (city) {
+      lat = Number(city.centreLat);
+      lng = Number(city.centreLng);
+    }
+  }
+
+  const airports = await maps.airports({
+    q: q.q,
+    lat,
+    lng,
+    radiusKm: q.radiusKm,
+    limit: q.limit,
+  });
+
+  res.json({ success: true, data: { count: airports.length, airports } });
 });
 
 exports.distance = asyncHandler(async (req, res) => {

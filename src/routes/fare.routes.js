@@ -33,6 +33,11 @@ router.post('/cancellation-fee', validate({ body: s.cancellationSchema }), ctrl.
 router.post('/geocode', validate({ body: s.geocodeSchema }), ctrl.geocode);
 router.get('/reverse-geocode', validate({ query: s.reverseGeocodeSchema }), ctrl.reverseGeocode);
 router.get('/autocomplete', validate({ query: s.autocompleteSchema }), ctrl.autocomplete);
+
+// Airports + terminals for the Airport tab. Fetched live from the maps
+// provider and cached for 30 days, so no airport list is stored in our own
+// database and a new terminal appears without a deploy.
+router.get('/airports', validate({ query: s.airportsQuerySchema }), ctrl.airports);
 router.post('/distance', validate({ body: s.distanceSchema }), ctrl.distance);
 router.post('/route', validate({ body: s.distanceSchema }), ctrl.route);
 

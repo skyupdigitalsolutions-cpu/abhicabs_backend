@@ -142,6 +142,88 @@ async function autocomplete(query, { sessionToken, lat, lng } = {}) {
 }
 
 /**
+ * Airports and their terminals, from Places.
+ *
+ * Two different Places endpoints, because the question is two different
+ * questions:
+ *
+ *   - no query  -> Nearby Search with type=airport. "What airports are near
+ *                  this city?" Type-filtered, so it cannot drift onto an
+ *                  airport-themed hotel.
+ *   - a query   -> Text Search. The rider is typing a name, possibly of an
+ *                  airport in another city they are flying out of, so the
+ *                  location is a bias rather than a filter.
+ *
+ * `type: 'airport'` is NOT passed to Text Search on purpose. Google classifies
+ * individual terminals as `point_of_interest`, not `airport`, so the filter
+ * would hide exactly the terminal-level results this exists to surface.
+ */
+async function searchAirports({ query, lat, lng, radiusM = 80_000 } = {}) {
+  const q = String(query || '').trim();
+
+  const endpoint = q ? '/place/textsearch/json' : '/place/nearbysearch/json';
+  const params = q
+    ? {
+        // "airport" appended so a bare "kempegowda" still lands on the airport
+        // rather than the bus station of the same name.
+        query: /airport|terminal/i.test(q) ? q : `${q} airport`,
+        ...(lat && lng ? { location: `${lat},${lng}`, radius: radiusM } : {}),
+        region: 'in',
+        key: env.maps.apiKey,
+      }
+    : {
+        location: `${lat},${lng}`,
+        radius: radiusM,
+        type: 'airport',
+        key: env.maps.apiKey,
+      };
+
+  const { data } = await http.get(endpoint, { params });
+  assertOk(data, q ? 'textsearch' : 'nearbysearch');
+
+  return (data.results || []).map(toPlace);
+}
+
+/**
+ * The terminals of one airport.
+ *
+ * Terminals are separate Places records ("Kempegowda International Airport
+ * Terminal 1"), so this is a Text Search scoped tightly to the airport's own
+ * coordinates. 8 km rather than the airport-search radius: a large airport is
+ * a few km across, and anything further away belongs to a different airport.
+ */
+async function searchTerminals(airportName, { lat, lng } = {}) {
+  const { data } = await http.get('/place/textsearch/json', {
+    params: {
+      query: `${airportName} terminal`,
+      ...(lat && lng ? { location: `${lat},${lng}`, radius: 8_000 } : {}),
+      region: 'in',
+      key: env.maps.apiKey,
+    },
+  });
+  assertOk(data, 'textsearch:terminals');
+
+  return (data.results || [])
+    // Keep only records that actually name a terminal. Text Search always
+    // returns the parent airport too, and often a cargo depot or a hotel.
+    .filter((r) => /terminal|\bT[0-9]\b/i.test(r.name || ''))
+    .map(toPlace);
+}
+
+/** Shared shape for both airport calls. */
+function toPlace(r) {
+  const loc = r.geometry?.location || {};
+  return {
+    placeId: r.place_id,
+    name: r.name,
+    address: r.formatted_address || r.vicinity || null,
+    lat: loc.lat,
+    lng: loc.lng,
+    provider: NAME,
+  };
+}
+
+/**
  * Road route geometry between two points, for drawing the driving path on the
  * map (the line that follows streets, not a straight line).
  *
@@ -194,4 +276,13 @@ function decodePolyline(encoded) {
   return points;
 }
 
-module.exports = { name: NAME, getDistanceMatrix, getRoute, geocode, reverseGeocode, autocomplete };
+module.exports = {
+  name: NAME,
+  getDistanceMatrix,
+  getRoute,
+  geocode,
+  reverseGeocode,
+  autocomplete,
+  searchAirports,
+  searchTerminals,
+};

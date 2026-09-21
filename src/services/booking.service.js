@@ -289,10 +289,9 @@ async function create(input, actor, meta = {}) {
       waitingMinutes: input.waitingMinutes || 0,
       surge: input.surge || 1,
       // HOURLY needs its package/hours to price; without these getQuote throws
-      // RENTAL_TERMS_REQUIRED. AIRPORT may carry a flight number.
+      // RENTAL_TERMS_REQUIRED.
       rentalPackageId: input.rentalPackageId || null,
       rentalHours: input.rentalHours || null,
-      flightNumber: input.flightNumber || null,
     });
 
     /**
@@ -356,7 +355,6 @@ async function create(input, actor, meta = {}) {
 
           // Trip-type extras. For HOURLY we store the package the quote actually
           // applied (resolved to this class), not the raw id the app sent.
-          flightNumber: input.flightNumber || null,
           rentalPackageId: quote.rentalPackageId ?? input.rentalPackageId ?? null,
           rentalHours: quote.rentalHours ?? input.rentalHours ?? null,
 

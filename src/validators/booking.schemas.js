@@ -51,9 +51,6 @@ const createBookingSchema = z
     pickupAt: z.string().datetime({ message: 'pickupAt must be an ISO datetime' }),
     returnAt: z.string().datetime().optional().nullable(),
 
-    // AIRPORT: optional flight number for the driver / flight tracking.
-    flightNumber: z.string().trim().max(16).optional().nullable(),
-
     // HOURLY: either a fixed package id, or a flexible hours commitment.
     rentalPackageId: z.coerce.number().int().positive().optional().nullable(),
     rentalHours: z.coerce.number().int().min(1).max(24).optional().nullable(),

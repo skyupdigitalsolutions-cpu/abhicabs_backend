@@ -121,4 +121,63 @@ async function getRoute(origin, destination) {
   };
 }
 
-module.exports = { name: NAME, getDistanceMatrix, getRoute, geocode, reverseGeocode, autocomplete };
+/**
+ * Airports, mocked.
+ *
+ * Terminal-level entries are included because the rider flow depends on them —
+ * a mock that returns only parent airports would let a broken terminal picker
+ * pass every local test.
+ */
+const MOCK_AIRPORTS = [
+  { name: 'Kempegowda International Airport', city: 'Bengaluru', lat: 13.1986, lng: 77.7066,
+    terminals: [
+      { name: 'Kempegowda International Airport Terminal 1', lat: 13.1979, lng: 77.7063 },
+      { name: 'Kempegowda International Airport Terminal 2', lat: 13.2020, lng: 77.7050 },
+    ] },
+  { name: 'Rajiv Gandhi International Airport', city: 'Hyderabad', lat: 17.2403, lng: 78.4294,
+    terminals: [] },
+  { name: 'Chhatrapati Shivaji Maharaj International Airport', city: 'Mumbai', lat: 19.0896, lng: 72.8656,
+    terminals: [
+      { name: 'Chhatrapati Shivaji Maharaj International Airport Terminal 1', lat: 19.0887, lng: 72.8679 },
+      { name: 'Chhatrapati Shivaji Maharaj International Airport Terminal 2', lat: 19.0980, lng: 72.8747 },
+    ] },
+];
+
+async function searchAirports({ query } = {}) {
+  const q = String(query || '').toLowerCase().trim();
+  return MOCK_AIRPORTS
+    .filter((a) => !q || a.name.toLowerCase().includes(q) || a.city.toLowerCase().includes(q))
+    .map((a) => ({
+      placeId: `mock_airport_${a.name.replace(/\s+/g, '_').toLowerCase()}`,
+      name: a.name,
+      address: `${a.city}, India`,
+      lat: a.lat,
+      lng: a.lng,
+      provider: NAME,
+    }));
+}
+
+async function searchTerminals(airportName) {
+  const parent = MOCK_AIRPORTS.find((a) =>
+    airportName.toLowerCase().includes(a.name.toLowerCase().slice(0, 12)));
+  if (!parent) return [];
+  return parent.terminals.map((t) => ({
+    placeId: `mock_term_${t.name.replace(/\s+/g, '_').toLowerCase()}`,
+    name: t.name,
+    address: `${parent.city}, India`,
+    lat: t.lat,
+    lng: t.lng,
+    provider: NAME,
+  }));
+}
+
+module.exports = {
+  name: NAME,
+  getDistanceMatrix,
+  getRoute,
+  geocode,
+  reverseGeocode,
+  autocomplete,
+  searchAirports,
+  searchTerminals,
+};

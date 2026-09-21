@@ -50,6 +50,11 @@ const TTL = {
 
   // Suggestions change as places open and close, and the result set is large.
   AUTOCOMPLETE: 3600,
+
+  // Airports and their terminals are the most static data we fetch — a new
+  // terminal opens once every few years. Cached hard, because the alternative
+  // is billing a Places call every time a rider opens the Airport tab.
+  AIRPORTS: 30 * 24 * 3600,   // 30 days
 };
 
 const keys = {
@@ -58,6 +63,9 @@ const keys = {
   reverse: (lat, lng) => `maps:rev:${geo.coordKey({ lat, lng })}`,
   distance: (o, d) => `maps:dm:${geo.coordKey(o)}:${geo.coordKey(d)}`,
   autocomplete: (q) => `maps:ac:${String(q).toLowerCase().trim().slice(0, 40)}`,
+  airports: (q, lat, lng) =>
+    `maps:air:${String(q || '').toLowerCase().trim().slice(0, 32)}:${
+      lat && lng ? geo.coordKey({ lat, lng }) : 'any'}`,
 };
 
 /* ------------------------------------------------------------------ *
@@ -361,6 +369,113 @@ async function autocomplete(query, opts = {}) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Airports
+ * ------------------------------------------------------------------ */
+
+/** How many parent airports get expanded into terminals. */
+const TERMINAL_EXPANSION_LIMIT = 3;
+
+/**
+ * Airports near a point, or matching a search, with their terminals flattened
+ * into one selectable list.
+ *
+ * The rider picks a terminal, not an airport — Kempegowda T1 and T2 are about
+ * a kilometre apart and a driver sent to the wrong one has to loop the whole
+ * approach road. So each terminal is returned as its own entry with its own
+ * coordinates, and the parent airport is kept as an entry too (some airports
+ * have a single terminal, and some riders genuinely do not know which one).
+ *
+ * Cost control, in order of importance:
+ *   1. a 30-day cache — the same city's airports are requested constantly and
+ *      the answer changes once every few years
+ *   2. terminal expansion capped at the top few airports, since expansion is
+ *      one extra billable call each
+ *   3. an empty array on failure, never a throw — a rider who cannot see the
+ *      dropdown can still type the terminal into the search box, whereas an
+ *      error blocks the booking
+ */
+async function airports({ q, lat, lng, radiusKm = 80, limit = 12 } = {}) {
+  const query = String(q || '').trim();
+
+  // Without either a query or a location there is nothing to search around.
+  if (!query && !(lat && lng)) return [];
+
+  return cache.getOrSet(
+    keys.airports(query, lat, lng),
+    async () => {
+      try {
+        const found = await callProvider(
+          () => getProvider().searchAirports({
+            query,
+            lat,
+            lng,
+            radiusM: Math.round(radiusKm * 1000),
+          }),
+          'searchAirports',
+        );
+
+        const parents = (found || []).filter((a) => a && a.placeId && a.lat && a.lng);
+        if (parents.length === 0) return [];
+
+        // Expand the most relevant few into terminals, in parallel. A failure
+        // to expand one airport must not lose the others, hence allSettled.
+        const expandable = parents.slice(0, TERMINAL_EXPANSION_LIMIT);
+        const settled = await Promise.allSettled(
+          expandable.map((a) =>
+            callProvider(
+              () => getProvider().searchTerminals(a.name, { lat: a.lat, lng: a.lng }),
+              'searchTerminals',
+            ),
+          ),
+        );
+
+        const out = [];
+        const seen = new Set();
+
+        const push = (place, parent) => {
+          if (!place || !place.placeId || seen.has(place.placeId)) return;
+          seen.add(place.placeId);
+          const terminal = extractTerminal(place.name);
+          out.push({
+            placeId: place.placeId,
+            // The parent's name, so "Terminal 2" is never shown on its own.
+            airportName: parent ? parent.name : place.name,
+            terminal,
+            label: place.name,
+            address: place.address,
+            lat: place.lat,
+            lng: place.lng,
+            isTerminal: Boolean(terminal),
+          });
+        };
+
+        parents.forEach((parent, i) => {
+          push(parent, null);
+          const res = settled[i];
+          if (res && res.status === 'fulfilled') {
+            (res.value || []).forEach((t) => push(t, parent));
+          }
+        });
+
+        // Terminals of the nearest airport first — that is what the rider is
+        // most likely reaching for — but keep each airport's group together.
+        return out.slice(0, limit);
+      } catch (err) {
+        return [];
+      }
+    },
+    { ttl: TTL.AIRPORTS, cacheNull: false },
+  );
+}
+
+/** "…Airport Terminal 2" -> "Terminal 2". Null when the name has no terminal. */
+function extractTerminal(name) {
+  const m = String(name || '').match(/\b(?:terminal\s*([0-9A-Z]{1,2})|T([0-9]{1,2}))\b/i);
+  if (!m) return null;
+  return `Terminal ${m[1] || m[2]}`.replace(/\s+/g, ' ');
+}
+
+/* ------------------------------------------------------------------ *
  * Service area
  * ------------------------------------------------------------------ */
 
@@ -458,6 +573,7 @@ module.exports = {
   geocode,
   reverseGeocode,
   autocomplete,
+  airports,
   isServiceable,
   health,
   resetBreaker,

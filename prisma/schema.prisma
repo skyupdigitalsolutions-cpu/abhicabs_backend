@@ -578,9 +578,6 @@ model Booking {
   pickupAt DateTime  @map("pickup_at")
   returnAt DateTime? @map("return_at") // required for ROUND_TRIP
 
-  // --- AIRPORT ---
-  flightNumber String? @map("flight_number") @db.VarChar(16)
-
   // --- HOURLY rental ---
   // The chosen package (null for the flexible "any hours" option). rentalHours /
   // rentalKm capture what the rider committed to, so the frozen fare is auditable.

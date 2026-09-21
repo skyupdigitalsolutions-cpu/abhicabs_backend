@@ -25,10 +25,9 @@ const BOOKING_SELECT = {
   stops: true,
   pickupAt: true,
   returnAt: true,
-  // Trip-type extras — app shows package/hours (HOURLY) and flight (AIRPORT).
+  // Trip-type extras — app shows package/hours (HOURLY).
   rentalPackageId: true,
   rentalHours: true,
-  flightNumber: true,
   distanceKm: true,
   durationMinutes: true,
   estimatedFare: true,
