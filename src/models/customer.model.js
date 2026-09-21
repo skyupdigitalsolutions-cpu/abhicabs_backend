@@ -113,6 +113,39 @@ const ADDRESS_SELECT = {
   updatedAt: true,
 };
 
+/**
+ * Normalise an address row for the wire.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS
+ * ---------------------------------------------------------------------------
+ * `Address.lat` and `Address.lng` are `Decimal?` in the schema, and a Prisma
+ * Decimal serialises through `JSON.stringify` as a STRING — so `res.json()`
+ * was sending `"lat": "13.0583400"`, not `13.05834`.
+ *
+ * Every consumer then treats it as a number and most of them get away with it,
+ * because JavaScript coerces a numeric string almost everywhere. The exception
+ * is the one place that checks rather than coerces: the rider app guards a fare
+ * request with `Number.isFinite(pickup.lat)`, which is FALSE for a string. A
+ * pickup chosen from Saved places therefore produced a booking screen that
+ * displayed the address and simultaneously claimed no pickup was set.
+ *
+ * Coordinates are numbers. Money is not — fares stay decimal strings on purpose,
+ * because rounding a fare through a float is how invoices stop reconciling.
+ * This converts coordinates only.
+ *
+ * Null survives as null: an address may legitimately have no coordinates yet,
+ * and `Number(null)` is 0, which would silently place it in the Gulf of Guinea.
+ */
+function addressToApi(address) {
+  if (!address) return address;
+  return {
+    ...address,
+    lat: address.lat === null || address.lat === undefined ? null : Number(address.lat),
+    lng: address.lng === null || address.lng === undefined ? null : Number(address.lng),
+  };
+}
+
 const ACCOUNT_TYPES = Object.freeze({ RETAIL: 'RETAIL', CORPORATE: 'CORPORATE' });
 const BILLING_CYCLES = Object.freeze({ PER_TRIP: 'PER_TRIP', WEEKLY: 'WEEKLY', MONTHLY: 'MONTHLY' });
 
@@ -127,6 +160,7 @@ module.exports = {
   CORPORATE_SELECT,
   CORPORATE_LIST_SELECT,
   ADDRESS_SELECT,
+  addressToApi,
   ACCOUNT_TYPES,
   BILLING_CYCLES,
   CUSTOMER_SORTABLE,

@@ -10,6 +10,7 @@
 
 const addressService = require('../services/address.service');
 const customerService = require('../services/customer.service');
+const { addressToApi } = require('../models/customer.model');
 const { asyncHandler } = require('../utils/helpers');
 
 /** Staff may act on any customer's addresses; a customer only on their own. */
@@ -20,29 +21,32 @@ function targetCustomerId(req) {
 
 exports.list = asyncHandler(async (req, res) => {
   const addresses = await addressService.listForCustomer(targetCustomerId(req));
-  res.json({ success: true, data: { addresses } });
+  // Coordinates leave here as NUMBERS. See addressToApi — Prisma Decimal
+  // serialises as a string, and a client that checks Number.isFinite rather
+  // than coercing reads that as "no coordinates".
+  res.json({ success: true, data: { addresses: addresses.map(addressToApi) } });
 });
 
 exports.getOne = asyncHandler(async (req, res) => {
   const address = await addressService.findForCustomer(req.params.id, targetCustomerId(req));
-  res.json({ success: true, data: { address } });
+  res.json({ success: true, data: { address: addressToApi(address) } });
 });
 
 exports.create = asyncHandler(async (req, res) => {
   const customerId = targetCustomerId(req);
   await customerService.findOrCreate(customerId);   // materialise if absent
   const address = await addressService.create(customerId, req.body);
-  res.status(201).json({ success: true, message: 'Address saved', data: { address } });
+  res.status(201).json({ success: true, message: 'Address saved', data: { address: addressToApi(address) } });
 });
 
 exports.update = asyncHandler(async (req, res) => {
   const address = await addressService.update(req.params.id, targetCustomerId(req), req.body);
-  res.json({ success: true, message: 'Address updated', data: { address } });
+  res.json({ success: true, message: 'Address updated', data: { address: addressToApi(address) } });
 });
 
 exports.setDefault = asyncHandler(async (req, res) => {
   const address = await addressService.setDefault(req.params.id, targetCustomerId(req));
-  res.json({ success: true, message: 'Default address set', data: { address } });
+  res.json({ success: true, message: 'Default address set', data: { address: addressToApi(address) } });
 });
 
 exports.remove = asyncHandler(async (req, res) => {
@@ -56,5 +60,5 @@ exports.setCoordinates = asyncHandler(async (req, res) => {
     targetCustomerId(req),
     req.body
   );
-  res.json({ success: true, message: 'Coordinates saved', data: { address } });
+  res.json({ success: true, message: 'Coordinates saved', data: { address: addressToApi(address) } });
 });
