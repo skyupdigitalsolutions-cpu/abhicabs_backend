@@ -38,6 +38,7 @@ const allocationService = require('./allocation.service');
 const tripService = require('./trip.service');
 const tripOtpService = require('./tripOtp.service');
 const fare = require('./fare.service');
+const maps = require('./maps.service');
 const M = require('../lib/money');
 const { BOOKING_SELECT, STATUS_FLOW, ACTIVE_STATUSES } = require('../models/booking.model');
 
@@ -456,11 +457,116 @@ async function recordTripDistanceAsDriver(bookingId, driverUser, meta, payload) 
   return recordTripDistance(bookingId, driverUser, meta, payload);
 }
 
+/**
+ * How far the drop can be from the pickup before the return leg is charged.
+ *
+ * Not zero, and that matters. The end coordinate comes from a phone's GPS in a
+ * moving vehicle, often under trees or beside buildings, and it is routinely
+ * 100–300 m from where the car actually stopped. A zero tolerance would bill
+ * every single rental a few hundred metres of "return", which reads to the
+ * customer as a made-up charge and is impossible to argue with.
+ */
+const RENTAL_RETURN_TOLERANCE_KM = 1;
+
+/**
+ * For a LOCAL RENTAL, add the drive back to the pickup when the rider ends the
+ * trip somewhere else.
+ *
+ * A rental is sold as a car and driver for a block of hours, starting and
+ * finishing at the rider's own door. If they finish across town, the driver
+ * still has to bring the vehicle home, and those kilometres are as real as the
+ * ones with a passenger in the seat.
+ *
+ * Only HOURLY. A one-way is sold as a one-way and already charges its return
+ * through returnEmptyPct; a round trip already counts both legs in its
+ * distance. Applying this to either would bill the same return twice.
+ *
+ * Returns the distance to ADD, in km, and never throws: if the maps lookup
+ * fails we bill the trip as driven rather than block a completion the driver
+ * is standing at the kerb waiting for. A missed charge is recoverable; a
+ * driver who cannot end a trip is not.
+ */
+async function rentalReturnLegKm(booking, endLat, endLng) {
+  if (booking.tripType !== 'HOURLY') return null;
+  if (endLat == null || endLng == null) return null;
+  if (booking.pickupLat == null || booking.pickupLng == null) return null;
+
+  const pickup = { lat: Number(booking.pickupLat), lng: Number(booking.pickupLng) };
+  const end = { lat: Number(endLat), lng: Number(endLng) };
+
+  try {
+    const back = await maps.getDistance(end, pickup);
+    const km = Number(back.distanceKm);
+    if (!Number.isFinite(km) || km <= RENTAL_RETURN_TOLERANCE_KM) return null;
+
+    return {
+      km,
+      // Kept so the invoice can say WHY, and so a dispute can be answered with
+      // the coordinates rather than with "the system calculated it".
+      from: end,
+      to: pickup,
+      estimated: back.estimated === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function completeTrip(bookingId, actor, meta, { finalFare = null, odometerKm = null, actualKm = null, lat = null, lng = null } = {}) {
+  /*
+   * A rental that ends away from its pickup owes the drive home.
+   *
+   * Folded into actualKm BEFORE recordTripDistance rather than added as a
+   * separate charge afterwards, because recordTripDistance always recomputes
+   * from the ORIGINAL quoted distance — that is what makes re-reporting
+   * idempotent. A separate top-up would compound on a second report.
+   */
+  let returnLeg = null;
+  let billableKm = actualKm;
+
+  if (actualKm != null && lat != null && lng != null) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { tripType: true, pickupLat: true, pickupLng: true },
+    });
+
+    if (booking) {
+      returnLeg = await rentalReturnLegKm(booking, lat, lng);
+      if (returnLeg) billableKm = Number(actualKm) + returnLeg.km;
+    }
+  }
+
   // If the caller reported an actual distance, reconcile the fare FIRST so the
   // surcharge is baked into finalFare before the invoice is finalised.
-  if (actualKm != null) {
-    await recordTripDistance(bookingId, actor, meta, { actualKm, odometerKm });
+  if (billableKm != null) {
+    await recordTripDistance(bookingId, actor, meta, { actualKm: billableKm, odometerKm });
+  }
+
+  // Record the return leg separately from the charge it produced. The invoice
+  // needs to itemise it, and "extra distance" alone does not tell a customer
+  // that the kilometres were the drive back from where they got out.
+  if (returnLeg) {
+    const current = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { meta: true },
+    });
+    await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        meta: {
+          ...(current?.meta && typeof current.meta === 'object' ? current.meta : {}),
+          rentalReturnLeg: {
+            km: returnLeg.km,
+            drivenKm: Number(actualKm),
+            from: returnLeg.from,
+            to: returnLeg.to,
+            estimated: returnLeg.estimated,
+            reason: 'Trip ended away from the pickup point; driver returned the vehicle',
+            recordedAt: new Date().toISOString(),
+          },
+        },
+      },
+    });
   }
 
   const existing = await prisma.booking.findUnique({
