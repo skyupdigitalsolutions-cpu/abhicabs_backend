@@ -1079,6 +1079,74 @@ model BookingRequest {
   @@map("booking_requests")
 }
 
+/// The rider-facing CATALOGUE of vehicle classes — Sedan, SUV, Luxury.
+///
+/// NOT the same thing as the `vehicles` table, and the distinction is the
+/// whole design:
+///
+///   vehicles          individual cars. KA01AB1234, its insurance expiry, where
+///                     it is right now. Operational.
+///   vehicle_catalog    what a CLASS is and how it is sold. One row per
+///                     vehicleClass, with the copy and photography a rider
+///                     sees before choosing. Marketing.
+///
+/// Folding them together looked tempting and is wrong. A class must be
+/// browsable before any car of that class has been onboarded, its blurb must
+/// not change when a car is sold, and ten identical sedans must not produce
+/// ten cards. The photography here is of the class, not of anyone's actual
+/// number plate.
+///
+/// `key` is the join to everything else: it MUST equal the vehicleClass string
+/// on fare_configs and vehicles, or the rider browses a class that cannot be
+/// priced or dispatched.
+model VehicleCatalog {
+  id  Int    @id @default(autoincrement())
+  key String @unique @db.VarChar(24)
+
+  name  String @db.VarChar(60)
+  seats Int
+
+  /// One line for the compact card.
+  blurb  String @db.VarChar(160)
+  /// Longer copy for the detail screen.
+  detail String @db.VarChar(1000)
+  /// Bags that realistically fit — the question riders actually ask.
+  luggage String @db.VarChar(60)
+
+  /// Emoji shown while a class has no photography yet. Never blank.
+  glyph String @default("🚗") @db.VarChar(8)
+
+  /// Spec chips. Nullable because they describe a representative car, and the
+  /// representative car changes; an unset field renders as one fewer chip
+  /// rather than as "Unknown".
+  transmission String? @db.VarChar(16)
+  fuel         String? @db.VarChar(16)
+
+  /// Shown over the photo. Null means NO badge — a hardcoded 5.0 on every
+  /// class is a claim nobody can stand behind.
+  rating Decimal? @db.Decimal(3, 2)
+  trips  Int?
+
+  /// Cloudinary. `heroUrl` is the single thumbnail for compact cards; `images`
+  /// is the gallery the detail screen swipes through, as
+  /// [{ label, url, publicId }]. Kept apart so the compact card always gets
+  /// the shot chosen to read small, not whichever gallery image sorts first.
+  heroUrl      String? @map("hero_url")
+  heroPublicId String? @map("hero_public_id") @db.VarChar(200)
+  images       Json    @default("[]")
+
+  /// Display order. Riders should see Hatchback before Bus regardless of when
+  /// each row was inserted.
+  sortOrder Int     @default(0) @map("sort_order")
+  isActive  Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([isActive, sortOrder])
+  @@map("vehicle_catalog")
+}
+
 /// The states the fleet operates in — the allowlist a quote is checked against.
 ///
 /// A table rather than a constant because opening a state is an OPERATIONAL

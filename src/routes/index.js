@@ -29,6 +29,7 @@ router.get('/', (req, res) => {
       invoices: '/api/v1/admin/invoices',
       reports: '/api/v1/admin/reports',
       fareConfigs: '/api/v1/admin/fare-configs',
+      vehicles: '/api/v1/vehicles',
       dispatch: '/api/v1/admin/dispatch',
       location: '/api/v1/admin/location',
       driverLocation: '/api/v1/driver/location',
@@ -68,6 +69,12 @@ router.use('/admin/reports', apiLimiter, require('./report.routes'));
 // had a catch-all; it does not, but keeping the admin mounts grouped is what
 // stops the next one from being forgotten the way this one was.
 router.use('/admin/fare-configs', apiLimiter, require('./fareConfig.routes'));
+
+// Vehicle catalogue. The browse side is PUBLIC — see the route file for why —
+// so it is mounted outside the /admin tree, next to the other rider routes.
+const vehicleCatalog = require('./vehicleCatalog.routes');
+router.use('/vehicles', apiLimiter, vehicleCatalog.publicRouter);
+router.use('/admin/vehicles', apiLimiter, vehicleCatalog.adminRouter);
 
 // Out-of-area enquiries. Three audiences, three routers — see the route file.
 const bookingRequestRoutes = require('./bookingRequest.routes');
