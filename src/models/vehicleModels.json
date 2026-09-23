@@ -1,0 +1,259 @@
+{
+  "_readme": [
+    "src/data/vehicleModels.json — PRESENTATION ONLY. No prices live here.",
+    "",
+    "Photos, labels, descriptions and specs for the cars a rider browses. Edit",
+    "this file and redeploy; no migration, no admin screen, no app release.",
+    "",
+    "PRICES ARE DELIBERATELY ABSENT. They live in fare_configs and",
+    "rental_packages, which is what quote.service actually charges against. A",
+    "price here as well would be a second source of truth for money: the two",
+    "drift, the app shows one number, the bill says another, and nobody notices",
+    "until a customer argues. The admin sets prices in the Rate Cards screen.",
+    "",
+    "EACH KEY UNDER `classes` MUST EQUAL a vehicle_catalog.key, which must equal",
+    "the vehicleClass on fare_configs. A key with no catalogue row is IGNORED by",
+    "vehicleCatalog.service — it does not create a class. A typo therefore shows",
+    "nothing rather than showing a car nobody can be quoted for.",
+    "",
+    "MULTIPLE CARS PER CLASS: each key holds an ARRAY. Add as many entries as",
+    "the class has cars. They all price at the class rate, which is the point of",
+    "grouping them — a rider choosing between two white Dzires is choosing on",
+    "photographs, not on fare.",
+    "",
+    "IMAGES: an array of { label, url }. Paste the url returned by",
+    "POST /api/v1/admin/vehicles/:key/images, or any https URL. `label` is shown",
+    "under the gallery — Front, Side, Rear, Interior. An empty array is fine:",
+    "the app falls back to the class glyph rather than a broken frame. Never a",
+    "local path; the app cannot resolve one.",
+    "",
+    "`specs` is a short chip row. Keep each entry to two or three words."
+  ],
+
+  "classes": {
+    "swift-dzire": [
+      {
+        "id": "swift-dzire-2024",
+        "name": "Maruti Swift Dzire",
+        "year": 2024,
+        "colour": "White",
+        "seats": 4,
+        "transmission": "Manual",
+        "fuel": "Petrol",
+        "description": "Air-conditioned compact sedan. Comfortable for up to four passengers with two medium bags — the usual choice for city runs and airport transfers.",
+        "specs": ["A/C", "BSVI", "2 bags"],
+        "images": []
+      }
+    ],
+
+    "ertiga": [
+      {
+        "id": "ertiga-2025",
+        "name": "Maruti Ertiga",
+        "year": 2025,
+        "colour": "Silver",
+        "seats": 7,
+        "transmission": "Manual",
+        "fuel": "Petrol",
+        "description": "Seven-seat MPV with air conditioning. Suits a family or a small group travelling together with moderate luggage.",
+        "specs": ["A/C", "BSVI", "3 bags"],
+        "images": []
+      }
+    ],
+
+    "innova": [
+      {
+        "id": "innova-2016",
+        "name": "Toyota Innova",
+        "year": 2016,
+        "colour": "Silver",
+        "seats": 8,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "The long-serving eight-seater. Roomy and dependable, and the workhorse of outstation travel for good reason.",
+        "specs": ["A/C", "BSIV", "4 bags"],
+        "images": []
+      }
+    ],
+
+    "innova-crysta": [
+      {
+        "id": "innova-crysta-2024",
+        "name": "Toyota Innova Crysta",
+        "year": 2024,
+        "colour": "Grey",
+        "seats": 8,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "A quieter cabin and better seats than the older Innova. Worth the step up on journeys over a few hours.",
+        "specs": ["A/C", "BSVI", "4 bags"],
+        "images": []
+      }
+    ],
+
+    "innova-hycross": [
+      {
+        "id": "innova-hycross-2026",
+        "name": "Toyota Innova Hycross",
+        "year": 2026,
+        "colour": "White",
+        "seats": 8,
+        "transmission": "Automatic",
+        "fuel": "Hybrid",
+        "description": "The newest and quietest eight-seater in the fleet. Automatic and hybrid, for client travel and long tours.",
+        "specs": ["A/C", "Hybrid", "4 bags"],
+        "images": []
+      }
+    ],
+
+    "tempo-12": [
+      {
+        "id": "tempo-12-2023",
+        "name": "Force Tempo Traveller 12",
+        "year": 2023,
+        "colour": "White",
+        "seats": 12,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "Twelve-seat air-conditioned coach for family trips, office outings and temple tours. High roof, easy to move around in.",
+        "specs": ["A/C", "High roof", "BSVI"],
+        "images": []
+      }
+    ],
+
+    "urbania-maharaja": [
+      {
+        "id": "urbania-maharaja-2026",
+        "name": "Force Urbania 1x1 Maharaja",
+        "year": 2026,
+        "colour": "White",
+        "seats": 12,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "Premium coach with single-seat-either-side 1x1 recliners, so nobody shares an armrest. For weddings, VIP travel and long tours where comfort is the point.",
+        "specs": ["A/C", "1x1 recliners", "BSVI"],
+        "images": []
+      }
+    ],
+
+    "urbania-13": [
+      {
+        "id": "urbania-13-2024",
+        "name": "Force Urbania 13",
+        "year": 2024,
+        "colour": "White",
+        "seats": 13,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "Thirteen-seat air-conditioned Urbania. High roof, comfortable over distance, and easy to load.",
+        "specs": ["A/C", "High roof", "BSVI"],
+        "images": []
+      }
+    ],
+
+    "urbania-16": [
+      {
+        "id": "urbania-16-2024",
+        "name": "Force Urbania 16",
+        "year": 2024,
+        "colour": "White",
+        "seats": 16,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "The larger Urbania at sixteen seats, for bigger groups wanting the same comfort as the thirteen.",
+        "specs": ["A/C", "High roof", "BSVI"],
+        "images": []
+      }
+    ],
+
+    "tempo-17": [
+      {
+        "id": "tempo-17-2023",
+        "name": "Force Tempo Traveller 17",
+        "year": 2023,
+        "colour": "White",
+        "seats": 17,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "Seventeen-seat air-conditioned coach, priced for full twelve-hour days out.",
+        "specs": ["A/C", "BSVI"],
+        "images": []
+      }
+    ],
+
+    "benz-22": [
+      {
+        "id": "benz-22-2023",
+        "name": "Bharat Benz 22 Seater",
+        "year": 2023,
+        "colour": "White",
+        "seats": 22,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "Air-conditioned luxury coach for corporate offsites, pilgrimages and wedding parties.",
+        "specs": ["A/C", "Luxury", "BSVI"],
+        "images": []
+      }
+    ],
+
+    "benz-28": [
+      {
+        "id": "benz-28-2023",
+        "name": "Bharat Benz 28 Seater",
+        "year": 2023,
+        "colour": "White",
+        "seats": 28,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "The larger Bharat Benz luxury coach, for groups approaching thirty.",
+        "specs": ["A/C", "Luxury", "BSVI"],
+        "images": []
+      }
+    ],
+
+    "benz-33": [
+      {
+        "id": "benz-33-2022",
+        "name": "Bharat Benz 33 Seater",
+        "year": 2022,
+        "colour": "White",
+        "seats": 33,
+        "transmission": "Manual",
+        "fuel": "Diesel",
+        "description": "The largest coach offered, in executive trim. For full-size group travel and events.",
+        "specs": ["A/C", "Executive", "BSVI"],
+        "images": []
+      }
+    ],
+
+    "_pending_fortuner": [
+      {
+        "id": "fortuner",
+        "name": "Toyota Fortuner",
+        "year": 2024,
+        "colour": "White",
+        "seats": 6,
+        "transmission": "Automatic",
+        "fuel": "Diesel",
+        "description": "Premium SUV for outstation travel. Rename this key to `fortuner` once the vehicle_catalog row and its rate cards exist — until then it is ignored, which is why it is prefixed.",
+        "specs": ["A/C", "Premium SUV", "4 bags"],
+        "images": []
+      }
+    ],
+
+    "_pending_mercedes-e": [
+      {
+        "id": "mercedes-e-class",
+        "name": "Mercedes-Benz E-Class",
+        "year": 2024,
+        "colour": "Black",
+        "seats": 4,
+        "transmission": "Automatic",
+        "fuel": "Diesel",
+        "description": "Executive saloon, chauffeur driven. Rename this key to `mercedes-e` once its catalogue row and rate cards exist.",
+        "specs": ["A/C", "Executive", "2 bags"],
+        "images": []
+      }
+    ]
+  }
+}

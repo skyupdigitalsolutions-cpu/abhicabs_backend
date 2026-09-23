@@ -18,6 +18,20 @@ const cache = require('./cache.service');
 const storage = require('./storage.service');
 const audit = require('./audit.service');
 
+/*
+ * The cars shown under each class — photography, specs, copy. Presentation
+ * only; not one price lives in it (see the file's own _readme).
+ *
+ * require() rather than fs.readFile: Node caches the parse, so this costs one
+ * read at boot instead of one per request, and a malformed edit fails the
+ * deploy loudly rather than 500-ing the vehicles screen at 2am.
+ *
+ * The consequence is that editing the file needs a redeploy to take effect.
+ * That is the right trade here — it is committed content, reviewed like code,
+ * and changes when marketing changes it.
+ */
+const vehicleModels = require('../data/vehicleModels.json');
+
 /** One cache key for the whole active list — it is small and always read whole. */
 const LIST_KEY = 'catalog:vehicles:v1';
 const TTL = 6 * 60 * 60; // 6h; writes invalidate, so this is only a backstop
@@ -34,6 +48,17 @@ const FOLDER = 'vehicle-catalog';
  * into a string. The app renders `rating.toFixed(1)`, so a string arrives as
  * "4.80".toFixed — a TypeError. Convert here, once.
  */
+/**
+ * The cars listed for a class, or [] when the file has no entry for it.
+ *
+ * Never throws and never invents: a class absent from the JSON renders from
+ * its catalogue row alone, exactly as every class did before the file existed.
+ */
+function carsFor(key) {
+  const cars = vehicleModels.classes?.[key];
+  return Array.isArray(cars) ? cars : [];
+}
+
 function serialise(row) {
   if (!row) return null;
   return {
@@ -51,6 +76,16 @@ function serialise(row) {
     heroUrl: row.heroUrl,
     // Always an array for the client, whatever the column holds.
     images: Array.isArray(row.images) ? row.images : [],
+    /*
+     * The individual cars of this class, merged from the JSON file.
+     *
+     * Deliberately NOT a database table. These are photographs and marketing
+     * copy that one person edits in bulk; a table would mean an admin screen,
+     * a migration per field, and CRUD for content that is reviewed like code.
+     * Prices are the opposite and stay in the database, because they are what
+     * a customer is charged.
+     */
+    cars: carsFor(row.key),
     sortOrder: row.sortOrder,
     isActive: row.isActive,
   };
