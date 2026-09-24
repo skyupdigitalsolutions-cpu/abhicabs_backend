@@ -73,6 +73,20 @@ const env = {
   refreshSecret: required('JWT_REFRESH_SECRET', { min: 32 }),
 
   accessTokenTtl: process.env.ACCESS_TOKEN_TTL || '15m',
+
+  /* ---------------- Trusted service callers ---------------- */
+  services: {
+    /**
+     * Shared secret proving a request came from our own WhatsApp bot.
+     *
+     * Deliberately has NO default. An unset key makes the exchange endpoint
+     * refuse every request, which is the safe failure — a default would make
+     * an unconfigured environment the most open one.
+     *
+     * Generate with: openssl rand -hex 32
+     */
+    whatsappBotKey: process.env.WHATSAPP_BOT_SERVICE_KEY || '',
+  },
   refreshTokenTtlDays: Number(process.env.REFRESH_TOKEN_TTL_DAYS || 7),
 
   corsOrigins: (process.env.CORS_ORIGINS || '')

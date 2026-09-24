@@ -1,0 +1,22 @@
+-- One account per phone number.
+--
+-- WHY THIS IS NEEDED
+-- The WhatsApp bot resolves a customer BY PHONE. Without a unique constraint
+-- that lookup is `findFirst`, which quietly picks a row when several match —
+-- so two accounts sharing a number would send one person's bookings to the
+-- other, non-deterministically. A uniqueness rule the application relies on
+-- has to be enforced by the database, not hoped for.
+--
+-- SAFETY: this fails loudly if duplicates already exist, which is the correct
+-- outcome — they need a human decision about which account is real, not an
+-- automatic merge that silently discards someone's booking history.
+--
+-- Find them first:
+--   SELECT phone, count(*), array_agg(email)
+--   FROM users WHERE phone IS NOT NULL
+--   GROUP BY phone HAVING count(*) > 1;
+--
+-- NULLs are exempt: Postgres treats each NULL as distinct in a unique index,
+-- so the many staff and seeded accounts with no phone are unaffected.
+
+CREATE UNIQUE INDEX "users_phone_key" ON "users"("phone");

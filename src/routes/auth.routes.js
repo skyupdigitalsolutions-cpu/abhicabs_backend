@@ -27,9 +27,32 @@ const s = require('../validators/schemas');
 const otpSchemas = require('../validators/otp.schemas');
 const driverSelfSchemas = require('../validators/driverSelf.schemas');
 
+const { requireServiceKey } = require('../middlewares/serviceAuth');
+const serviceCtrl = require('../controllers/serviceSession.controller');
+const ss = require('../validators/serviceSession.schemas');
+
 const router = express.Router();
 
 /* ---------------- password flow (staff) ---------------- */
+
+/*
+ * Trusted-service session exchange. Not a customer login — the caller proves
+ * it is our own WhatsApp bot with x-service-key, and receives the ordinary
+ * customer access token for the phone number Meta verified.
+ *
+ * Mounted here rather than under /admin because it IS authentication, just
+ * machine-to-machine. Every route the bot then calls stays untouched.
+ *
+ * authLimiter applies: a service key is a password, and an unthrottled
+ * endpoint that validates one is an offline-speed guessing oracle.
+ */
+router.post(
+  '/service/whatsapp-session',
+  authLimiter,
+  requireServiceKey,
+  validate({ body: ss.whatsappSessionSchema }),
+  serviceCtrl.startWhatsAppSession,
+);
 
 router.post('/register', authLimiter, validate({ body: s.registerSchema }), ctrl.register);
 router.post('/login',    authLimiter, validate({ body: s.loginSchema }),    ctrl.login);

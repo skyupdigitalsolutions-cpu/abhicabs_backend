@@ -174,7 +174,11 @@ model User {
   name     String  @db.VarChar(120)
   email    String  @unique @db.VarChar(180)
   password String  @db.VarChar(255) // bcrypt hash — never the plain password
-  phone    String? @db.VarChar(20)
+  // UNIQUE: the WhatsApp bot resolves a customer by phone, and a lookup that
+  // can match two rows would hand one person another's session. Still
+  // nullable — most staff accounts have no phone, and Postgres treats each
+  // NULL as distinct in a unique index.
+  phone    String? @unique @db.VarChar(20)
   role     Role    @default(USER)
   isActive Boolean @default(true) @map("is_active")
 
@@ -196,7 +200,6 @@ model User {
 
   @@index([role])
   @@index([createdAt])
-  @@index([phone])
   @@map("users")
 }
 
