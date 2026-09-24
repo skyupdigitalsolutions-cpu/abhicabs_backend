@@ -525,6 +525,89 @@ async function getInvoice(id) {
   return invoice;
 }
 
+/**
+ * A page of invoices, newest first.
+ *
+ * The admin Invoices screen had no route to call: every existing read is keyed
+ * on an id (`/:id`, `/booking/:bookingId`), which answers "show me THIS one"
+ * and cannot answer "show me the list". The ERP was requesting
+ * GET /admin/invoices and getting a 404.
+ *
+ * `lines` are included because the screen shows the booking each invoice
+ * covers, and the link lives on invoice_lines — invoices has no booking_id.
+ * Fetching them per row afterwards would be a request per invoice.
+ *
+ * Money columns are Decimals, which JSON.stringify turns into strings. They
+ * are left as strings ON PURPOSE here: a list is displayed, never summed
+ * client-side, and converting a paise-accurate Decimal to a double to render
+ * it is a risk with no benefit. The single-invoice read behaves the same way,
+ * so both endpoints agree.
+ */
+async function listInvoices({
+  page = 1,
+  limit = 20,
+  status,
+  type,
+  series,
+  customerId,
+  corporateAccountId,
+  search,
+  from,
+  to,
+} = {}) {
+  const where = {};
+
+  if (status) where.status = status;
+  if (type) where.type = type;
+  if (series) where.series = series;
+  if (customerId) where.customerId = customerId;
+  if (corporateAccountId) where.corporateAccountId = corporateAccountId;
+
+  // issuedAt, not createdAt: an invoice's date is the date it was ISSUED, and
+  // that is the date shown on the document and used for GST periods.
+  if (from || to) {
+    where.issuedAt = {};
+    if (from) where.issuedAt.gte = new Date(from);
+    if (to) where.issuedAt.lte = new Date(to);
+  }
+
+  // Number or billed party. Deliberately not a full-text search across lines:
+  // an admin looking for an invoice has one of these two in hand.
+  if (search) {
+    where.OR = [
+      { invoiceNumber: { contains: search, mode: 'insensitive' } },
+      { billToName: { contains: search, mode: 'insensitive' } },
+    ];
+  }
+
+  const [rows, total] = await Promise.all([
+    prisma.invoice.findMany({
+      where,
+      include: { lines: true },
+      orderBy: [{ issuedAt: 'desc' }, { invoiceNumber: 'desc' }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.invoice.count({ where }),
+  ]);
+
+  return {
+    // Both names carry the same array: `items` matches the envelope used by
+    // the other admin lists, `invoices` is what reads naturally at the call
+    // site. Cheaper than making every caller agree.
+    items: rows,
+    invoices: rows,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit) || 1,
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
+  };
+}
+
 async function getInvoiceForBooking(bookingId) {
   const line = await prisma.invoiceLine.findFirst({
     where: { bookingId },
@@ -545,6 +628,7 @@ module.exports = {
   finaliseBooking,
   deriveBookingBalance,
   getInvoice,
+  listInvoices,
   getInvoiceForBooking,
   listLedgerForBooking,
   // exported for tests

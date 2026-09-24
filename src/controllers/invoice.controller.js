@@ -10,6 +10,17 @@ const { asyncHandler } = require('../utils/helpers');
 
 /* ---------------- admin ---------------- */
 
+/**
+ * GET /admin/invoices — the paginated list the admin Invoices screen reads.
+ *
+ * Kept in the same envelope as the other admin lists so the ERP's shared
+ * unwrap helper needs no special case.
+ */
+exports.list = asyncHandler(async (req, res) => {
+  const data = await billing.listInvoices(req.validatedQuery || req.query || {});
+  res.json({ success: true, data });
+});
+
 exports.getOne = asyncHandler(async (req, res) => {
   const invoice = await billing.getInvoice(req.params.id);
   res.json({ success: true, data: { invoice } });

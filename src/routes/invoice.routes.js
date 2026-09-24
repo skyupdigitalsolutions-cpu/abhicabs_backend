@@ -19,6 +19,20 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+/*
+ * The LIST, and it must be declared before '/:id'.
+ *
+ * Express matches in order. Registered after, a request for '/' would still
+ * work, but any future static segment added below /:id would be swallowed by
+ * the uuid param — the same trap the /booking routes above avoid.
+ */
+router.get(
+  '/',
+  requirePermission('PAYMENT_VIEW'),
+  validate({ query: s.listInvoicesQuerySchema }),
+  ctrl.list
+);
+
 // Static segments before /:id so they are not captured as a uuid.
 router.get(
   '/booking/:bookingId/ledger',

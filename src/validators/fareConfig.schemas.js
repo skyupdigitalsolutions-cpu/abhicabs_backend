@@ -79,19 +79,34 @@ const optionalFields = Object.fromEntries(
 );
 
 /**
- * A rate card is useless without a base, a per-km and a floor, so those three
- * are required. Everything else defaults to 0 in the schema, which reads as
- * "this rule is off" — the correct default for an optional surcharge.
+ * A rate card is useless without a base and a per-km, so those two are
+ * required.
+ *
+ * minimumFare is OPTIONAL. Omitting it means "no floor enforced", which the
+ * engine already supported — fare.service reads `config.minimumFare ?? 0` —
+ * but this schema demanded it, so the admin form's blank field produced a
+ * 400 and the Create button looked dead. Everything else defaults to 0,
+ * which reads as "this rule is off".
  */
 const createSchema = z
   .object({
+    /*
+     * ORDER MATTERS. `optionalFields` is spread FIRST, with the required keys
+     * declared after it.
+     *
+     * Spread last, it silently won: optionalFields contains an optional
+     * `baseFare` and `perKm` too, so those overwrote the required versions
+     * above them and a rate card with NO base fare and NO per-km rate passed
+     * validation. Prisma then rejected the insert, since both columns are NOT
+     * NULL with no default — a 500 where a 400 naming the missing field
+     * belonged.
+     */
+    ...optionalFields,
     cityId: z.coerce.number().int().positive(),
     vehicleClass,
     tripType,
     baseFare: money,
     perKm: money,
-    minimumFare: money,
-    ...optionalFields,
   })
   .superRefine(surgeBandIsSane);
 

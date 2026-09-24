@@ -297,7 +297,12 @@ model FareConfig {
   baseFare        Decimal @map("base_fare") @db.Decimal(10, 2)
   perKm           Decimal @map("per_km") @db.Decimal(10, 2)
   perMinute       Decimal @default(0) @map("per_minute") @db.Decimal(10, 2)
-  minimumFare     Decimal @map("minimum_fare") @db.Decimal(10, 2)
+  // @default(0) so a rate card can be created without a floor. fare.service
+  // already reads it as `config.minimumFare ?? 0`, so a zero minimum was
+  // always handled correctly by the engine — it just could not be expressed
+  // from the admin form, which required the field and then rejected the
+  // request when it was left blank.
+  minimumFare     Decimal @default(0) @map("minimum_fare") @db.Decimal(10, 2)
   cancellationFee Decimal @default(0) @map("cancellation_fee") @db.Decimal(10, 2)
 
   // --- ONE_WAY only ---

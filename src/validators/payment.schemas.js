@@ -39,7 +39,28 @@ const simulateWebhookSchema = z.object({
   amount: z.union([z.number(), z.string()]).optional(),
 });
 
+/**
+ * GET /admin/invoices query.
+ *
+ * Every filter is optional: the screen's first render passes nothing and
+ * expects the most recent invoices back, not an error.
+ */
+const listInvoicesQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+  status: z.enum(['DRAFT', 'ISSUED', 'PAID', 'CANCELLED']).optional(),
+  type: z.enum(['TAX', 'NON_TAX']).optional(),
+  // Useful for isolating the DEMO series from real invoices.
+  series: z.string().trim().max(8).optional(),
+  customerId: z.string().uuid().optional(),
+  corporateAccountId: z.string().uuid().optional(),
+  search: z.string().trim().max(80).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+});
+
 module.exports = {
+  listInvoicesQuerySchema,
   idParamSchema,
   bookingIdParamSchema,
   odometerSubmitSchema,
