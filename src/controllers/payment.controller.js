@@ -55,8 +55,18 @@ exports.listForBooking = asyncHandler(async (req, res) => {
  * true, false, false, false, false.
  */
 exports.simulateWebhook = asyncHandler(async (req, res) => {
-  if (env.isProd) {
-    throw ApiError.forbidden('Webhook simulation is disabled in production', 'SIMULATE_DISABLED');
+  /*
+   * Refused in production UNLESS explicitly enabled for this environment.
+   *
+   * The second guard below (mock provider only) is what actually keeps this
+   * safe once real payments are live: with PAYMENT_PROVIDER=razorpay this
+   * endpoint is unreachable no matter what the flag says.
+   */
+  if (env.isProd && !env.allowPaymentSimulation) {
+    throw ApiError.forbidden(
+      'Webhook simulation is disabled in production. Set ALLOW_PAYMENT_SIMULATION=true on a test environment to enable it.',
+      'SIMULATE_DISABLED',
+    );
   }
   if (paymentProvider.getProvider().name !== 'mock') {
     throw ApiError.badRequest(

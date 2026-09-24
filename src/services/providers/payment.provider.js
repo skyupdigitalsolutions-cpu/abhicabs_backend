@@ -94,6 +94,21 @@ function getProvider() {
 
   cached = assertImplements(build(), name);
   console.log(`[payment] provider: ${cached.name}`);
+
+  /*
+   * Say it loudly when a deployed server can mark payments captured for free.
+   *
+   * The two conditions are easy to set and easy to forget, and the failure is
+   * silent — the app works perfectly, which is exactly the problem. A line in
+   * the boot log is the cheapest way to notice it is still on next month.
+   */
+  if (cached.name === 'mock' && env.isProd) {
+    console.warn(
+      env.allowPaymentSimulation
+        ? '[payment] WARNING: mock provider with ALLOW_PAYMENT_SIMULATION=true — payments can be marked captured without money. Testing only.'
+        : '[payment] WARNING: mock provider in production — payments cannot be captured. Set PAYMENT_PROVIDER=razorpay for real payments.',
+    );
+  }
   return cached;
 }
 

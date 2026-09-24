@@ -23,6 +23,28 @@ function required(key, { min } = {}) {
 const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   isProd: process.env.NODE_ENV === 'production',
+
+  /**
+   * Allow the mock provider's webhook-simulation endpoint on a deployed server.
+   *
+   * That endpoint marks a payment CAPTURED without any money moving, so it is
+   * refused in production by default and must be turned on deliberately, per
+   * environment, by someone who knows what they are doing.
+   *
+   * WHY IT EXISTS: a staging deployment runs with NODE_ENV=production — that is
+   * what makes it staging rather than a laptop — so the blanket isProd check
+   * also blocked every hosted test. The result was a rider app that could not
+   * complete a single trip end to end, because /complete refuses while a
+   * balance is outstanding.
+   *
+   * It is still double-guarded: the handler ALSO requires the mock provider, so
+   * switching PAYMENT_PROVIDER to razorpay disables simulation regardless of
+   * this flag. Two independent conditions, either of which closes the door.
+   *
+   * TURN THIS OFF before real customers. An attacker who finds it can mark any
+   * booking paid.
+   */
+  allowPaymentSimulation: process.env.ALLOW_PAYMENT_SIMULATION === 'true',
   port: Number(process.env.PORT || 5000),
 
   databaseUrl: required('DATABASE_URL'),
