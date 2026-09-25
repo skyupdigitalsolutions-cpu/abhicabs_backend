@@ -67,7 +67,11 @@
           "BSVI",
           "3 bags"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320107/image_610.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320220/image_612.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320190/image_611.webp" }
+        ]
       }
     ],
     "innova": [
@@ -85,7 +89,11 @@
           "BSIV",
           "4 bags"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320333/image_613.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320359/image_614.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320382/image_615.webp" }
+        ]
       }
     ],
     "innova-crysta": [
@@ -103,7 +111,11 @@
           "BSVI",
           "4 bags"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320459/image_618.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320532/image_617.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320554/image_616.webp" }
+        ]
       }
     ],
     "innova-hycross": [
@@ -121,7 +133,11 @@
           "Hybrid",
           "4 bags"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320931/image_621.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790320996/image_620.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321016/image_619.webp" }
+        ]
       }
     ],
     "tempo-12": [
@@ -139,7 +155,11 @@
           "High roof",
           "BSVI"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321142/image_625.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321161/image_623.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321176/image_624.webp" }
+        ]
       }
     ],
     "urbania-maharaja": [
@@ -157,7 +177,11 @@
           "1x1 recliners",
           "BSVI"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321258/12-seater-premium-urbania_1.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321305/urbania-hills_1.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321327/12seater-maharaja-premium-urbania_1.webp" }
+        ]
       }
     ],
     "urbania-13": [
@@ -175,7 +199,11 @@
           "High roof",
           "BSVI"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321563/image_627.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321685/image_626.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790321705/image_628.webp" }
+        ]
       }
     ],
     "urbania-16": [
