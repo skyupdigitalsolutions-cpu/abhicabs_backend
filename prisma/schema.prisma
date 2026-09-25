@@ -711,6 +711,16 @@ model Booking {
   startOdometerPhotoUrl      String? @map("start_odometer_photo_url")
   startOdometerPhotoPublicId String? @map("start_odometer_photo_public_id") @db.VarChar(200)
 
+  /// The odometer when the trip ENDED, with its dashboard photo. A driver
+  /// cannot complete a trip without it (lifecycle.completeTrip). Submitted
+  /// with /complete or beforehand via /odometer, and replaceable until the
+  /// trip is COMPLETED — after that it is evidence and locked.
+  /// Never below startOdometerKm (checked in trip.recordOdometer and here in
+  /// the database).
+  endOdometerKm            Int?    @map("end_odometer_km")
+  endOdometerPhotoUrl      String? @map("end_odometer_photo_url")
+  endOdometerPhotoPublicId String? @map("end_odometer_photo_public_id") @db.VarChar(200)
+
   meta Json @default("{}")
 
   confirmedAt DateTime? @map("confirmed_at")
@@ -1435,3 +1445,4 @@ model ServiceState {
   @@index([isActive])
   @@map("service_states")
 }
+
