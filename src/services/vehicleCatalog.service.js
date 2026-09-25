@@ -12,6 +12,8 @@
  * next request rather than up to a TTL later.
  */
 
+const crypto = require('crypto');
+
 const { prisma } = require('../config/prisma');
 const { ApiError } = require('../utils/helpers');
 const cache = require('./cache.service');
@@ -32,8 +34,23 @@ const audit = require('./audit.service');
  */
 const vehicleModels = require('../data/vehicleModels.json');
 
+/*
+ * The cached payload has the JSON file BAKED INTO IT — serialise() merges
+ * `cars` before the value is stored. So editing vehicleModels.json and
+ * redeploying used to change nothing for up to six hours: the new code kept
+ * reading the old Redis value written by the old file.
+ *
+ * Hashing the file into the key makes an edit a different key. Deploy the
+ * edit, the very next request misses, and the old value ages out on its own.
+ */
+const MODELS_FINGERPRINT = crypto
+  .createHash('sha1')
+  .update(JSON.stringify(vehicleModels.classes || {}))
+  .digest('hex')
+  .slice(0, 8);
+
 /** One cache key for the whole active list — it is small and always read whole. */
-const LIST_KEY = 'catalog:vehicles:v1';
+const LIST_KEY = `catalog:vehicles:v2:${MODELS_FINGERPRINT}`;
 const TTL = 6 * 60 * 60; // 6h; writes invalidate, so this is only a backstop
 
 /** Cloudinary subfolder. Kept separate from driver-docs and odometer shots. */
@@ -59,8 +76,39 @@ function carsFor(key) {
   return Array.isArray(cars) ? cars : [];
 }
 
+/** Keeps only entries the app can actually render. */
+function usableImages(list) {
+  return (Array.isArray(list) ? list : []).filter(
+    (i) => i && typeof i.url === 'string' && /^https?:\/\//i.test(i.url),
+  );
+}
+
+/**
+ * The class gallery, and the one shot that represents the class.
+ *
+ * `vehicle_catalog.images` / `hero_url` are filled by the admin upload route.
+ * Photography pasted into vehicleModels.json lands on the CARS instead, and
+ * no screen in the rider app reads car images — it reads `images` and
+ * `heroUrl`. A class with pictures in the file and an empty column therefore
+ * rendered as the glyph, which is what "the images are not showing" was.
+ *
+ * So the file is a FALLBACK: when the column is empty, the cars' photographs
+ * stand in for the class. An admin upload still wins, because that is the
+ * shot chosen deliberately to read small.
+ */
+function classImagery(row) {
+  const own = usableImages(row.images);
+  if (own.length || row.heroUrl) {
+    return { images: own, heroUrl: row.heroUrl || own[0]?.url || null };
+  }
+
+  const fromCars = carsFor(row.key).flatMap((c) => usableImages(c.images));
+  return { images: fromCars, heroUrl: fromCars[0]?.url || null };
+}
+
 function serialise(row) {
   if (!row) return null;
+  const imagery = classImagery(row);
   return {
     key: row.key,
     name: row.name,
@@ -73,9 +121,9 @@ function serialise(row) {
     fuel: row.fuel,
     rating: row.rating == null ? null : Number(row.rating),
     trips: row.trips,
-    heroUrl: row.heroUrl,
+    heroUrl: imagery.heroUrl,
     // Always an array for the client, whatever the column holds.
-    images: Array.isArray(row.images) ? row.images : [],
+    images: imagery.images,
     /*
      * The individual cars of this class, merged from the JSON file.
      *
