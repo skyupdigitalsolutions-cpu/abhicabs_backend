@@ -1184,6 +1184,107 @@ model VehicleCatalog {
   @@map("vehicle_catalog")
 }
 
+/// Whether a promo takes a percentage off or a fixed amount.
+enum DiscountType {
+  PERCENT
+  FLAT
+}
+
+/// What a promo code is allowed to apply to.
+enum DiscountScope {
+  ALL_BOOKINGS
+  FIRST_RIDE
+  CORPORATE
+  AIRPORT
+}
+
+/// A promo code an admin creates.
+///
+/// WHERE IT LANDS IN THE FARE: after the minimum-fare floor, before rounding.
+/// That ordering is deliberate and is the one thing worth arguing about.
+///
+/// The floor answers "what must this trip cost to be worth running". A promo
+/// answers "what are we choosing to give away". Applying the discount first
+/// and then flooring would silently cancel the promo on short trips — the
+/// rider would enter a code, see no change, and reasonably conclude it was
+/// broken. Applying it last means the business gives what it said it would.
+///
+/// WHAT IT DOES NOT TOUCH: driverSharePct is computed on the fare BEFORE the
+/// discount. The driver drove the same distance either way, and funding a
+/// marketing promo out of their share would be a pay cut they never agreed to.
+/// The discount comes out of the company's margin.
+model Discount {
+  id   Int    @id @default(autoincrement())
+  /// Entered by the rider. Stored and compared UPPERCASE — nobody types a
+  /// promo code with the case the marketer had in mind.
+  code String @unique @db.VarChar(32)
+
+  /// Shown to the rider when the code applies, and in the admin list.
+  description String @db.VarChar(200)
+
+  type  DiscountType
+  /// Percent when type is PERCENT (0–100), rupees when FLAT.
+  value Decimal      @db.Decimal(10, 2)
+
+  /// Cap on a PERCENT discount. Null means uncapped — which on a ₹30,000
+  /// outstation booking is how "20% off" becomes ₹6,000 nobody budgeted for.
+  maxDiscount Decimal? @map("max_discount") @db.Decimal(10, 2)
+
+  /// The fare must reach this before the code applies at all.
+  minFare Decimal @default(0) @map("min_fare") @db.Decimal(10, 2)
+
+  /// Total redemptions allowed across all customers. NULL = unlimited.
+  maxUses  Int? @map("max_uses")
+  /// How many have been used. Incremented when a booking is created, not when
+  /// a quote is shown — a quote is not a redemption.
+  usedCount Int @default(0) @map("used_count")
+
+  /// How many times ONE customer may use it. Defaults to 1: a promo that a
+  /// single rider can redeem nightly is a discount on the price list, not a
+  /// promotion.
+  maxUsesPerCustomer Int @default(1) @map("max_uses_per_customer")
+
+  appliesTo DiscountScope @default(ALL_BOOKINGS) @map("applies_to")
+
+  startsAt  DateTime  @default(now()) @map("starts_at")
+  /// NULL never expires. Worth avoiding: an un-expiring code outlives the
+  /// campaign and the person who created it.
+  expiresAt DateTime? @map("expires_at")
+
+  isActive  Boolean  @default(true) @map("is_active")
+  createdById String? @map("created_by_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  redemptions DiscountRedemption[]
+
+  @@index([isActive, expiresAt])
+  @@map("discounts")
+}
+
+/// One use of a promo code on one booking.
+///
+/// A ROW PER USE, not just a counter on Discount. The counter alone cannot
+/// answer "has this customer used it already", cannot be audited when a rider
+/// disputes a charge, and cannot be reversed when a booking is cancelled.
+model DiscountRedemption {
+  id         Int    @id @default(autoincrement())
+  discountId Int    @map("discount_id")
+  bookingId  String @unique @map("booking_id") @db.Uuid
+  customerId String @map("customer_id") @db.Uuid
+
+  /// What was actually taken off, in rupees. Stored rather than recomputed:
+  /// the discount's terms may change later, and this booking's bill must not.
+  amount Decimal @db.Decimal(10, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  discount Discount @relation(fields: [discountId], references: [id])
+
+  @@index([discountId, customerId])
+  @@map("discount_redemptions")
+}
+
 /// How urgently-priced a place is. Drives the surge rules below.
 ///
 /// These are administrative categories, not sizes: a taluka headquarters can

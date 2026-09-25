@@ -31,6 +31,7 @@ router.get('/', (req, res) => {
       fareConfigs: '/api/v1/admin/fare-configs',
       surge: '/api/v1/admin/surge',
       temporaryDrivers: '/api/v1/admin/temporary-drivers',
+      discounts: '/api/v1/admin/discounts',
       vehicles: '/api/v1/vehicles',
       dispatch: '/api/v1/admin/dispatch',
       location: '/api/v1/admin/location',
@@ -78,6 +79,11 @@ router.use('/admin/surge', apiLimiter, require('./surge.routes'));
 
 // Hired-in drivers and their vehicles, for when demand outruns the fleet.
 router.use('/admin/temporary-drivers', apiLimiter, require('./temporaryDriver.routes'));
+
+// Promo codes. Admin manages them; riders check one against a live quote.
+const discounts = require('./discount.routes');
+router.use('/admin/discounts', apiLimiter, discounts.adminRouter);
+router.use('/discounts', apiLimiter, discounts.riderRouter);
 
 // Vehicle catalogue. The browse side is PUBLIC — see the route file for why —
 // so it is mounted outside the /admin tree, next to the other rider routes.
