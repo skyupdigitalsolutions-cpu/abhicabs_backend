@@ -1155,6 +1155,74 @@ model VehicleCatalog {
   @@map("vehicle_catalog")
 }
 
+/// How urgently-priced a place is. Drives the surge rules below.
+///
+/// These are administrative categories, not sizes: a taluka headquarters can
+/// be larger than a suburb and still be a taluka. Supply is what actually
+/// differs — a metro has drivers idle nearby, a village may have one car
+/// twenty minutes away, and a late booking there costs more to serve.
+enum AreaTier {
+  METRO
+  TALUKA
+  VILLAGE
+}
+
+/// A named place with a radius, classified by tier.
+///
+/// SEPARATE FROM `cities`, deliberately. `cities` is the service area and the
+/// pricing surface: every row needs fare_configs and rental_packages or
+/// quoting breaks for it. Ops must be able to say "Ramanagara is a taluka"
+/// without creating a city that then has no rate cards.
+///
+/// Matching is nearest-centre-first among areas whose radius contains the
+/// pickup, so a village inside a metro's wide radius still prices as a
+/// village — the tighter circle wins.
+model ServiceArea {
+  id   Int      @id @default(autoincrement())
+  name String   @db.VarChar(80)
+  tier AreaTier
+
+  centreLat Decimal @map("centre_lat") @db.Decimal(10, 7)
+  centreLng Decimal @map("centre_lng") @db.Decimal(10, 7)
+  /// How far from the centre still counts as this place.
+  radiusKm  Int     @default(15) @map("radius_km")
+
+  /// Free text for ops: why this radius, who asked for it.
+  note     String? @db.VarChar(500)
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([name])
+  @@index([isActive])
+  @@map("service_areas")
+}
+
+/// What a booking's urgency costs, per tier. One row per tier.
+///
+/// A TABLE rather than constants, because these are commercial numbers the
+/// business changes — and the previous version lived in two env vars, which
+/// meant a redeploy to change a percentage and no record of who changed it.
+model SurgeRule {
+  id   Int      @id @default(autoincrement())
+  tier AreaTier @unique
+
+  /// A pickup this soon counts as immediate. 60 = "within the hour".
+  immediateWithinMinutes Int @default(60) @map("immediate_within_minutes")
+
+  /// Percentage added when the pickup IS that soon.
+  immediatePct Decimal @default(0) @map("immediate_pct") @db.Decimal(5, 2)
+  /// Percentage added otherwise — a scheduled booking. Zero in a metro,
+  /// non-zero where supply is thin whenever the trip is booked.
+  standardPct  Decimal @default(0) @map("standard_pct") @db.Decimal(5, 2)
+
+  isActive  Boolean  @default(true) @map("is_active")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("surge_rules")
+}
+
 /// The states the fleet operates in — the allowlist a quote is checked against.
 ///
 /// A table rather than a constant because opening a state is an OPERATIONAL

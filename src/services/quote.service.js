@@ -18,6 +18,7 @@
 
 const { prisma } = require('../config/prisma');
 const cache = require('./cache.service');
+const surgeService = require('./surge.service');
 const maps = require('./maps.service');
 const fare = require('./fare.service');
 const geo = require('../lib/geo');
@@ -27,49 +28,16 @@ const serviceArea = require('../lib/serviceArea');
 /** Longest trip the router will price. Guards against an absurd destination. */
 const MAX_TRIP_KM = Number(process.env.MAX_TRIP_KM || 1500);
 
-/**
- * A pickup this soon counts as immediate rather than scheduled.
+/*
+ * Surge now lives in surge.service, keyed on WHERE the pickup is as well as
+ * how soon it is.
  *
- * Thirty minutes is roughly how long it takes to find a driver, get them moving
- * and have them reach a pickup point in city traffic. Inside that window the
- * dispatcher has no slack: it must pull a driver who is free right now rather
- * than planning around the booking.
+ * The constants that used to sit here — a 30-minute window and a flat 5% —
+ * priced a village pickup exactly like a city-centre one. They were also two
+ * environment variables, so changing a commercial percentage meant a redeploy
+ * and left no record of who changed it. Both now live in surge_rules, per
+ * tier, editable from the admin panel.
  */
-const IMMINENT_PICKUP_MINUTES = Number(process.env.SURGE_IMMINENT_MINUTES || 30);
-
-/** What that urgency costs — 5%. */
-const IMMINENT_PICKUP_SURGE = Number(process.env.SURGE_IMMINENT_MULTIPLIER || 1.05);
-
-/**
- * Work out the surge multiplier for a quote.
- *
- * Decided HERE rather than taken from the request. The surge field is part of
- * the fare schema and a client could send 1.0 for a pickup ten minutes away —
- * the app has no reason to be trusted with a number that changes the price.
- * Whatever arrives is treated as a floor, so an admin tool can still push surge
- * up manually, but nothing can push it down below what the booking earns.
- *
- * Applies to every trip type. A rental or an airport run booked for twenty
- * minutes' time costs the dispatcher exactly as much urgency as a one-way does.
- *
- * @param {Date|string} pickupAt   when the rider wants collecting
- * @param {number} requestedSurge  whatever the caller asked for
- * @returns {{ surge: number, imminent: boolean, minutesToPickup: number }}
- */
-function resolveSurge(pickupAt, requestedSurge = 1) {
-  const when = pickupAt instanceof Date ? pickupAt : new Date(pickupAt);
-  const minutesToPickup = Math.round((when.getTime() - Date.now()) / 60000);
-
-  // A pickup already in the past is not "extra imminent" — it is a scheduling
-  // error the booking validator rejects. Clamped so it cannot read as negative
-  // urgency here.
-  const imminent = minutesToPickup <= IMMINENT_PICKUP_MINUTES;
-
-  const base = Number(requestedSurge) > 0 ? Number(requestedSurge) : 1;
-  const surge = imminent ? Math.max(base, IMMINENT_PICKUP_SURGE) : base;
-
-  return { surge, imminent, minutesToPickup: Math.max(0, minutesToPickup) };
-}
 
 /**
  * How far apart pickup and drop must be before a trip counts as a real journey.
@@ -423,7 +391,18 @@ async function getQuote(input) {
   // rather than an error. Everything below then prices the LOCAL product, and
   // the switch is reported back so the app can say what changed.
   // Server-decided, never taken on trust from the request.
-  const surgeInfo = resolveSurge(pickupAt, surge);
+  /*
+   * Classified on the PICKUP point, not the drop.
+   *
+   * The premium pays for getting a car to the rider, so it is the pickup's
+   * supply that matters. A village-to-metro trip is hard to serve; the same
+   * trip reversed is not.
+   */
+  const surgeInfo = await surgeService.resolveSurge({
+    pickupPoint,
+    pickupAt,
+    requestedSurge: surge,
+  });
 
   const localSwitch = await resolveLocalSwitch(tripType, dropPoint, city);
   const effectiveTripType = localSwitch ? localSwitch.to : tripType;
@@ -551,11 +530,20 @@ async function getQuote(input) {
      */
     surge: {
       multiplier: surgeInfo.surge,
-      imminent: surgeInfo.imminent,
+      /** The figure to show a rider: 5, 10, 15 — not 1.05. */
+      pct: surgeInfo.pct,
+      /** METRO | TALUKA | VILLAGE, and the named area it matched. */
+      tier: surgeInfo.tier,
+      area: surgeInfo.area,
+      /** False when no configured area contained the pickup — see FALLBACK_TIER. */
+      matched: surgeInfo.matched,
+      immediate: surgeInfo.immediate,
+      // Kept under the old name too: the app already reads `imminent`, and
+      // renaming it in the same change that alters the pricing would make a
+      // display bug look like a pricing bug.
+      imminent: surgeInfo.immediate,
       minutesToPickup: surgeInfo.minutesToPickup,
-      reason: surgeInfo.imminent
-        ? `Picking up in about ${surgeInfo.minutesToPickup} min`
-        : null,
+      reason: surgeInfo.reason,
     },
     trip: {
       // What was PRICED, which may differ from what was asked for.
@@ -714,7 +702,11 @@ async function quoteAllClasses(input) {
   // Everything below prices the LOCAL product and the switch is reported back.
   // One decision for the whole list — every class on the screen must show the
   // same urgency, or the surge looks like it depends on the car.
-  const surgeInfo = resolveSurge(input.pickupAt, input.surge);
+  const surgeInfo = await surgeService.resolveSurge({
+    pickupPoint,
+    pickupAt: input.pickupAt,
+    requestedSurge: input.surge,
+  });
 
   const localSwitch = await resolveLocalSwitch(input.tripType, dropPoint, city);
   const effectiveTripType = localSwitch ? localSwitch.to : input.tripType;
@@ -830,11 +822,20 @@ async function quoteAllClasses(input) {
      */
     surge: {
       multiplier: surgeInfo.surge,
-      imminent: surgeInfo.imminent,
+      /** The figure to show a rider: 5, 10, 15 — not 1.05. */
+      pct: surgeInfo.pct,
+      /** METRO | TALUKA | VILLAGE, and the named area it matched. */
+      tier: surgeInfo.tier,
+      area: surgeInfo.area,
+      /** False when no configured area contained the pickup — see FALLBACK_TIER. */
+      matched: surgeInfo.matched,
+      immediate: surgeInfo.immediate,
+      // Kept under the old name too: the app already reads `imminent`, and
+      // renaming it in the same change that alters the pricing would make a
+      // display bug look like a pricing bug.
+      imminent: surgeInfo.immediate,
       minutesToPickup: surgeInfo.minutesToPickup,
-      reason: surgeInfo.imminent
-        ? `Picking up in about ${surgeInfo.minutesToPickup} min`
-        : null,
+      reason: surgeInfo.reason,
     },
   };
 }

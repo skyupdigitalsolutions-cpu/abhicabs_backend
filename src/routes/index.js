@@ -29,6 +29,7 @@ router.get('/', (req, res) => {
       invoices: '/api/v1/admin/invoices',
       reports: '/api/v1/admin/reports',
       fareConfigs: '/api/v1/admin/fare-configs',
+      surge: '/api/v1/admin/surge',
       vehicles: '/api/v1/vehicles',
       dispatch: '/api/v1/admin/dispatch',
       location: '/api/v1/admin/location',
@@ -69,6 +70,10 @@ router.use('/admin/reports', apiLimiter, require('./report.routes'));
 // had a catch-all; it does not, but keeping the admin mounts grouped is what
 // stops the next one from being forgotten the way this one was.
 router.use('/admin/fare-configs', apiLimiter, require('./fareConfig.routes'));
+
+// Area tiers and surge percentages. Same permission as rate cards — both
+// change what a customer pays.
+router.use('/admin/surge', apiLimiter, require('./surge.routes'));
 
 // Vehicle catalogue. The browse side is PUBLIC — see the route file for why —
 // so it is mounted outside the /admin tree, next to the other rider routes.

@@ -45,7 +45,11 @@
           "BSVI",
           "2 bags"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790312398/image_608.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790312515/image_609.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790312307/dziremarutisuzukidziredashboard_1.webp" }
+        ]
       }
     ],
     "ertiga": [
