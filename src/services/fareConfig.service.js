@@ -220,8 +220,22 @@ async function create(input, actor, meta = {}) {
     );
   }
 
+  /*
+   * A ONE_WAY card with no return percentage gets the business rule — the
+   * full return leg — rather than the column default of 0.
+   *
+   * 0 means "the return is free", which is a pricing decision, not a blank.
+   * Left to the default, every one-way card created from the admin form
+   * without that field filled in quietly quoted half the intended fare, and
+   * nothing on the quote said so. An explicit value, 0 included, is kept.
+   */
+  const data = { ...input, effectiveFrom };
+  if (data.tripType === 'ONE_WAY' && data.returnEmptyPct == null) {
+    data.returnEmptyPct = 100;
+  }
+
   const row = await prisma.fareConfig.create({
-    data: { ...input, effectiveFrom },
+    data,
     include: { city: true },
   });
 

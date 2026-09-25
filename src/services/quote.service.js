@@ -191,8 +191,23 @@ async function resolveLocalSwitch(tripType, dropPoint, city) {
  * endpoints, so a rate change takes effect immediately rather than waiting out
  * the TTL.
  */
+/*
+ * Versioned so a deploy that changes rate cards in a MIGRATION takes effect at
+ * once. The admin endpoints invalidate on write, but a migration writes to the
+ * database behind the cache's back — and without a new key, booking creation
+ * (which reads through here) would keep pricing from the old cached row for up
+ * to six hours while the fare list (which reads the database directly) showed
+ * the new one. The rider would be quoted one total and booked at another.
+ *
+ * Bump this whenever a migration changes fare_configs.
+ *   v2 — 20260928090000_oneway_full_return (return_empty_pct -> 100)
+ */
+const FARE_CFG_CACHE_VERSION = 'v2';
+const fareCfgPrefix = (cityId, vehicleClass) =>
+  `fare:cfg:${FARE_CFG_CACHE_VERSION}:${cityId}:${vehicleClass}:`;
+
 async function getFareConfig(cityId, vehicleClass, tripType) {
-  const key = `fare:cfg:${cityId}:${vehicleClass}:${tripType}`;
+  const key = `${fareCfgPrefix(cityId, vehicleClass)}${tripType}`;
 
   const config = await cache.getOrSet(
     key,
@@ -233,7 +248,7 @@ async function getCity(cityId) {
 
 /** Invalidate after an admin edits a rate card. */
 async function invalidateFareConfig(cityId, vehicleClass) {
-  await cache.delByPrefix(`fare:cfg:${cityId}:${vehicleClass}:`);
+  await cache.delByPrefix(fareCfgPrefix(cityId, vehicleClass));
 }
 
 /* ------------------------------------------------------------------ *
@@ -729,19 +744,34 @@ async function quoteAllClasses(input) {
     ? { distanceKm: 0, durationMin: 0, provider: 'none', estimated: false }
     : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
 
-  const configs = await prisma.fareConfig.findMany({
-    where: {
-      cityId: Number(input.cityId),
-      tripType: effectiveTripType,
-      isActive: true,
-      effectiveFrom: { lte: new Date() },
-    },
-    orderBy: { effectiveFrom: 'desc' },
-  });
+  /*
+   * Only classes a rider can SEE — an ACTIVE vehicle_catalog row.
+   *
+   * This list used to be "every class with a rate card". Rate cards outlive
+   * the catalogue on purpose (old bookings and airport pricing still need
+   * them), so a class retired from the catalogue — the old generic Sedan and
+   * SUV — kept appearing on the fare screen next to the real cars, with no
+   * photo and a placeholder name. The catalogue is what the business sells;
+   * a rate card is only how it is priced.
+   */
+  const [configs, visible] = await Promise.all([
+    prisma.fareConfig.findMany({
+      where: {
+        cityId: Number(input.cityId),
+        tripType: effectiveTripType,
+        isActive: true,
+        effectiveFrom: { lte: new Date() },
+      },
+      orderBy: { effectiveFrom: 'desc' },
+    }),
+    prisma.vehicleCatalog.findMany({ where: { isActive: true }, select: { key: true } }),
+  ]);
+  const visibleClasses = new Set(visible.map((v) => v.key));
 
   // One row per class — the most recent effective card for each.
   const seen = new Set();
   const latest = configs.filter((c) => {
+    if (!visibleClasses.has(c.vehicleClass)) return false;
     if (seen.has(c.vehicleClass)) return false;
     seen.add(c.vehicleClass);
     return true;

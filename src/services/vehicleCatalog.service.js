@@ -50,7 +50,11 @@ const MODELS_FINGERPRINT = crypto
   .slice(0, 8);
 
 /** One cache key for the whole active list — it is small and always read whole. */
-const LIST_KEY = `catalog:vehicles:v2:${MODELS_FINGERPRINT}`;
+// v3: 20260928091000_retire_sedan_suv deactivates catalogue rows in SQL, behind
+// the cache's back. A new version makes the next request miss, so the retired
+// classes leave the Vehicles screen on deploy rather than up to 6h later.
+// Bump again whenever a migration changes vehicle_catalog.
+const LIST_KEY = `catalog:vehicles:v3:${MODELS_FINGERPRINT}`;
 const TTL = 6 * 60 * 60; // 6h; writes invalidate, so this is only a backstop
 
 /** Cloudinary subfolder. Kept separate from driver-docs and odometer shots. */

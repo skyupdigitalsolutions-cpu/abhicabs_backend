@@ -538,12 +538,24 @@ function computeFare(input, config) {
   breakdown.push({ label: 'Base fare', amount: M.toStr(base) });
 
   const distanceCharge = M.round2(M.mul(billableKm, config.perKm));
+
+  /*
+   * A round trip's distance is ALREADY both ways — quote.service doubles the
+   * route before calling this. The line used to say only "Distance (868 km)",
+   * which a rider reads as "where is the return?". The note says it outright.
+   * When the minimum-km guarantee applies, its own note explains the figure.
+   */
+  let distanceNote = null;
+  if (usedGuarantee) {
+    distanceNote = `Minimum ${config.minKmPerDay} km/day x ${days} day(s) applied`;
+  } else if (isRoundTrip && actualKm.greaterThan(0)) {
+    distanceNote = `Both ways: ${M.toStr(M.div(actualKm, 2))} km there + ${M.toStr(M.div(actualKm, 2))} km back`;
+  }
+
   breakdown.push({
     label: `Distance (${M.toStr(billableKm)} km x ${M.toStr(config.perKm)}/km)`,
     amount: M.toStr(distanceCharge),
-    ...(usedGuarantee
-      ? { note: `Minimum ${config.minKmPerDay} km/day x ${days} day(s) applied` }
-      : {}),
+    ...(distanceNote ? { note: distanceNote } : {}),
   });
 
   /* -- 3. time (one-way only) --------------------------------------- */
@@ -564,12 +576,23 @@ function computeFare(input, config) {
   // On an outstation one-way the driver returns with no passenger. A share of
   // that return leg may be charged; 0 in config disables it entirely.
   let returnEmptyCharge = M.dec(0);
-  if (!isRoundTrip && M.dec(config.returnEmptyPct ?? 0).greaterThan(0)) {
-    returnEmptyCharge = M.round2(M.pct(distanceCharge, config.returnEmptyPct));
+  const returnPct = M.dec(config.returnEmptyPct ?? 0);
+  if (!isRoundTrip && returnPct.greaterThan(0)) {
+    returnEmptyCharge = M.round2(M.pct(distanceCharge, returnPct));
+    /*
+     * In KILOMETRES when it is the full return (100%), so the line reads like
+     * the outbound one above it — "Return journey (434.19 km x 19.00/km)" —
+     * instead of "100.00% of distance", which a rider has to decode. A partial
+     * percentage keeps the percentage, since the km alone would not explain
+     * the amount.
+     */
+    const isFullReturn = returnPct.equals(100);
     breakdown.push({
-      label: `Return journey (${M.toStr(config.returnEmptyPct)}% of distance)`,
+      label: isFullReturn
+        ? `Return journey (${M.toStr(billableKm)} km x ${M.toStr(config.perKm)}/km)`
+        : `Return journey (${M.toStr(returnPct)}% of ${M.toStr(billableKm)} km)`,
       amount: M.toStr(returnEmptyCharge),
-      note: 'Driver returns without a passenger',
+      note: 'Driver drives back to the pickup city without a passenger',
     });
   }
 
