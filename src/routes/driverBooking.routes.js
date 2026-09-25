@@ -50,17 +50,25 @@ router.post(
   ctrl.recordReached
 );
 
-// REACHED -> ONGOING. Body: { otp | startOtp, lat?, lng?, odometerKm? }
+// REACHED -> ONGOING. multipart/form-data:
+//   fields { otp | startOtp, odometerKm, lat?, lng? }   file { photo }  — both required
+// uploadSingle runs BEFORE validate: multer is what fills req.body from a
+// multipart request, so validating first would see an empty body.
 router.post(
   '/:bookingId/start',
-  validate({ params: s.bookingIdParamSchema }),
+  uploadSingle('photo'),
+  validate({ params: s.bookingIdParamSchema, body: s.startTripSchema }),
   ctrl.startTrip
 );
 
-// ARRIVED -> COMPLETED. Body: { actualKm?, odometerKm?, finalFare?, lat?, lng? }
+// ARRIVED -> COMPLETED. multipart/form-data:
+//   fields { odometerKm?, actualKm?, finalFare?, lat?, lng? }   file { photo? }
+// The END odometer (photo + reading) is REQUIRED to complete — sent here, or
+// earlier via /odometer. Photo and reading go together or not at all.
 router.post(
   '/:bookingId/complete',
-  validate({ params: s.bookingIdParamSchema }),
+  uploadSingle('photo'),
+  validate({ params: s.bookingIdParamSchema, body: s.completeTripSchema }),
   ctrl.complete
 );
 
@@ -71,7 +79,8 @@ router.post(
   ctrl.collectCash
 );
 
-// ARRIVED | COMPLETED — final odometer reading (+ optional photo)
+// ONGOING | ARRIVED — END odometer: multipart { odometerKm } + file { photo }, both
+// required. Re-submitting before completion replaces it; locked once COMPLETED.
 router.post(
   '/:bookingId/odometer',
   uploadSingle('photo'),

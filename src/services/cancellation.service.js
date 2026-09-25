@@ -40,6 +40,7 @@ const audit = require('./audit.service');
 const fareService = require('./fare.service');
 const corporateService = require('./corporate.service');
 const allocationService = require('./allocation.service');
+const discountService = require('./discount.service');
 const { emit, EVENTS } = require('../lib/events');
 const { BOOKING_SELECT } = require('../models/booking.model');
 
@@ -114,7 +115,17 @@ function assess(booking, config, now = new Date()) {
     shortNoticeMinutes: FREE_MINUTES,
   });
 
-  const fee = M.round2(band.fee);
+  /*
+   * An UNCONFIRMED booking cancels free, at any time.
+   *
+   * Every booking now waits in PENDING until an admin confirms it, and that
+   * wait can run close to pickup. Until confirmation the company has promised
+   * nothing, so a fee would charge the rider for a trip nobody agreed to run
+   * — and when the ADMIN declines a booking by cancelling it, the rider would
+   * be fined for the company's own refusal. Full refund of anything paid.
+   */
+  const unconfirmed = booking.status === 'PENDING';
+  const fee = unconfirmed ? M.dec(0) : M.round2(band.fee);
   const advance = M.round2(booking.advancePaid || 0);
 
   // Keep the advance up to the fee; refund whatever is left over.
@@ -124,9 +135,9 @@ function assess(booking, config, now = new Date()) {
 
   return {
     fee: M.toStr(fee),
-    band: band.band,
+    band: unconfirmed ? 'UNCONFIRMED' : band.band,
     minutesToPickup: band.minutesToPickup,
-    reason: band.reason,
+    reason: unconfirmed ? 'Booking not yet confirmed — free cancellation' : band.reason,
     advancePaid: M.toStr(advance),
     retainedFromAdvance: M.toStr(retained),
     refundAmount: M.toStr(refund),
@@ -221,6 +232,12 @@ async function cancel(bookingId, actor, body = {}, meta = {}) {
     // Free the vehicle immediately — a cancelled booking must not keep holding
     // a vehicle out of the pool. No-op if it never got an allocation.
     await allocationService.releaseVehicleForBooking(tx, bookingId, 'cancelled', meta);
+
+    // Give the promo use back. A rider who cancels and rebooks should not find
+    // their code "already used" on a trip that never happened. No-op when the
+    // booking had no promo. Same transaction, so a cancel that rolls back
+    // does not hand out a free use.
+    await discountService.release(tx, bookingId);
 
     await audit.record(tx, {
       actor,

@@ -36,16 +36,30 @@ const checkpointGate = (bookingId) => `trip:cp:${bookingId}`;
 /**
  * Records the trip's start point. Called once, when the booking goes ONGOING.
  * A single durable row marking where the meter started.
+ *
+ * `tx` is optional so lifecycle.startTrip can write this INSIDE the status
+ * transition. The start reading is now mandatory for drivers, so it must not
+ * be possible for a trip to be ONGOING with the reading lost to a failed
+ * follow-up write — which is what the old fire-and-forget call allowed.
  */
-async function recordStart(bookingId, { lat = null, lng = null, odometerKm = null } = {}) {
-  return prisma.tripEvent.create({
+async function recordStart(
+  bookingId,
+  { lat = null, lng = null, odometerKm = null, photoUrl = null, photoPublicId = null, actorId = null } = {},
+  tx = prisma,
+) {
+  return tx.tripEvent.create({
     data: {
       bookingId,
       eventType: 'started',
       lat: lat != null ? String(lat) : null,
       lng: lng != null ? String(lng) : null,
       odometerKm: odometerKm != null ? Number(odometerKm) : null,
-      meta: {},
+      note: odometerKm != null ? 'Start odometer reading submitted by driver' : null,
+      meta: {
+        photoUrl: photoUrl || null,
+        photoPublicId: photoPublicId || null,
+        submittedById: actorId || null,
+      },
     },
   });
 }
@@ -135,59 +149,146 @@ async function onTripPing(bookingId, ping) {
 }
 
 /**
- * The assigned driver submits the final odometer reading AFTER the trip.
+ * The END-of-trip odometer reading and its photo. The only writer of the
+ * booking's end_odometer_* columns.
  *
- * Two things happen atomically:
- *   1. a durable `odometer` trip_event is written (reading + optional photo
- *      reference + when it was taken), so the booking keeps its own end-of-trip
- *      reading; and
- *   2. the vehicle's cumulative `odometer_km` is advanced — FORWARD ONLY. A
- *      reading below the vehicle's current odometer is rejected as a typo (an
- *      odometer never goes backwards).
+ * Called by the driver's /odometer route, and by /complete when the reading
+ * comes with the completion request. A driver cannot complete a trip without
+ * one (lifecycle.completeTrip checks the column).
  *
- * The caller (driver controller) has already verified the driver owns the trip
- * and passes the allocation's vehicleId.
+ * In ONE transaction:
+ *   1. refuse a booking that is already COMPLETED — its reading is evidence
+ *      on an issued invoice and is corrected by ops, not by the driver
+ *   2. refuse a reading below this trip's START reading
+ *   3. refuse a reading below the vehicle's odometer (first submission only —
+ *      see below)
+ *   4. write the booking columns, a durable `odometer` trip_event, and advance
+ *      the vehicle's odometer
+ *
+ * RE-SUBMISSION before completion is allowed and REPLACES the earlier one, so
+ * a driver who typed 45120 for 45210 can fix it while still at the kerb. The
+ * vehicle check is relaxed for a replacement: the first submission already
+ * pushed the vehicle's odometer to the mistyped value, so a correct LOWER
+ * figure would otherwise be refused against the driver's own typo.
+ *
+ * Returns `replacedPublicId` — the previous photo — for the caller to delete
+ * AFTER this commits. Deleting it inside the transaction would lose it if the
+ * transaction then rolled back.
  */
-async function recordOdometer(bookingId, { odometerKm, vehicleId, photoUrl = null, photoPublicId = null, actorId = null } = {}) {
+async function recordOdometer(
+  bookingId,
+  { odometerKm, vehicleId, photoUrl = null, photoPublicId = null, actorId = null } = {},
+) {
   const reading = Number(odometerKm);
-  if (!Number.isFinite(reading) || reading < 0) {
+  if (!Number.isInteger(reading) || reading < 0) {
     throw ApiError.badRequest('A valid odometer reading is required', 'INVALID_ODOMETER');
   }
 
   return prisma.$transaction(async (tx) => {
+    const booking = await tx.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        status: true,
+        startOdometerKm: true,
+        endOdometerKm: true,
+        endOdometerPhotoPublicId: true,
+      },
+    });
+    if (!booking) throw ApiError.notFound('Booking not found');
+
+    if (booking.status === 'COMPLETED') {
+      throw ApiError.conflict(
+        'This trip is already completed and its odometer reading is locked. Contact support to correct it.',
+        'ODOMETER_LOCKED',
+      );
+    }
+
+    // Repeated INSIDE the transaction. The controller checks this before the
+    // upload, but a trip cancelled by ops in the seconds the photo takes to
+    // upload would otherwise get an end reading written onto a dead booking.
+    if (!['ONGOING', 'ARRIVED'].includes(booking.status)) {
+      throw ApiError.conflict(
+        `The end odometer can only be recorded on a trip in progress (this one is ${booking.status})`,
+        'TRIP_NOT_IN_PROGRESS',
+      );
+    }
+
+    if (booking.startOdometerKm != null && reading < booking.startOdometerKm) {
+      throw ApiError.conflict(
+        `End reading ${reading} km is below this trip's start reading (${booking.startOdometerKm} km)`,
+        'ODOMETER_BELOW_START',
+      );
+    }
+
+    const isReplacement = booking.endOdometerKm != null;
+
     if (vehicleId) {
       const vehicle = await tx.vehicle.findUnique({
         where: { id: vehicleId },
         select: { odometerKm: true },
       });
-      if (vehicle && reading < vehicle.odometerKm) {
+
+      if (vehicle && !isReplacement && reading < vehicle.odometerKm) {
         throw ApiError.conflict(
           `Reading ${reading} km is below the vehicle's current odometer (${vehicle.odometerKm} km)`,
-          'ODOMETER_BELOW_CURRENT'
+          'ODOMETER_BELOW_CURRENT',
         );
       }
-      if (vehicle && reading > vehicle.odometerKm) {
-        await tx.vehicle.update({ where: { id: vehicleId }, data: { odometerKm: reading } });
+
+      if (vehicle) {
+        // Forward, as always — or, for a replacement, back down to the
+        // corrected figure ONLY if the vehicle still holds this trip's own
+        // earlier (mistyped) value. If anything else has moved it since,
+        // leave it alone.
+        const ownEarlierValue = isReplacement && vehicle.odometerKm === booking.endOdometerKm;
+        if (reading > vehicle.odometerKm || ownEarlierValue) {
+          await tx.vehicle.update({ where: { id: vehicleId }, data: { odometerKm: reading } });
+        }
       }
     }
+
+    await tx.booking.update({
+      where: { id: bookingId },
+      data: {
+        endOdometerKm: reading,
+        endOdometerPhotoUrl: photoUrl,
+        endOdometerPhotoPublicId: photoPublicId,
+      },
+    });
 
     const event = await tx.tripEvent.create({
       data: {
         bookingId,
         eventType: 'odometer',
         odometerKm: reading,
-        note: 'Final odometer reading submitted by driver',
+        note: isReplacement
+          ? 'End odometer reading corrected by driver'
+          : 'End odometer reading submitted by driver',
         meta: {
           photoUrl: photoUrl || null,
           photoPublicId: photoPublicId || null,
           submittedByDriverId: actorId || null,
           submittedAt: new Date().toISOString(),
+          ...(isReplacement ? { replacedReading: booking.endOdometerKm } : {}),
         },
       },
       select: { id: true, odometerKm: true, occurredAt: true },
     });
 
-    return { bookingId, vehicleId: vehicleId || null, odometerKm: reading, eventId: event.id, at: event.occurredAt };
+    return {
+      bookingId,
+      vehicleId: vehicleId || null,
+      odometerKm: reading,
+      startOdometerKm: booking.startOdometerKm,
+      // Informational only — the fare is NOT derived from this. See the
+      // completion notes in lifecycle.completeTrip.
+      odometerKmDriven:
+        booking.startOdometerKm != null ? reading - booking.startOdometerKm : null,
+      replaced: isReplacement,
+      replacedPublicId: isReplacement ? booking.endOdometerPhotoPublicId || null : null,
+      eventId: event.id,
+      at: event.occurredAt,
+    };
   });
 }
 

@@ -30,6 +30,7 @@ const customerService = require('./customer.service');
 const corporateService = require('./corporate.service');
 const audit = require('./audit.service');
 const funnel = require('./funnel.service');
+const discountService = require('./discount.service');
 const M = require('../lib/money');
 const { emit, EVENTS } = require('../lib/events');
 const { BOOKING_SELECT, BOOKING_LIST_SELECT } = require('../models/booking.model');
@@ -354,11 +355,48 @@ async function create(input, actor, meta = {}) {
       );
     }
 
-    const total = quote.quote.total;
-    const { advanceDue, balanceDue } = splitPayment(total, input.paymentMode);
+    /** What the rate card says, before any promo. Kept for fareBasis. */
+    const grossTotal = quote.quote.total;
 
     /* ---- 5. who is billed ---- */
     const billing = await customerService.resolveBillingEntity(customerId);
+
+    /* ---- 5a. promo code ----
+     *
+     * Evaluated AGAIN here, against the fare this service just priced, rather
+     * than trusting the discount the app displayed. The /discounts/check call
+     * the app made is advisory: minutes may have passed, the last use may have
+     * gone, and the app's fareTotal is a number the client sent.
+     *
+     * An inapplicable code REFUSES the booking. Creating it at the full fare
+     * would charge the rider an amount they were never shown, and the first
+     * they would hear of it is the payment screen — or the bank statement.
+     *
+     * The discount comes off the TOTAL, so everything downstream of it —
+     * the payment split, corporate credit, estimatedFare, and therefore the
+     * settlement in lifecycle.recordTripDistance, which starts from
+     * estimatedFare — sees the net amount without knowing a promo exists.
+     */
+    let promo = null;
+    if (input.promoCode) {
+      const result = await discountService.evaluate({
+        code: input.promoCode,
+        customerId,
+        fareTotal: grossTotal,
+        tripType: input.tripType,
+        isCorporate: billing.billTo === 'CORPORATE',
+      });
+      if (!result.ok) {
+        throw ApiError.badRequest(result.reason, result.code || 'DISCOUNT_INVALID');
+      }
+      promo = result;
+    }
+
+    const total = promo
+      ? M.toStr(M.sub(M.dec(grossTotal), M.dec(promo.amount)))
+      : grossTotal;
+
+    const { advanceDue, balanceDue } = splitPayment(total, input.paymentMode);
 
     // A corporate booking consumes credit. Checking before creating means the
     // customer is told immediately rather than discovering it at settlement.
@@ -377,11 +415,21 @@ async function create(input, actor, meta = {}) {
           corporateAccountId: billing.corporateAccountId,
           cityId: input.cityId,
           tripType: input.tripType,
-          // Pay-later (ZERO) has no upfront payment to confirm it, so it goes
-          // live immediately. Prepaid modes (FULL/PARTIAL) stay PENDING until
-          // the payment capture confirms them (see payment.service.applyCapture).
-          status: input.paymentMode === 'ZERO' ? 'CONFIRMED' : 'PENDING',
-          confirmedAt: input.paymentMode === 'ZERO' ? new Date() : null,
+          /*
+           * EVERY booking starts PENDING, whatever the payment mode, and
+           * stays there until an admin confirms it (lifecycle.confirm, via
+           * PATCH /admin/bookings/:id/confirm).
+           *
+           * Pay-later used to confirm itself here and prepaid confirmed on
+           * its first capture. Neither can know whether a car and driver are
+           * actually available for that date — only ops can — so a rider was
+           * being told "confirmed" for trips nobody had agreed to run.
+           *
+           * Payment is still accepted while PENDING; it is simply no longer
+           * what confirms the trip.
+           */
+          status: 'PENDING',
+          confirmedAt: null,
           vehicleClass: input.vehicleClass,
 
           pickupAddress: quote.trip.pickup.formattedAddress || input.pickup.address || 'Pickup',
@@ -422,6 +470,18 @@ async function create(input, actor, meta = {}) {
             routing: quote.routing,
             billing: { billTo: billing.billTo, invoiceType: billing.invoiceType },
             paymentSplit: { advanceDue: advanceDue.toString(), balanceDue: balanceDue.toString() },
+            // `total` above is NET of this. grossTotal is what the rate card
+            // produced, so a dispute can be answered as "₹X, less ₹Y promo".
+            discount: promo
+              ? {
+                  discountId: promo.discountId,
+                  code: promo.code,
+                  description: promo.description,
+                  type: promo.type,
+                  amount: promo.amount,
+                  grossTotal,
+                }
+              : null,
           },
 
           surgeMultiplier: quote.quote.meta.surgeMultiplier,
@@ -433,12 +493,30 @@ async function create(input, actor, meta = {}) {
         select: BOOKING_SELECT,
       });
 
+      // Inside the booking's transaction: a redemption that outlived a rolled-
+      // back booking would burn a use on a trip that does not exist. The
+      // unique index on booking_id makes a double-redeem impossible.
+      if (promo) {
+        await discountService.redeem(tx, {
+          discountId: promo.discountId,
+          bookingId: created.id,
+          customerId,
+          amount: promo.amount,
+        });
+      }
+
       await audit.record(tx, {
         actor,
         action: 'BOOKING_CREATED',
         entityType: 'booking',
         entityId: created.id,
-        after: { bookingNumber, total, tripType: input.tripType, billTo: billing.billTo },
+        after: {
+          bookingNumber,
+          total,
+          tripType: input.tripType,
+          billTo: billing.billTo,
+          ...(promo ? { promoCode: promo.code, discount: promo.amount, grossTotal } : {}),
+        },
         meta,
       });
 
@@ -492,16 +570,9 @@ async function create(input, actor, meta = {}) {
     console.error(`[booking] could not issue start code for ${booking.bookingNumber}: ${err.message}`);
   }
 
-    // Pay-later was confirmed inline above — fire the same event a payment
-    // confirmation would, so the customer gets the "booking confirmed" notice.
-    if (input.paymentMode === 'ZERO') {
-      emit(EVENTS.BOOKING_CONFIRMED, {
-        bookingId: booking.id,
-        bookingNumber: booking.bookingNumber,
-        customerId,
-        pickupAt: booking.pickupAt,
-      });
-    }
+    // No BOOKING_CONFIRMED here any more — that event now fires only from
+    // lifecycle.confirm, when an admin confirms. Sending it at creation would
+    // tell the rider "Booking confirmed" for a trip that is still pending.
 
     return {
       booking,
@@ -511,6 +582,9 @@ async function create(input, actor, meta = {}) {
         balanceDue: balanceDue.toString(),
         total,
       },
+      discount: promo
+        ? { code: promo.code, description: promo.description, amount: promo.amount, grossTotal }
+        : null,
       billing,
     };
   } catch (err) {

@@ -322,25 +322,12 @@ async function applyCapture(tx, payment, parsed) {
     WHERE "id" = ${payment.bookingId}::uuid
   `;
 
-  // 3. Auto-confirm on payment. A prepaid booking (FULL/PARTIAL) is confirmed
-  //    by its first successful capture — the advance for PARTIAL, the whole
-  //    amount for FULL. Guarded WHERE status='PENDING' so it fires exactly once
-  //    and never fights a concurrent transition. Pay-later (ZERO) was already
-  //    confirmed at creation and is skipped.
-  if (booking.status === 'PENDING' && booking.paymentMode !== 'ZERO') {
-    const { count } = await tx.booking.updateMany({
-      where: { id: payment.bookingId, status: 'PENDING' },
-      data: { status: 'CONFIRMED', confirmedAt: new Date() },
-    });
-    if (count > 0) {
-      emit(EVENTS.BOOKING_CONFIRMED, {
-        bookingId: payment.bookingId,
-        bookingNumber: booking.bookingNumber,
-        customerId: booking.customerId,
-        pickupAt: booking.pickupAt,
-      });
-    }
-  }
+  // 3. NO auto-confirm. A capture used to move a prepaid booking PENDING ->
+  //    CONFIRMED here. Confirmation is now an admin decision only (see
+  //    lifecycle.confirm): being paid means the rider is committed, not that
+  //    a car and driver are available. The booking stays PENDING with its
+  //    payment recorded, and the admin sees it as paid-and-awaiting in the
+  //    panel. If the admin declines, cancelling it runs the normal refund.
 
   // Fire-and-forget: Day 10 turns this into a customer receipt + admin alert.
   // Emitted AFTER the row change so a listener that reads the booking sees the

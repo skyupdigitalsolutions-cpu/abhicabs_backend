@@ -81,6 +81,29 @@ const createBookingSchema = z
     // Staff booking on behalf of a customer. Ignored for self-service callers —
     // the service uses actor.id unless the caller holds BOOKING_MANAGE.
     customerId: uuid.optional(),
+
+    /*
+     * A promo code, re-validated server side at create.
+     *
+     * The app has already shown the rider the discounted total via
+     * POST /discounts/check, but that answer is advisory — the code may have
+     * expired or run out in the minutes since. booking.service evaluates it
+     * again against the fare it prices itself, and refuses the booking rather
+     * than silently charging the undiscounted amount the rider was not shown.
+     *
+     * Same format as discount.schemas, uppercased here so nothing downstream
+     * has to remember. Empty string is treated as absent: the app clears the
+     * field to "" when the rider removes a code.
+     */
+    promoCode: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .max(32)
+      .regex(/^([A-Z0-9][A-Z0-9_-]*)?$/, 'Use letters, digits, - or _')
+      .optional()
+      .nullable()
+      .transform((v) => (v ? v : null)),
   })
   .refine((d) => d.tripType !== 'ROUND_TRIP' || !!d.returnAt, {
     message: 'A round trip needs a return date and time',

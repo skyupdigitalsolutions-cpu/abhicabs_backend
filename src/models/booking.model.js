@@ -48,6 +48,12 @@ const BOOKING_SELECT = {
   confirmedAt: true,
   reachedAt: true,
   startedAt: true,
+  // Start-of-trip odometer and its dashboard photo — shown on the admin
+  // booking detail. Not sensitive: it is a photo of a speedometer.
+  startOdometerKm: true,
+  startOdometerPhotoUrl: true,
+  endOdometerKm: true,
+  endOdometerPhotoUrl: true,
   arrivedAt: true,
   completedAt: true,
   createdAt: true,

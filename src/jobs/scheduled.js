@@ -78,7 +78,19 @@ async function pendingPaymentSweeper() {
 
   const now = new Date();
   const stale = await prisma.booking.findMany({
-    where: { status: 'PENDING', pickupAt: { lt: now } },
+    where: {
+      status: 'PENDING',
+      pickupAt: { lt: now },
+      /*
+       * UNPAID only. Now that an admin confirms every booking, a PENDING
+       * booking can be one the rider has already paid for and ops simply did
+       * not get to before pickup. Expiring it would strand the money:
+       * EXPIRED runs no refund, and nothing else would ever look at it again.
+       * A paid one stays PENDING for the admin to confirm or cancel — and
+       * cancelling is the path that refunds.
+       */
+      advancePaid: 0,
+    },
     select: { id: true, bookingNumber: true },
     take: 200,
   });

@@ -35,6 +35,7 @@ const audit = require('./audit.service');
 const { emit, EVENTS } = require('../lib/events');
 const billing = require('./billing.service');
 const allocationService = require('./allocation.service');
+const discountService = require('./discount.service');
 const tripService = require('./trip.service');
 const tripOtpService = require('./tripOtp.service');
 const fare = require('./fare.service');
@@ -213,14 +214,36 @@ async function transition(bookingId, target, actor, opts = {}) {
  * On Day 7 this becomes the callback from a successful payment rather than a
  * manual action. The guard is identical either way.
  */
+/**
+ * PENDING -> CONFIRMED. ADMIN ONLY — this is now the ONLY way a booking is
+ * confirmed.
+ *
+ * Bookings used to confirm themselves: pay-later at creation, prepaid on the
+ * first payment capture. Both are gone (see booking.service.create and
+ * payment.service.applyCapture). A booking waits in PENDING, visible to the
+ * rider as awaiting confirmation, until someone with BOOKING_MANAGE confirms
+ * it from the admin panel via PATCH /admin/bookings/:id/confirm.
+ */
 async function confirm(bookingId, actor, meta) {
   const booking = await transition(bookingId, 'CONFIRMED', actor, { meta });
 
+  // The customer's "Booking confirmed" push/WhatsApp. Now fires only here,
+  // so the rider hears "confirmed" exactly when an admin has confirmed.
   emit(EVENTS.BOOKING_CONFIRMED, {
     bookingId: booking.id,
     bookingNumber: booking.bookingNumber,
     customerId: booking.customerId,
     pickupAt: booking.pickupAt,
+  });
+
+  // And the live status, so the rider's trip screen flips from "Awaiting
+  // confirmation" to "Confirmed" the moment it happens instead of on the
+  // next 15-second poll. BOOKING_CONFIRMED alone reaches the notification
+  // queue but not the booking's socket room.
+  emit(EVENTS.BOOKING_STATUS_CHANGED, {
+    bookingId: booking.id,
+    bookingNumber: booking.bookingNumber,
+    status: 'CONFIRMED',
   });
 
   return booking;
@@ -261,8 +284,40 @@ async function startTrip(
   bookingId,
   actor,
   meta,
-  { lat = null, lng = null, odometerKm = null, startOtp = null } = {},
+  {
+    lat = null,
+    lng = null,
+    odometerKm = null,
+    startOtp = null,
+    odometerPhotoUrl = null,
+    odometerPhotoPublicId = null,
+    vehicleId = null,
+  } = {},
 ) {
+  /*
+   * A DRIVER must supply the start odometer and a photo of it.
+   *
+   * Checked here, not only in the controller, so no other route that reaches
+   * startTrip can skip it. Ops starting a trip from the console are exempt for
+   * the same reason they are exempt from the OTP below: they are overriding,
+   * usually on the phone to someone, and have no dashboard to photograph.
+   */
+  const reading = odometerKm != null && odometerKm !== '' ? Number(odometerKm) : null;
+  if (actor.role === 'DRIVER') {
+    if (reading == null || !Number.isInteger(reading) || reading < 0) {
+      throw ApiError.badRequest(
+        'Enter the odometer reading before starting the trip',
+        'START_ODOMETER_REQUIRED',
+      );
+    }
+    if (!odometerPhotoUrl) {
+      throw ApiError.badRequest(
+        'Upload a photo of the odometer before starting the trip',
+        'START_ODOMETER_PHOTO_REQUIRED',
+      );
+    }
+  }
+
   /**
    * The rider's code gates the DRIVER, not ops.
    *
@@ -276,15 +331,59 @@ async function startTrip(
     await tripOtpService.verify(bookingId, startOtp);
   }
 
-  const booking = await transition(bookingId, 'ONGOING', actor, { meta });
+  /*
+   * The reading, the photo and the status change commit TOGETHER.
+   *
+   * The start event used to be written after the transition in a try/catch
+   * that swallowed failures. That was fine while the reading was optional;
+   * now that it is mandatory, a trip must never be ONGOING with its start
+   * reading missing. So the columns ride on the transition's own UPDATE and
+   * the trip_event is written by its hook, inside the same transaction.
+   */
+  const booking = await transition(bookingId, 'ONGOING', actor, {
+    meta,
+    extraData:
+      reading != null
+        ? {
+            startOdometerKm: reading,
+            startOdometerPhotoUrl: odometerPhotoUrl,
+            startOdometerPhotoPublicId: odometerPhotoPublicId,
+          }
+        : {},
+    hook: async (tx) => {
+      if (reading != null && vehicleId) {
+        const vehicle = await tx.vehicle.findUnique({
+          where: { id: vehicleId },
+          select: { odometerKm: true },
+        });
+        // Re-checked inside the transaction: the controller's pre-check ran
+        // before the photo upload, and the vehicle may have moved since.
+        if (vehicle && reading < vehicle.odometerKm) {
+          throw ApiError.conflict(
+            `Reading ${reading} km is below the vehicle's last recorded odometer (${vehicle.odometerKm} km)`,
+            'ODOMETER_BELOW_CURRENT',
+          );
+        }
+        // Forward only — an odometer never runs backwards.
+        if (vehicle && reading > vehicle.odometerKm) {
+          await tx.vehicle.update({ where: { id: vehicleId }, data: { odometerKm: reading } });
+        }
+      }
 
-  // Day 11: one durable TripEvent marking where the trip began. This is a
-  // single write at a lifecycle boundary — not part of the GPS ping firehose.
-  try {
-    await tripService.recordStart(bookingId, { lat, lng, odometerKm });
-  } catch (err) {
-    console.error('[trip] failed to record start:', err.message);
-  }
+      await tripService.recordStart(
+        bookingId,
+        {
+          lat,
+          lng,
+          odometerKm: reading,
+          photoUrl: odometerPhotoUrl,
+          photoPublicId: odometerPhotoPublicId,
+          actorId: actor?.id ?? null,
+        },
+        tx,
+      );
+    },
+  });
 
   emit(EVENTS.BOOKING_STATUS_CHANGED, {
     bookingId: booking.id,
@@ -514,6 +613,34 @@ async function rentalReturnLegKm(booking, endLat, endLng) {
 
 async function completeTrip(bookingId, actor, meta, { finalFare = null, odometerKm = null, actualKm = null, lat = null, lng = null } = {}) {
   /*
+   * A DRIVER cannot complete without the END odometer reading and photo.
+   *
+   * Checked FIRST — before the distance reconciliation below writes a new
+   * finalFare — so a refused completion changes nothing. The reading itself
+   * is written by trip.recordOdometer (via /odometer, or by /complete just
+   * before calling this); here we only require that it exists. Ops completing
+   * from the console are exempt, as they are from the start reading.
+   *
+   * NOTE the fare is NOT derived from end - start. actualKm is still what the
+   * driver reports. Billing from the odometer is a pricing decision, not a
+   * side effect of recording it.
+   */
+  const endReading = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: { endOdometerKm: true, endOdometerPhotoUrl: true },
+  });
+  if (!endReading) throw ApiError.notFound('Booking not found');
+  if (actor.role === 'DRIVER' && (endReading.endOdometerKm == null || !endReading.endOdometerPhotoUrl)) {
+    throw ApiError.badRequest(
+      'Enter the end odometer reading and upload its photo before completing the trip',
+      'END_ODOMETER_REQUIRED',
+    );
+  }
+  // The trip_event at the end of this function records the reading on file,
+  // unless the caller passed one explicitly (ops).
+  if (odometerKm == null) odometerKm = endReading.endOdometerKm;
+
+  /*
    * A rental that ends away from its pickup owes the drive home.
    *
    * Folded into actualKm BEFORE recordTripDistance rather than added as a
@@ -643,6 +770,14 @@ async function expire(bookingId, actor, meta) {
   return transition(bookingId, 'EXPIRED', actor, {
     meta,
     reason: 'Pickup time passed without confirmation',
+    /*
+     * An expired booking is an unpaid PENDING one — typically a rider who
+     * applied a code, chose to pay upfront, and never completed the payment.
+     * Without this the redemption made at create stays behind and the rider
+     * is told the code is used on a trip that was never confirmed. Runs in
+     * the transition's own transaction.
+     */
+    hook: (tx) => discountService.release(tx, bookingId),
   });
 }
 

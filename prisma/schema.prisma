@@ -699,6 +699,18 @@ model Booking {
   startOtpVerifiedAt DateTime? @map("start_otp_verified_at")
   startOtpAttempts   Int       @default(0) @map("start_otp_attempts")
 
+  /// The odometer when the trip STARTED, entered by the driver and backed by a
+  /// photo of the dashboard. Required for a driver to move REACHED -> ONGOING.
+  ///
+  /// On the booking rather than only in trip_events so the admin booking view
+  /// shows it without a second query, and so the end reading can be checked
+  /// against it — an end reading below the start is a typo, not a trip.
+  /// Nullable: bookings started before this existed, and ops starting a trip
+  /// from the console, have none.
+  startOdometerKm            Int?    @map("start_odometer_km")
+  startOdometerPhotoUrl      String? @map("start_odometer_photo_url")
+  startOdometerPhotoPublicId String? @map("start_odometer_photo_public_id") @db.VarChar(200)
+
   meta Json @default("{}")
 
   confirmedAt DateTime? @map("confirmed_at")
