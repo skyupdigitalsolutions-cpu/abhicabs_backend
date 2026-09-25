@@ -30,6 +30,7 @@ router.get('/', (req, res) => {
       reports: '/api/v1/admin/reports',
       fareConfigs: '/api/v1/admin/fare-configs',
       surge: '/api/v1/admin/surge',
+      temporaryDrivers: '/api/v1/admin/temporary-drivers',
       vehicles: '/api/v1/vehicles',
       dispatch: '/api/v1/admin/dispatch',
       location: '/api/v1/admin/location',
@@ -74,6 +75,9 @@ router.use('/admin/fare-configs', apiLimiter, require('./fareConfig.routes'));
 // Area tiers and surge percentages. Same permission as rate cards — both
 // change what a customer pays.
 router.use('/admin/surge', apiLimiter, require('./surge.routes'));
+
+// Hired-in drivers and their vehicles, for when demand outruns the fleet.
+router.use('/admin/temporary-drivers', apiLimiter, require('./temporaryDriver.routes'));
 
 // Vehicle catalogue. The browse side is PUBLIC — see the route file for why —
 // so it is mounted outside the /admin tree, next to the other rider routes.

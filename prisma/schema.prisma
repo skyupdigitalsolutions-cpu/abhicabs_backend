@@ -509,6 +509,20 @@ model Vehicle {
   odometerKm Int     @default(0) @map("odometer_km")
   isActive   Boolean @default(true) @map("is_active")
 
+  /**
+   * A hired-in vehicle, not part of the owned fleet.
+   *
+   * It is a REAL vehicles row on purpose. allocations.vehicleId is a required
+   * foreign key, and the GiST exclusion constraint that stops two bookings
+   * holding the same car is keyed on it — so a temporary vehicle that lived
+   * outside this table could not be dispatched at all, and would be the one
+   * vehicle with no double-booking protection.
+   *
+   * The flag exists so compliance reporting and fleet counts can exclude
+   * them: their insurance and fitness papers are the owner's, not ours.
+   */
+  isTemporary Boolean @default(false) @map("is_temporary")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -538,6 +552,21 @@ model Driver {
   documents        Json      @default("{}") // Cloudinary refs + metadata
 
   assignedVehicleId String? @map("assigned_vehicle_id") @db.Uuid
+
+  /**
+   * Hired for a period, not employed.
+   *
+   * Same reasoning as Vehicle.isTemporary: allocations.driverId points here,
+   * so a temp driver has to be a real row. What differs is what we hold —
+   * name, phone and a vehicle number, with no KYC, no licence on file and no
+   * police verification. kycStatus stays PENDING and MUST NOT be read as an
+   * oversight: nobody verified them because the booking was urgent and the
+   * vehicle was someone else's.
+   *
+   * That is a real operational risk the client is choosing to take, and the
+   * flag is what lets a report say how often.
+   */
+  isTemporary Boolean @default(false) @map("is_temporary")
 
   ratingAvg   Decimal   @default(5.00) @map("rating_avg") @db.Decimal(3, 2)
   ratingCount Int       @default(0) @map("rating_count")
