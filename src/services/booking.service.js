@@ -227,6 +227,48 @@ function validateTiming({ pickupAt, returnAt, tripType, scheduled }) {
 async function create(input, actor, meta = {}) {
   const customerId = input.customerId || actor.id;
 
+  /*
+   * Guest contact is accepted ONLY for a guest customer.
+   *
+   * A signed-in rider's name and number come from their customer record. If a
+   * request could set them, one customer could print another's name on an
+   * invoice, and support would have no way to tell which was real.
+   */
+  const customerRow = await prisma.customer.findUnique({
+    where: { userId: customerId },
+    select: { isGuest: true },
+  });
+
+  const guestContact = customerRow?.isGuest
+    ? {
+        guestName: input.guestName ?? null,
+        guestPhone: input.guestPhone ?? null,
+        guestEmail: input.guestEmail ?? null,
+      }
+    : {};
+
+  /*
+   * A guest booking must carry a name and a number.
+   *
+   * Not to force a form — the website collects these on its own booking page
+   * and sends them here — but because a dispatcher cannot serve a trip with
+   * nobody to call. The driver reaches the pickup, the rider is not at the
+   * kerb, and there is no way to resolve it: the account is a throwaway with
+   * no phone on it by design.
+   *
+   * Checked at CREATE rather than at session start, so a visitor can browse
+   * and get quotes without identifying themselves, and is asked only at the
+   * point they commit.
+   */
+  if (customerRow?.isGuest) {
+    if (!guestContact.guestName || !guestContact.guestPhone) {
+      throw ApiError.badRequest(
+        'A name and mobile number are needed so the driver can reach you',
+        'GUEST_CONTACT_REQUIRED',
+      );
+    }
+  }
+
   /**
    * A rental ALWAYS ends where it started.
    *
@@ -384,6 +426,8 @@ async function create(input, actor, meta = {}) {
 
           surgeMultiplier: quote.quote.meta.surgeMultiplier,
           specialRequests: input.specialRequests || null,
+          // Empty for a signed-in rider — see where guestContact is built.
+          ...guestContact,
           meta: { source: meta.source || 'unknown' },
         },
         select: BOOKING_SELECT,

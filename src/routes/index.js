@@ -32,6 +32,7 @@ router.get('/', (req, res) => {
       surge: '/api/v1/admin/surge',
       temporaryDrivers: '/api/v1/admin/temporary-drivers',
       discounts: '/api/v1/admin/discounts',
+      guest: '/api/v1/guest',
       vehicles: '/api/v1/vehicles',
       dispatch: '/api/v1/admin/dispatch',
       location: '/api/v1/admin/location',
@@ -84,6 +85,9 @@ router.use('/admin/temporary-drivers', apiLimiter, require('./temporaryDriver.ro
 const discounts = require('./discount.routes');
 router.use('/admin/discounts', apiLimiter, discounts.adminRouter);
 router.use('/discounts', apiLimiter, discounts.riderRouter);
+
+// Guest checkout. PUBLIC — no auth, which is the point. See the route file.
+router.use('/guest', require('./guest.routes'));
 
 // Vehicle catalogue. The browse side is PUBLIC — see the route file for why —
 // so it is mounted outside the /admin tree, next to the other rider routes.

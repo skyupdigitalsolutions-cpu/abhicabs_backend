@@ -408,6 +408,22 @@ model Customer {
 
   alternatePhone String? @map("alternate_phone") @db.VarChar(20)
   gstin          String? @db.VarChar(15) // retail customers may still supply one
+  /**
+   * Created by a web guest checkout, not by someone who signed up.
+   *
+   * Guests are ISOLATED, deliberately: no phone is written to the users row
+   * and nothing is ever looked up by phone, so a guest cannot be matched to —
+   * or claim — an existing customer's account by typing their number into a
+   * public form. users.phone is unique and the WhatsApp bot resolves by it,
+   * which is exactly why an unverified web form must not.
+   *
+   * The cost is real and worth knowing: a guest who is already a customer
+   * gets a second record, and their guest booking never appears in their app
+   * history. Lifting that needs phone verification, which is a different
+   * product decision.
+   */
+  isGuest Boolean @default(false) @map("is_guest")
+
   loyaltyPoints  Int     @default(0) @map("loyalty_points")
   totalBookings  Int     @default(0) @map("total_bookings")
   notes          String?
@@ -650,6 +666,21 @@ model Booking {
   cancellationReason String?      @map("cancellation_reason")
 
   specialRequests String? @map("special_requests")
+
+  /**
+   * Who to call, for a guest booking.
+   *
+   * Stored on the BOOKING, not only on the user, because a guest's user row
+   * deliberately has no phone. The driver still needs a number at the kerb and
+   * the invoice still needs a name, and both must survive whatever happens to
+   * the account afterwards.
+   *
+   * Null on a normal booking — the customer record is the source of truth
+   * there, and duplicating it would let the two drift.
+   */
+  guestName  String? @map("guest_name") @db.VarChar(120)
+  guestPhone String? @map("guest_phone") @db.VarChar(20)
+  guestEmail String? @map("guest_email") @db.VarChar(180)
 
   // --- trip start code ---------------------------------------------------
   // The six digits the rider reads out to the driver at pickup. Proves the

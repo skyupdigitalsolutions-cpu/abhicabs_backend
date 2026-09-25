@@ -63,6 +63,21 @@ const createBookingSchema = z
     waitingMinutes: z.coerce.number().int().min(0).max(1440).optional(),
     specialRequests: z.string().trim().max(1000).optional().nullable(),
 
+    /*
+     * Guest contact, for a booking made without signing up.
+     *
+     * Carried on the BOOKING because a guest's user row deliberately has no
+     * phone — see guest.service for why. The driver needs a number at the kerb
+     * and the invoice needs a name, whatever happens to the account after.
+     *
+     * Ignored for a signed-in customer: booking.service reads the customer
+     * record instead, and letting a request override it would allow one
+     * customer to print another's name on an invoice.
+     */
+    guestName: z.string().trim().min(2).max(120).optional(),
+    guestPhone: z.string().trim().min(10).max(20).optional(),
+    guestEmail: z.string().trim().email().max(180).optional(),
+
     // Staff booking on behalf of a customer. Ignored for self-service callers —
     // the service uses actor.id unless the caller holds BOOKING_MANAGE.
     customerId: uuid.optional(),
