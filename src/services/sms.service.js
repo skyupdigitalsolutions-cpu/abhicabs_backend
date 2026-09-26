@@ -137,7 +137,17 @@ async function sendOtp({ kind = 'LOGIN', phone, code, expiryMinutes, vars } = {}
     throw new Error(`MSG91 rejected the SMS (HTTP ${res.status}): ${body.message || JSON.stringify(body)}`);
   }
 
-  return { to: maskPhone(mobile), requestId: body.request_id || null };
+  // Logged on SUCCESS too. "Accepted" here only means MSG91 queued it; the
+  // operator can still drop it afterwards (a DLT template or sender-id
+  // mismatch is the usual reason), and that failure never comes back to this
+  // server. The request_id is what to search for in MSG91 -> Reports to see
+  // what actually happened to the message.
+  console.log(
+    `[sms] MSG91 accepted ${kind} SMS to ${maskPhone(mobile)} ` +
+      `(request_id ${body.request_id || 'none returned'})`,
+  );
+
+  return { to: maskPhone(mobile), requestId: body.request_id || null, raw: body };
 }
 
 module.exports = { sendOtp, isConfigured, missingConfig, indianMobile, maskPhone };
