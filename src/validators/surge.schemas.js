@@ -22,14 +22,39 @@ const longitude = z.coerce.number().min(-180).max(180);
 const areaFields = {
   name: z.string().trim().min(2).max(80),
   tier,
+  /*
+   * OPTIONAL, because the map supplies them.
+   *
+   * An admin types "Ramanagara, Karnataka" and the backend geocodes it: the
+   * centre is geography the map knows exactly, and the radius is derived from
+   * the place's own boundary and then widened to cover any airport or service
+   * area that would otherwise fall outside.
+   *
+   * Supplying either overrides the map for that field — usually because the
+   * admin knows something it does not, like a depot serving past the town
+   * limits.
+   */
   centreLat: latitude,
   centreLng: longitude,
   radiusKm: z.coerce.number().int().min(1).max(200),
+  /** Helps the geocoder disambiguate. Two states have a Ramanagara. */
+  state: z.string().trim().min(2).max(80).optional(),
   note: z.string().trim().max(500).nullable().optional(),
   isActive: z.boolean().optional(),
 };
 
-const createAreaSchema = z.object(areaFields);
+const createAreaSchema = z.object({
+  ...Object.fromEntries(Object.entries(areaFields).map(([k, v]) => [k, v.optional()])),
+  // Only these two are genuinely required; everything else the map can answer.
+  name: areaFields.name,
+  tier: areaFields.tier,
+});
+
+/** GET /areas/suggest?name=Ramanagara&state=Karnataka */
+const suggestQuerySchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  state: z.string().trim().min(2).max(80).optional(),
+});
 
 const updateAreaSchema = z
   .object(
@@ -67,4 +92,5 @@ module.exports = {
   idParamSchema,
   tierParamSchema,
   classifyQuerySchema,
+  suggestQuerySchema,
 };

@@ -92,8 +92,30 @@ async function geocode(address) {
     // administrative_area_level_1 — the state. Carried through so the caller
     // can decide serviceability without a second billed lookup.
     state: stateFromComponents(result.address_components),
+    city: cityFromComponents(result.address_components),
+    /*
+     * The place's own extent, when Google has one.
+     *
+     * `bounds` is the administrative footprint and is absent for a street
+     * address — only a locality, district or similar carries it. `viewport`
+     * is always present but is a DISPLAY hint: what a map should show, padded
+     * for legibility, which is larger than the place. Both are returned so the
+     * caller can prefer bounds and fall back knowingly rather than treating
+     * the padded rectangle as a boundary.
+     */
+    bounds: boxOf(result.geometry?.bounds),
+    viewport: boxOf(result.geometry?.viewport),
     provider: NAME,
     estimated: false,
+  };
+}
+
+/** Google's { northeast, southwest } as plain numbers, or null. */
+function boxOf(box) {
+  if (!box?.northeast || !box?.southwest) return null;
+  return {
+    northeast: { lat: box.northeast.lat, lng: box.northeast.lng },
+    southwest: { lat: box.southwest.lat, lng: box.southwest.lng },
   };
 }
 

@@ -206,7 +206,90 @@ const FARE_CFG_CACHE_VERSION = 'v2';
 const fareCfgPrefix = (cityId, vehicleClass) =>
   `fare:cfg:${FARE_CFG_CACHE_VERSION}:${cityId}:${vehicleClass}:`;
 
+/**
+ * Every vehicleClass that any rate card prices, and every serviceable city id.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS: BOUNDING THE CACHE KEYSPACE
+ * ---------------------------------------------------------------------------
+ * `vehicleClass` is free text from the request body — deliberately, so a class
+ * added to the fleet needs no migration. But it is also part of a cache key,
+ * which means an attacker choosing the string chooses the key.
+ *
+ * Negative caching stops those requests reaching Postgres. It does not stop
+ * them reaching Redis: a loop of random classes writes a miss marker each, and
+ * the flood moves from the database to the cache.
+ *
+ * Checking membership FIRST closes both. An unknown class is rejected before a
+ * key is built, so it costs one lookup in an already-cached set and nothing
+ * else. Known classes are unaffected.
+ *
+ * The set is derived from fare_configs, not from vehicle_catalog. Pricing is
+ * what this function does, so the authority on "is this a real class" has to
+ * be the table that prices it — otherwise a class with a rate card but no
+ * catalogue row would be refused a quote it can legitimately be given.
+ */
+const PRICEABLE_KEY = 'fare:priceable:v1';
+
+async function priceableSets() {
+  return cache.getOrSet(
+    PRICEABLE_KEY,
+    async () => {
+      const [classes, cities] = await Promise.all([
+        prisma.fareConfig.findMany({
+          where: { isActive: true },
+          distinct: ['vehicleClass'],
+          select: { vehicleClass: true },
+        }),
+        prisma.city.findMany({ where: { isActive: true }, select: { id: true } }),
+      ]);
+      return {
+        classes: classes.map((c) => c.vehicleClass),
+        cities: cities.map((c) => c.id),
+      };
+    },
+    /*
+     * ONE MINUTE, not the ten this started at.
+     *
+     * This set gates access, so its TTL is the worst case before something
+     * newly added becomes quotable. Rate cards are covered by explicit
+     * invalidation from fareConfig.service, but a CITY has no admin service
+     * yet — it is seeded by migration — so nothing calls out to clear this
+     * when one appears. A short TTL is what makes that safe without inventing
+     * a hook for a service that does not exist.
+     *
+     * The cost is one small query a minute: two indexed reads returning a
+     * handful of rows. Cheap enough that a longer TTL would be optimising the
+     * wrong thing.
+     *
+     * 50 SECONDS, not 60. cache.set applies ±20% jitter — deliberately, so
+     * ten thousand keys written in one second do not all expire in one second
+     * — which turns a 60s TTL into 48–72s. Asking for "quotable within a
+     * minute" and shipping a 72-second worst case would be a promise broken
+     * one time in three. 50 gives 40–60.
+     */
+    { ttl: 50 },
+  );
+}
+
 async function getFareConfig(cityId, vehicleClass, tripType) {
+  /*
+   * Reject an unknown class BEFORE a cache key exists for it.
+   *
+   * The same ApiError as a genuinely missing rate card, on purpose: from the
+   * caller's side "no such class" and "that class is not priced here" are the
+   * same answer, and distinguishing them would tell a prober which classes are
+   * real.
+   */
+  const { classes, cities } = await priceableSets();
+
+  if (!classes.includes(vehicleClass) || !cities.includes(Number(cityId))) {
+    throw ApiError.badRequest(
+      `No fare configured for ${vehicleClass}`,
+      'FARE_CONFIG_MISSING',
+    );
+  }
+
   const key = `${fareCfgPrefix(cityId, vehicleClass)}${tripType}`;
 
   const config = await cache.getOrSet(
@@ -224,12 +307,43 @@ async function getFareConfig(cityId, vehicleClass, tripType) {
         // staged in advance and activates by itself.
         orderBy: { effectiveFrom: 'desc' },
       }),
-    { ttl: cache.TTL.STATIC, cacheNull: false }
+    /*
+     * cacheNull LEFT ON (the default), and that is the point.
+     *
+     * This key is `fare:cfg:{cityId}:{class}:{tripType}` and vehicleClass is
+     * FREE TEXT from the request body — booking.schemas accepts any 2–24
+     * character string, because a class added to the fleet must not need a
+     * migration. So a loop posting random classes at /fares/options produces a
+     * cache miss every time and a database query every time: textbook cache
+     * penetration, on the hottest path in the system.
+     *
+     * Caching the "no such rate card" answer for 30 seconds turns a thousand
+     * junk requests into one query. The short TTL is what makes it safe to
+     * cache a negative at all — a rate card created in the admin panel is
+     * live within half a minute even if the write-side invalidation were
+     * somehow missed, and fareConfig.service invalidates explicitly anyway.
+     */
+    { ttl: cache.TTL.STATIC }
   );
 
   if (!config) {
+    /*
+     * Name the ACTUAL trip type.
+     *
+     * The old ternary said "one-way" for anything that was not a round trip,
+     * so an AIRPORT booking with no rate card reported "No one-way fare
+     * configured for sedan" — which sent whoever read it looking at the wrong
+     * rate cards. That cost real time when airport trips first broke.
+     */
+    const label = {
+      ONE_WAY: 'one-way',
+      ROUND_TRIP: 'round trip',
+      AIRPORT: 'airport',
+      HOURLY: 'hourly rental',
+    }[tripType] || String(tripType).toLowerCase();
+
     throw ApiError.badRequest(
-      `No ${tripType === 'ROUND_TRIP' ? 'round trip' : 'one-way'} fare configured for ${vehicleClass}`,
+      `No ${label} fare configured for ${vehicleClass}`,
       'FARE_CONFIG_MISSING'
     );
   }
@@ -237,17 +351,45 @@ async function getFareConfig(cityId, vehicleClass, tripType) {
 }
 
 async function getCity(cityId) {
+  /*
+   * Same gate as getFareConfig, for the same reason: cityId is caller-supplied
+   * and part of the key, so a sweep of arbitrary integers would mint a Redis
+   * key per value. The set is tiny and already cached, so this costs nothing.
+   */
+  const { cities } = await priceableSets();
+  if (!cities.includes(Number(cityId))) {
+    throw ApiError.badRequest('City is not serviced', 'CITY_NOT_SERVICED');
+  }
+
   const city = await cache.getOrSet(
     `city:${cityId}`,
     () => prisma.city.findFirst({ where: { id: Number(cityId), isActive: true } }),
-    { ttl: cache.TTL.STATIC, cacheNull: false }
+    // Same reasoning as getFareConfig: cityId comes from the request, so a
+    // sweep of arbitrary integers would otherwise reach the database on every
+    // one. A 30-second negative answer closes it.
+    { ttl: cache.TTL.STATIC }
   );
   if (!city) throw ApiError.badRequest('City is not serviced', 'CITY_NOT_SERVICED');
   return city;
 }
 
 /** Invalidate after an admin edits a rate card. */
+/**
+ * Clear the quotable-classes/cities gate.
+ *
+ * Exported so a city admin service — when one exists — can make a new city
+ * quotable immediately rather than waiting out the TTL. Reaching for the key
+ * name from another module would work and would rot the first time it changed.
+ */
+async function invalidatePriceable() {
+  await cache.del(PRICEABLE_KEY);
+}
+
 async function invalidateFareConfig(cityId, vehicleClass) {
+  // A new class is quotable only once the gate knows about it, so this has to
+  // go too — otherwise a rate card created in the admin panel is refused with
+  // a message saying it does not exist.
+  await invalidatePriceable();
   await cache.delByPrefix(fareCfgPrefix(cityId, vehicleClass));
 }
 
@@ -906,6 +1048,7 @@ module.exports = {
   getFareConfig,
   getCity,
   invalidateFareConfig,
+  invalidatePriceable,
   resolveLocation,
   MAX_TRIP_KM,
 };

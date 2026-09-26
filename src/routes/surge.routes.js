@@ -37,6 +37,10 @@ router.patch('/rules/:tier', requirePermission(PERM),
 router.get('/areas/classify', requirePermission(PERM),
   validate({ query: s.classifyQuerySchema }), ctrl.classify);
 
+// Before '/areas/:id', like classify — "suggest" must not be read as an id.
+router.get('/areas/suggest', requirePermission(PERM),
+  validate({ query: s.suggestQuerySchema }), ctrl.suggestArea);
+
 router.get('/areas', requirePermission(PERM), ctrl.listAreas);
 
 router.post('/areas', requirePermission(PERM),

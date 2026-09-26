@@ -8,6 +8,7 @@
 
 const { prisma } = require('../config/prisma');
 const surge = require('../services/surge.service');
+const areaRadius = require('../services/areaRadius.service');
 const audit = require('../services/audit.service');
 const { asyncHandler, ApiError } = require('../utils/helpers');
 
@@ -47,13 +48,53 @@ exports.listAreas = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { count: areas.length, areas: areas.map(serialiseArea) } });
 });
 
+/**
+ * Suggest a centre and radius for a named place, without creating anything.
+ *
+ * The admin form calls this as the name field loses focus and pre-fills the
+ * rest. Separate from create so the admin sees the number, and the reason for
+ * it, BEFORE committing — a radius that silently appeared is one nobody feels
+ * able to question.
+ */
+exports.suggestArea = asyncHandler(async (req, res) => {
+  const query = req.validatedQuery || req.query;
+  const data = await areaRadius.suggest({ name: query.name, state: query.state });
+  res.json({ success: true, data });
+});
+
 exports.createArea = asyncHandler(async (req, res) => {
   const existing = await prisma.serviceArea.findUnique({ where: { name: req.body.name } });
   if (existing) {
     throw ApiError.conflict(`An area named "${req.body.name}" already exists`, 'AREA_EXISTS');
   }
 
-  const area = await prisma.serviceArea.create({ data: req.body });
+  /*
+   * Geocode only what was left blank.
+   *
+   * An admin who typed a centre or a radius meant it — usually because they
+   * know something the map does not, like a depot that serves further than the
+   * town limits. Overwriting that with a derived figure would quietly undo a
+   * deliberate decision.
+   */
+  const needsMap =
+    req.body.centreLat == null || req.body.centreLng == null || req.body.radiusKm == null;
+
+  let derived = null;
+  if (needsMap) {
+    derived = await areaRadius.suggest({ name: req.body.name, state: req.body.state });
+  }
+
+  const data = {
+    name: req.body.name,
+    tier: req.body.tier,
+    centreLat: req.body.centreLat ?? derived.centre.lat,
+    centreLng: req.body.centreLng ?? derived.centre.lng,
+    radiusKm: req.body.radiusKm ?? derived.radiusKm,
+    note: req.body.note ?? (derived ? derived.explanation : null),
+    ...(req.body.isActive != null ? { isActive: req.body.isActive } : {}),
+  };
+
+  const area = await prisma.serviceArea.create({ data });
   await surge.invalidate();
 
   audit.recordAsync({
@@ -68,7 +109,15 @@ exports.createArea = asyncHandler(async (req, res) => {
   res.status(201).json({
     success: true,
     message: `${area.name} added as ${area.tier.toLowerCase()}`,
-    data: { area: serialiseArea(area) },
+    data: {
+      area: serialiseArea(area),
+      // Echoed so the admin can see what the map contributed and why the
+      // radius is what it is, rather than discovering it later.
+      derived: derived
+        ? { radiusKm: derived.derived.radiusKm, source: derived.derived.source,
+            widenedFor: derived.widenedFor, explanation: derived.explanation }
+        : null,
+    },
   });
 });
 
