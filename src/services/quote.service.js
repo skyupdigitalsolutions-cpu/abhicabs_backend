@@ -775,6 +775,19 @@ async function compareTripTypes(input) {
 
   const route = await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
 
+  /*
+   * Surge, resolved exactly as getQuote and quoteAllClasses do — on the PICKUP
+   * point. Both price lines below read surgeInfo.surge, but it was never
+   * defined in this function, so every comparison request threw
+   * "surgeInfo is not defined" (found by a no-undef lint pass; it had been
+   * hidden behind the geocode failure that broke the same routes).
+   */
+  const surgeInfo = await surgeService.resolveSurge({
+    pickupPoint,
+    pickupAt: input.pickupAt,
+    requestedSurge: input.surge,
+  });
+
   const [oneWayConfig, roundConfig] = await Promise.all([
     getFareConfig(input.cityId, input.vehicleClass, 'ONE_WAY').catch(() => null),
     getFareConfig(input.cityId, input.vehicleClass, 'ROUND_TRIP').catch(() => null),

@@ -189,6 +189,35 @@ function stateFromComponents(components) {
   return hit ? hit.long_name || hit.short_name || null : null;
 }
 
+/**
+ * Pull the city or town out of a Google-style address_components array.
+ *
+ * Google has no single "city" type, so this takes the most specific name it
+ * offers, in order:
+ *   locality                      the city or town ("Bengaluru", "Hubballi")
+ *   postal_town                   used instead of locality in some regions
+ *   administrative_area_level_3   the taluk, for a village with no locality
+ *   administrative_area_level_2   the district ("Bangalore Urban"), last resort
+ *
+ * Synchronous and total, like stateFromComponents: it only parses a payload,
+ * and returns null — never throws — when nothing fits, because a geocode must
+ * not fail just because a place has no city name attached.
+ */
+function cityFromComponents(components) {
+  if (!Array.isArray(components)) return null;
+  const order = [
+    'locality',
+    'postal_town',
+    'administrative_area_level_3',
+    'administrative_area_level_2',
+  ];
+  for (const type of order) {
+    const hit = components.find((c) => (c.types || []).includes(type));
+    if (hit) return hit.long_name || hit.short_name || null;
+  }
+  return null;
+}
+
 module.exports = {
   BUILT_IN,
   load,
@@ -197,5 +226,6 @@ module.exports = {
   canonicalState,
   checkPlace,
   stateFromComponents,
+  cityFromComponents,
   normalise,
 };

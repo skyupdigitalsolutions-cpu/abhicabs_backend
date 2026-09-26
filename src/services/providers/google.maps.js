@@ -16,7 +16,11 @@
 
 const axios = require('axios');
 const env = require('../../config/env');
-const { stateFromComponents } = require('../../lib/serviceArea');
+// Both parsers come from serviceArea. cityFromComponents was called below but
+// never imported or defined, so EVERY geocode threw "cityFromComponents is not
+// defined" — the maps breaker then opened and typed addresses could not be
+// located at all (GEOCODE_FAILED on every fare request).
+const { stateFromComponents, cityFromComponents } = require('../../lib/serviceArea');
 
 const NAME = 'google';
 const BASE = 'https://maps.googleapis.com/maps/api';

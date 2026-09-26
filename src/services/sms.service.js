@@ -42,6 +42,17 @@ const TEMPLATES = {
   // only (tripOtp.issue). Add a kind here if another SMS is ever needed.
 };
 
+/**
+ * The env vars still missing for an SMS kind — [] when it is ready. Used to
+ * say exactly what is wrong in the log, instead of silently skipping SMS.
+ */
+function missingConfig(kind = 'LOGIN') {
+  const missing = [];
+  if (!env.msg91.authKey) missing.push('MSG91_AUTH_KEY');
+  if (kind === 'LOGIN' && !env.msg91.templateId) missing.push('MSG91_OTP_TEMPLATE_ID');
+  return missing;
+}
+
 /** True when an SMS of this kind can actually be sent. */
 function isConfigured(kind = 'LOGIN') {
   const template = TEMPLATES[kind] ? TEMPLATES[kind]() : '';
@@ -129,4 +140,4 @@ async function sendOtp({ kind = 'LOGIN', phone, code, expiryMinutes, vars } = {}
   return { to: maskPhone(mobile), requestId: body.request_id || null };
 }
 
-module.exports = { sendOtp, isConfigured, indianMobile, maskPhone };
+module.exports = { sendOtp, isConfigured, missingConfig, indianMobile, maskPhone };

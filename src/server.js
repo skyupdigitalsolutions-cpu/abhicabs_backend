@@ -114,6 +114,19 @@ async function start() {
 
   await new Promise((resolve) => server.listen(env.port, resolve));
   console.log(`[boot] listening on http://localhost:${env.port}  (${env.nodeEnv})`);
+
+  // SMS status, stated once at boot. A missing MSG91 variable used to be
+  // visible only as riders complaining their login code never arrived.
+  try {
+    const missing = require('./services/sms.service').missingConfig('LOGIN');
+    console.log(
+      missing.length
+        ? `[sms] login SMS OFF — missing ${missing.join(', ')} (login codes will go by email)`
+        : '[sms] login SMS ON (MSG91)',
+    );
+  } catch (err) {
+    console.warn(`[sms] could not check SMS config: ${err.message}`);
+  }
 }
 
 let shuttingDown = false;

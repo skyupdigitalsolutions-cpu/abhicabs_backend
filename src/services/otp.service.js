@@ -98,6 +98,16 @@ function safeEqual(a, b) {
 async function deliver(subject, code, recipient = {}) {
   const { phone, email } = recipient;
 
+  // A phone login with SMS switched off used to fall through to email WITHOUT
+  // A WORD in the log — the rider waits for a text that was never attempted,
+  // and nothing says why. Name the missing variable every time it happens.
+  if (phone && !smsService.isConfigured('LOGIN')) {
+    console.warn(
+      `[otp] SMS not configured (missing ${smsService.missingConfig('LOGIN').join(', ')}) — ` +
+        `login code for ${smsService.maskPhone(phone) || subject} will go by email instead`,
+    );
+  }
+
   if (phone && smsService.isConfigured('LOGIN')) {
     try {
       const result = await smsService.sendOtp({
