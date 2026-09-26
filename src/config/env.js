@@ -304,10 +304,25 @@ const env = {
   // login codes); it never crashes the app.
   msg91: {
     authKey: process.env.MSG91_AUTH_KEY || '',
-    // Login code. Template text must contain the ##OTP## variable.
+    /**
+     * The DLT-approved SMS template id, from MSG91 -> SMS -> Templates.
+     *
+     * An SMS template, not an OTP template: the two live in different sections
+     * of MSG91 and are sent through different APIs. This one is used with the
+     * flow API — see sms.service.
+     */
     templateId: process.env.MSG91_OTP_TEMPLATE_ID || '',
-    // Kept for reference: on the OTP API the sender id is bound to the
-    // template inside MSG91 and is not sent per request.
+    /**
+     * Which template variable carries the code.
+     *
+     * The approved text here reads "... login is ##var1##", so 'var1'. It is
+     * a property of the DLT template rather than of this code, so it is
+     * configurable: a template re-approved with ##code## needs an env change,
+     * not a deploy.
+     */
+    otpVar: process.env.MSG91_OTP_VAR || 'var1',
+    // The sender id is bound to the template inside MSG91 and is not sent per
+    // request.
     senderId: process.env.MSG91_SENDER_ID || '',
     countryCode: process.env.MSG91_COUNTRY_CODE || '91',
     timeoutMs: Number(process.env.MSG91_TIMEOUT_MS || 10_000),

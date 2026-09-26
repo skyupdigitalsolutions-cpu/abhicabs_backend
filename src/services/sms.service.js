@@ -33,7 +33,32 @@
 
 const env = require('../config/env');
 
-const OTP_API = 'https://control.msg91.com/api/v5/otp';
+/*
+ * The FLOW API, not the OTP API.
+ *
+ * MSG91 has two send paths and they take different template types:
+ *
+ *   /api/v5/otp    OTP-type templates, created under the OTP section. It
+ *                  substitutes one fixed variable, ##OTP##.
+ *   /api/v5/flow   SMS templates, created under SMS -> Templates. Variables
+ *                  are named — ##var1##, ##var2## — and passed by name.
+ *
+ * The approved DLT template here is an SMS template reading "Dear User, your
+ * OTP for Abhi Cabs login is ##var1##", so the flow API is the one that
+ * matches it. Calling the OTP API against it is why messages were accepted —
+ * the request was well formed and the id was valid — and then never arrived:
+ * `otp` filled nothing, because the template has no ##OTP## to fill.
+ */
+const FLOW_API = 'https://control.msg91.com/api/v5/flow';
+
+/**
+ * The template variable that carries the code.
+ *
+ * Configurable because it is a property of whatever text DLT approved, not of
+ * this code. Change the template to use ##code## and this follows with an env
+ * var rather than a deploy.
+ */
+const OTP_VAR = () => env.msg91.otpVar || 'var1';
 
 /** Which templates are usable. */
 const TEMPLATES = {
@@ -84,25 +109,44 @@ function maskPhone(raw) {
  * @param {'LOGIN'} p.kind              selects the DLT template
  * @param {string} p.phone               any format; normalised here
  * @param {string} p.code                the code WE generated
- * @param {number} [p.expiryMinutes]     shown/used by MSG91; we enforce our own
+ * @param {number} [p.expiryMinutes]     IGNORED on the flow API — expiry is
+ *                                       baked into the approved template text
+ *                                       ("Valid for 5 minutes"). Kept in the
+ *                                       signature so callers need no change,
+ *                                       and because WE enforce the real expiry
+ *                                       in otp.service regardless of what the
+ *                                       message claims.
  * @param {object} [p.vars]              extra template variables, if the
- *                                       approved text has any besides ##OTP##
+ *                                       approved text has any besides the code
  * @returns {Promise<{ to: string, requestId: string|null }>}
  * @throws on any failure — callers decide whether that is fatal
  */
-async function sendOtp({ kind = 'LOGIN', phone, code, expiryMinutes, vars } = {}) {
+async function sendOtp({ kind = 'LOGIN', phone, code, vars } = {}) {
   if (!isConfigured(kind)) {
     throw new Error(`MSG91 ${kind} SMS is not configured`);
   }
   const mobile = indianMobile(phone);
   if (!mobile) throw new Error('Not a valid Indian mobile number');
 
-  const params = new URLSearchParams({
+  /*
+   * Flow API body shape: the template id, then a recipients array where each
+   * entry carries the destination and that recipient's variables.
+   *
+   * The code goes in under the TEMPLATE'S variable name, not a name of our
+   * choosing — MSG91 matches on it, and a mismatch substitutes nothing and
+   * sends a message with a literal ##var1## in it, or none at all.
+   */
+  const payload = {
     template_id: TEMPLATES[kind](),
-    mobile: `${env.msg91.countryCode}${mobile}`,
-    otp: String(code),
-  });
-  if (expiryMinutes) params.set('otp_expiry', String(Math.max(1, Math.round(expiryMinutes))));
+    recipients: [
+      {
+        mobiles: `${env.msg91.countryCode}${mobile}`,
+        [OTP_VAR()]: String(code),
+        // Any extra variables the approved text carries besides the code.
+        ...(vars || {}),
+      },
+    ],
+  };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), env.msg91.timeoutMs);
@@ -110,7 +154,7 @@ async function sendOtp({ kind = 'LOGIN', phone, code, expiryMinutes, vars } = {}
   let res;
   let body;
   try {
-    res = await fetch(`${OTP_API}?${params.toString()}`, {
+    res = await fetch(FLOW_API, {
       method: 'POST',
       headers: {
         // In a header, not the query string: a URL ends up in proxy and
@@ -119,13 +163,15 @@ async function sendOtp({ kind = 'LOGIN', phone, code, expiryMinutes, vars } = {}
         'Content-Type': 'application/json',
         accept: 'application/json',
       },
-      body: JSON.stringify(vars || {}),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     body = await res.json().catch(() => ({}));
   } catch (err) {
     throw new Error(
-      err.name === 'AbortError' ? `MSG91 timed out after ${env.msg91.timeoutMs} ms` : `MSG91 unreachable: ${err.message}`,
+      err.name === 'AbortError'
+        ? `MSG91 timed out after ${env.msg91.timeoutMs} ms`
+        : `MSG91 unreachable: ${err.message}`,
     );
   } finally {
     clearTimeout(timer);
