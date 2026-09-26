@@ -109,7 +109,9 @@ const env = {
 
   /* ---------------- OTP ---------------- */
   otp: {
-    length: Number(process.env.OTP_LENGTH || 6),
+    // 4 digits. Bounded by maxAttempts (5 per code) and maxPerDay (10 codes),
+    // an attacker gets at most 50 guesses a day at 1-in-10,000 each.
+    length: Number(process.env.OTP_LENGTH || 4),
     ttlSeconds: Number(process.env.OTP_TTL_SECONDS || 300),
     maxAttempts: Number(process.env.OTP_MAX_ATTEMPTS || 5),
     resendCooldownSeconds: Number(process.env.OTP_RESEND_COOLDOWN || 30),
@@ -293,11 +295,22 @@ const env = {
     brevoApiKey: process.env.BREVO_API_KEY || '',
   },
 
-  /* ---------------- MSG91 (unused until DLT approval) ---------------- */
+  /* ---------------- MSG91 SMS ---------------- */
+  // SMS is ON when the auth key AND the template id are both set. Used for
+  // LOGIN codes only — the trip start code is shown in the app, never sent.
+  // In India every SMS body must match a DLT-registered template exactly.
+  //
+  // Missing either value simply turns SMS off (email / console take over for
+  // login codes); it never crashes the app.
   msg91: {
     authKey: process.env.MSG91_AUTH_KEY || '',
+    // Login code. Template text must contain the ##OTP## variable.
     templateId: process.env.MSG91_OTP_TEMPLATE_ID || '',
+    // Kept for reference: on the OTP API the sender id is bound to the
+    // template inside MSG91 and is not sent per request.
     senderId: process.env.MSG91_SENDER_ID || '',
+    countryCode: process.env.MSG91_COUNTRY_CODE || '91',
+    timeoutMs: Number(process.env.MSG91_TIMEOUT_MS || 10_000),
   },
 
   /* ---------------- Workers / queues (Day 12) ---------------- */

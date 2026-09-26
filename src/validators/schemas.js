@@ -11,6 +11,7 @@
 
 const { z } = require('zod');
 const customerFields = require('./customer.schemas');
+const { indianPhone } = require('./otp.schemas');
 
 const email = z
   .string()
@@ -74,10 +75,12 @@ const registerSchema = z
   .object({
     name,
     email,
-    phone: z
-      .string()
-      .trim()
-      .regex(/^[0-9+\-\s()]{7,20}$/, 'Enter a valid phone number'),
+    // Normalised to its 10 digits BEFORE it is stored ("+91 98765 43210" ->
+    // "9876543210"). It is now the number the rider signs in with by SMS, and
+    // the unique index compares stored strings — so every account's number
+    // has to be stored the same way, or one person can register twice under
+    // two spellings of the same number.
+    phone: indianPhone,
 
     // Retail unless the person deliberately chooses otherwise. Defaulting here
     // rather than in the service means an app that sends nothing at all still

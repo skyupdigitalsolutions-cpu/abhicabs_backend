@@ -16,6 +16,7 @@ const { ApiError, publicUser } = require('../utils/helpers');
 // once at boot and corporateSelfService does not require auth.service back, so
 // a plain top-level require is safe here.
 const corporateSelf = require('./corporateSelfService.service');
+const smsService = require('./sms.service');
 
 const BCRYPT_ROUNDS = 12;
 
@@ -51,15 +52,52 @@ async function register({ name, email, phone, accountType = 'RETAIL', corporate 
   // for these accounts by construction).
   const hash = await bcrypt.hash(crypto.randomUUID(), BCRYPT_ROUNDS);
 
+  // The schema already normalised it; this is the same rule, re-applied so a
+  // caller that bypasses the schema still stores the canonical 10 digits.
+  const mobile = smsService.indianMobile(phone) || phone || null;
+
+  /*
+   * Refuse a number already on file in ANY spelling.
+   *
+   * The unique index only compares exact strings, and older accounts stored
+   * numbers as typed. Without this, "9876543210" registers happily next to an
+   * existing "+91 98765 43210" — and from then on neither person can sign in
+   * by SMS, because the number matches two accounts.
+   */
+  if (mobile) {
+    const clash = await prisma.$queryRaw`
+      SELECT id FROM users
+      WHERE phone IS NOT NULL
+        AND right(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ${String(mobile).slice(-10)}
+      LIMIT 1
+    `;
+    if (clash.length) {
+      throw ApiError.conflict(
+        'An account with that mobile number already exists. Sign in instead.',
+        'PHONE_TAKEN',
+      );
+    }
+  }
+
   let user;
   try {
-    // Create-and-catch rather than findFirst-then-create: the unique index on
-    // email is atomic, so two simultaneous signups cannot both succeed.
+    // Create-and-catch rather than findFirst-then-create: the unique indexes
+    // are atomic, so two simultaneous signups cannot both succeed.
     user = await prisma.user.create({
-      data: { name, email, password: hash, phone: phone || null, role: 'USER' },
+      data: { name, email, password: hash, phone: mobile, role: 'USER' },
     });
   } catch (err) {
     if (isUniqueViolation(err)) {
+      // Say WHICH one. Every unique failure used to read "email already
+      // exists", including a clash on the phone — sending the person off to
+      // fix an email address that was never the problem.
+      const target = String(err?.meta?.target || '');
+      if (target.includes('phone')) {
+        throw ApiError.conflict(
+          'An account with that mobile number already exists. Sign in instead.',
+          'PHONE_TAKEN',
+        );
+      }
       throw ApiError.conflict('An account with that email already exists', 'EMAIL_TAKEN');
     }
     throw err;

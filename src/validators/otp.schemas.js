@@ -38,19 +38,39 @@ const loginEmail = z
   .email('Enter a valid email address')
   .max(180);
 
-const otpRequestSchema = z.object({
-  email: loginEmail,
-});
+/**
+ * Sign in by MOBILE (code by SMS) or by EMAIL (code by email). Exactly the
+ * identifier the client used must come back on verify, since the account is
+ * resolved from it again.
+ *
+ * The rider app sends `phone`. `email` stays accepted for clients not yet
+ * updated — the driver app — and for accounts with no phone on file.
+ */
+const oneIdentifier = (v) => Boolean(v.phone || v.email);
+const identifierError = {
+  message: 'Enter your mobile number',
+  path: ['phone'],
+};
 
-const otpVerifySchema = z.object({
-  email: loginEmail,
-  code: z
-    .string()
-    .trim()
-    .regex(/^\d{4,8}$/, 'Enter the numeric code from your email'),
-  // Note there is deliberately NO role field here.
-  name: z.string().trim().min(2).max(120).optional(),
-});
+const otpRequestSchema = z
+  .object({
+    phone: indianPhone.optional(),
+    email: loginEmail.optional(),
+  })
+  .refine(oneIdentifier, identifierError);
+
+const otpVerifySchema = z
+  .object({
+    phone: indianPhone.optional(),
+    email: loginEmail.optional(),
+    code: z
+      .string()
+      .trim()
+      .regex(/^\d{4,8}$/, 'Enter the numeric code we sent you'),
+    // Note there is deliberately NO role field here.
+    name: z.string().trim().min(2).max(120).optional(),
+  })
+  .refine(oneIdentifier, identifierError);
 
 const grantPermissionSchema = z.object({
   role: z.enum(['USER', 'ADMIN', 'DRIVER', 'OPS', 'FINANCE', 'FLEET', 'SUPPORT']),

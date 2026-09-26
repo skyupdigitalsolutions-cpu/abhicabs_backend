@@ -170,11 +170,29 @@ const authLimiter = make({
  *
  * otp.service adds a 30s cooldown and a daily cap on top; this is the outer edge.
  */
+
+/**
+ * OTP limiter key: IP plus WHICHEVER identifier was sent.
+ *
+ * It used to read only req.body.email. A phone login has no email, so every
+ * phone request collapsed to "<ip>:none" — one shared bucket per IP. Indian
+ * mobile carriers put thousands of phones behind the same address (CGNAT), so
+ * five logins from anyone on a carrier would have locked out everyone else on
+ * it. The phone is reduced to its last ten digits so "+91 98765 43210" and
+ * "9876543210" share a bucket and respacing a number does not reset the limit.
+ * This runs BEFORE validation, hence the defensive String().
+ */
+function otpKey(req) {
+  const phone = req.body?.phone ? String(req.body.phone).replace(/\D/g, '').slice(-10) : '';
+  const email = req.body?.email ? String(req.body.email).trim().toLowerCase() : '';
+  return `${req.ip}:${phone || email || 'none'}`;
+}
+
 const otpRequestLimiter = make({
   name: 'otpreq',
   windowMs: 15 * 60 * 1000,
   max: 5,
-  keyGenerator: (req) => `${req.ip}:${req.body?.email || 'none'}`,
+  keyGenerator: otpKey,
   msg: 'Too many code requests. Please wait before trying again.',
 });
 
@@ -183,7 +201,7 @@ const otpVerifyLimiter = make({
   name: 'otpver',
   windowMs: 15 * 60 * 1000,
   max: 15,
-  keyGenerator: (req) => `${req.ip}:${req.body?.email || 'none'}`,
+  keyGenerator: otpKey,
   msg: 'Too many verification attempts. Request a new code.',
 });
 

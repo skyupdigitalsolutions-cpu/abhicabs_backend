@@ -544,28 +544,16 @@ async function create(input, actor, meta = {}) {
   /**
    * The code the rider reads out to the driver at pickup.
    *
-   * Minted here rather than at allocation so it exists for the whole life of
-   * the booking — the rider can find it the moment they book, and a trip
-   * assigned five minutes before pickup does not race the email.
+   * Generated and stored here, and shown only in the rider's app — it is not
+   * sent by SMS or email (see tripOtp.issue). Minted at booking rather than at
+   * allocation so it exists for the whole life of the booking: the rider can
+   * see it the moment they book.
    *
-   * Never allowed to fail the booking: the code is on the row and visible in
-   * the app, so a bounced email is an inconvenience, not a reason to lose a
-   * paid booking.
+   * Never allowed to fail the booking. If this write fails the booking still
+   * stands, and ops can mint a code with tripOtp.reissue.
    */
   try {
-    // Looked up here rather than threaded through the creation path: this is
-    // one query on a path that already does several, and it keeps the OTP
-    // feature from touching the booking transaction at all.
-    const customerUser = await prisma.user.findUnique({
-      where: { id: customerId },
-      select: { name: true, email: true },
-    });
-
-    await tripOtp.issue(booking.id, {
-      customer: customerUser,
-      bookingNumber: booking.bookingNumber,
-      pickupAt: booking.pickupAt,
-    });
+    await tripOtp.issue(booking.id);
   } catch (err) {
     console.error(`[booking] could not issue start code for ${booking.bookingNumber}: ${err.message}`);
   }

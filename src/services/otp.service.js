@@ -33,6 +33,7 @@ const crypto = require('crypto');
 const { cache: redis, isCacheUp } = require('../config/redis');
 const env = require('../config/env');
 const emailService = require('./email.service');
+const smsService = require('./sms.service');
 const { ApiError } = require('../utils/helpers');
 
 const OTP_TTL = env.otp.ttlSeconds;
@@ -77,15 +78,42 @@ function safeEqual(a, b) {
  * ------------------------------------------------------------------ */
 
 /**
- * Channel order: email first when we have an address and a configured mailer,
- * console only as a development fallback, then give up.
+ * Channel order:
  *
- * Email is the interim channel while the MSG91 DLT template is in approval. The
- * caller supplies the address because this service is keyed by an opaque
- * subject and has no business reading the user table itself.
+ *   1. SMS (MSG91) — when the caller supplies a phone and SMS is configured.
+ *      The primary channel for rider logins.
+ *   2. Email — when there is an address and a configured mailer. Used for an
+ *      email login, and as a FALLBACK when an SMS send fails, so a MSG91
+ *      outage or a template problem degrades logins instead of stopping them.
+ *   3. Console — development only (OTP_DEV_MODE), never in production.
+ *
+ * The response names the channel that actually carried the code, and a masked
+ * destination, so the app can say "sent to +91 98•••••210" or "check your
+ * email" truthfully — an SMS that fell back to email must not be reported as
+ * an SMS.
+ *
+ * The caller supplies phone and email because this service is keyed by an
+ * opaque subject and has no business reading the user table itself.
  */
 async function deliver(subject, code, recipient = {}) {
-  const email = recipient.email;
+  const { phone, email } = recipient;
+
+  if (phone && smsService.isConfigured('LOGIN')) {
+    try {
+      const result = await smsService.sendOtp({
+        kind: 'LOGIN',
+        phone,
+        code,
+        expiryMinutes: OTP_TTL / 60,
+      });
+      return { delivered: true, channel: 'sms', to: result.to };
+    } catch (err) {
+      // Loud: a silent fallback would hide a broken SMS setup for weeks.
+      console.error(`[otp] SMS failed for ${smsService.maskPhone(phone) || subject}: ${err.message}`);
+      if (!(email && emailService.isConfigured()) && !env.otp.devMode) throw err;
+      // otherwise fall through to email / console below
+    }
+  }
 
   if (email && emailService.isConfigured()) {
     const result = await emailService.sendOtpEmail({
@@ -100,7 +128,7 @@ async function deliver(subject, code, recipient = {}) {
   if (env.otp.devMode) {
     console.log('');
     console.log('  ┌──────────────────────────────────────────┐');
-    const label = String(recipient.email || subject).slice(0, 28);
+    const label = String(smsService.maskPhone(phone) || email || subject).slice(0, 28);
     console.log(`  │  OTP for ${label.padEnd(28)} ${code.padEnd(8)} │`);
     console.log(`  │  valid for ${String(OTP_TTL / 60).padEnd(28)}min │`);
     console.log('  └──────────────────────────────────────────┘');
@@ -108,8 +136,6 @@ async function deliver(subject, code, recipient = {}) {
     return { delivered: true, channel: 'console' };
   }
 
-  // TODO: MSG91 SMS once the DLT template is approved.
-  //   await axios.post('https://control.msg91.com/api/v5/otp', {...})
   throw ApiError.badRequest('OTP delivery is not configured', 'OTP_PROVIDER_MISSING');
 }
 
@@ -177,7 +203,7 @@ async function requestOtp(subject, recipient = {}) {
 
     if (err instanceof ApiError) throw err;
 
-    console.error(`[otp] delivery failed for ${recipient.email || subject}: ${err.message}`);
+    console.error(`[otp] delivery failed for ${smsService.maskPhone(recipient.phone) || recipient.email || subject}: ${err.message}`);
     throw new ApiError(
       502,
       'OTP_DELIVERY_FAILED',
@@ -220,8 +246,9 @@ async function verifyOtp(subject, code) {
   }
 
   // --- attempt cap: bounds brute force ---
-  // A 6-digit code has a million combinations. Five tries makes guessing
-  // hopeless; unlimited tries makes it trivial.
+  // A 4-digit code has ten thousand combinations. Five tries per code, and
+  // ten codes a day (maxPerDay), caps a guesser at 50 attempts a day — a
+  // 0.5% chance. Unlimited tries would make it trivial.
   const attempts = Number(record.attempts || 0);
   if (attempts >= MAX_ATTEMPTS) {
     await redis.del(key(subject));

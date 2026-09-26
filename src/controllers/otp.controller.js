@@ -13,7 +13,7 @@ const meta = (req) => ({
 });
 
 exports.requestOtp = asyncHandler(async (req, res) => {
-  const data = await authOtp.requestOtp(req.body.email);
+  const data = await authOtp.requestOtp({ phone: req.body.phone, email: req.body.email });
   res.json({ success: true, message: data.message, data });
 });
 

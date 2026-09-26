@@ -45,10 +45,17 @@
 
 const { prisma } = require('../config/prisma');
 const { ApiError } = require('../utils/helpers');
-const emailService = require('./email.service');
 
-/** Six digits, matching the login code so riders are not learning two formats. */
-const OTP_LENGTH = 6;
+/**
+ * Four digits, matching the login code so riders are not learning two formats,
+ * and short enough to read out across a car window.
+ *
+ * Four is enough HERE because of how it is attacked: only the driver assigned
+ * to this booking can submit it (assertDriverOnBooking), only while the trip
+ * is at pickup, and MAX_ATTEMPTS locks it after five wrong tries — so a
+ * guesser gets five chances in ten thousand, once, on one trip.
+ */
+const OTP_LENGTH = 4;
 
 /**
  * Wrong guesses before the code is locked.
@@ -72,33 +79,30 @@ function generateCode() {
  * ------------------------------------------------------------------ */
 
 /**
- * Mints the code for a booking and emails it to the customer.
+ * Mints the code for a booking and stores it on the booking. NOTHING IS SENT.
  *
- * Called at booking creation. Delivery failure is swallowed on purpose: the
- * code is on the booking and the rider can read it in the app, so a bounced
- * email must not roll back a paid booking. It is logged instead.
+ * The code used to be emailed, then texted. It no longer leaves the backend
+ * except through the rider's own booking detail in the app (the only select
+ * that includes it — see BOOKING_OTP_SELECT). The rider reads it off their
+ * trip screen, the driver types it in, and lifecycle.startTrip checks it.
+ *
+ * Keeping it in the app alone means no SMS cost per booking, no DLT template
+ * for it, no delivery failures to handle, and no copy of the code sitting in
+ * an inbox or a message thread after the trip.
+ *
+ * The second argument is accepted and ignored so existing callers need no
+ * change.
+ *
+ * @returns {Promise<string>} the code
  */
-async function issue(bookingId, { customer, bookingNumber, pickupAt } = {}) {
+// eslint-disable-next-line no-unused-vars
+async function issue(bookingId, _opts = {}) {
   const code = generateCode();
 
   await prisma.booking.update({
     where: { id: bookingId },
     data: { startOtp: code, startOtpIssuedAt: new Date(), startOtpAttempts: 0 },
   });
-
-  if (customer?.email && emailService.isConfigured()) {
-    try {
-      await emailService.sendTripStartOtpEmail({
-        to: customer.email,
-        name: customer.name,
-        code,
-        bookingNumber,
-        pickupAt,
-      });
-    } catch (err) {
-      console.error(`[tripOtp] could not email start code for ${bookingNumber}: ${err.message}`);
-    }
-  }
 
   return code;
 }
@@ -178,8 +182,13 @@ async function verify(bookingId, code) {
 }
 
 /**
- * Re-issues a code. For the case where the rider cannot find the email and the
- * app is not to hand — an ops action, not something the driver can trigger.
+ * Re-issues a code, with the wrong-attempt counter back at zero. An ops action,
+ * never something the driver can trigger.
+ *
+ * For a code that locked after too many wrong tries, or one the rider thinks
+ * was seen by someone else. The new code replaces the old on the rider's trip
+ * screen at once; the response also returns it, so ops can read it out to a
+ * rider on the phone whose app will not open.
  */
 async function reissue(bookingId) {
   const booking = await prisma.booking.findUnique({
@@ -189,7 +198,6 @@ async function reissue(bookingId) {
       bookingNumber: true,
       status: true,
       startOtpVerifiedAt: true,
-      customer: { select: { user: { select: { name: true, email: true } } } },
     },
   });
 
@@ -198,10 +206,7 @@ async function reissue(bookingId) {
     throw ApiError.badRequest('This trip has already started', 'TRIP_ALREADY_STARTED');
   }
 
-  const code = await issue(booking.id, {
-    customer: booking.customer?.user,
-    bookingNumber: booking.bookingNumber,
-  });
+  const code = await issue(booking.id);
 
   return { reissued: true, code };
 }

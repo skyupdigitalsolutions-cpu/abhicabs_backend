@@ -8,16 +8,24 @@
  * passwords.
  *
  * ---------------------------------------------------------------------------
- * WHY EMAIL IS THE IDENTIFIER
+ * THE IDENTIFIER: PHONE (SMS), OR EMAIL
  * ---------------------------------------------------------------------------
- * users.email is UNIQUE; users.phone is only INDEXED. A phone lookup can match
- * several rows — an admin-created DRIVER and a self-registered USER commonly
- * share a number — which leaves the login guessing which account the person
- * meant. An email lookup matches exactly one row or none, so the account the
- * code is sent to is provably the account the session is issued for.
+ * Riders sign in with their MOBILE NUMBER and receive the code by SMS. Email
+ * is still accepted, for clients not yet updated (the driver app) and for
+ * accounts with no phone; the code then goes to that inbox.
  *
- * It also lines up with delivery: the code goes to an inbox, so asking for the
- * address of that inbox is the one thing the user can actually verify.
+ * Phone lookups used to be avoided because users.phone was not unique. It is
+ * now (20260924140000_unique_phone) — but uniqueness is on the STORED STRING,
+ * and registration historically stored numbers exactly as typed. The same
+ * person can therefore be on file as "+91 98765 43210", "09876543210" or
+ * "9876543210", and an exact-match lookup would tell them they have no
+ * account. findAccountByPhone compares the last ten DIGITS instead, which
+ * matches every one of those spellings without rewriting stored data.
+ *
+ * If that comparison finds TWO accounts — one number spelled two ways on two
+ * rows — the login refuses rather than guessing. Sending one person's code to
+ * a session for someone else's account is the failure this whole design
+ * exists to prevent.
  *
  * ---------------------------------------------------------------------------
  * ACCOUNT-CREATION POLICY
@@ -29,6 +37,7 @@
  */
 
 const otpService = require('./otp.service');
+const smsService = require('./sms.service');
 const tokens = require('../utils/tokens');
 const { prisma } = require('../config/prisma');
 const { ApiError, publicUser } = require('../utils/helpers');
@@ -63,6 +72,45 @@ async function findAccountByEmail(rawEmail) {
   });
 }
 
+/**
+ * Resolve a mobile number to exactly one USER/DRIVER account, matching on the
+ * last ten digits of what is stored (see the header for why).
+ *
+ * @returns {Promise<object|null>} the user, or null when none match
+ * @throws PHONE_AMBIGUOUS when more than one account matches
+ */
+async function findAccountByPhone(rawPhone) {
+  const mobile = smsService.indianMobile(rawPhone);
+  if (!mobile) return null;
+
+  // Raw SQL because the comparison is on a NORMALISED column value, which
+  // Prisma's query builder cannot express. `mobile` is a bound parameter.
+  // LIMIT 2: all we need to know is "one" or "more than one".
+  const rows = await prisma.$queryRaw`
+    SELECT id FROM users
+    WHERE phone IS NOT NULL
+      AND right(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ${mobile}
+      AND role IN ('USER', 'DRIVER')
+    LIMIT 2
+  `;
+
+  if (rows.length === 0) return null;
+  if (rows.length > 1) {
+    throw ApiError.conflict(
+      'This mobile number is linked to more than one account. Please contact support.',
+      'PHONE_AMBIGUOUS',
+    );
+  }
+  return prisma.user.findUnique({ where: { id: rows[0].id } });
+}
+
+/** Phone wins when both are sent — it is the identifier the rider app uses. */
+async function findAccount({ phone, email } = {}) {
+  if (phone) return findAccountByPhone(phone);
+  if (email) return findAccountByEmail(email);
+  return null;
+}
+
 /* ------------------------------------------------------------------ *
  * Request
  * ------------------------------------------------------------------ */
@@ -75,12 +123,15 @@ async function findAccountByEmail(rawEmail) {
  * here. If that ever changes, return a generic reply the way
  * passwordReset.service.js does.)
  */
-async function requestOtp(email) {
-  const existing = await findAccountByEmail(email);
+async function requestOtp({ phone, email } = {}) {
+  const byPhone = Boolean(phone);
+  const existing = await findAccount({ phone, email });
 
   if (!existing) {
     throw ApiError.notFound(
-      'No account found for this email. Please register first.',
+      byPhone
+        ? 'No account found for this mobile number. Please register first.'
+        : 'No account found for this email. Please register first.',
       'NOT_REGISTERED',
     );
   }
@@ -90,38 +141,51 @@ async function requestOtp(email) {
   }
 
   // A phone-first account carries a generated phone_<number>@placeholder.local
-  // address. Nothing can be delivered there, so refuse plainly rather than
-  // reporting success for a message that will bounce.
-  if (isPlaceholderEmail(existing.email)) {
+  // address. It can never receive mail, so it is never offered as a channel.
+  const realEmail = isPlaceholderEmail(existing.email) ? null : existing.email;
+
+  // An EMAIL login must have a deliverable address — that is where the rider
+  // is looking for the code. A PHONE login does not need one: the code goes
+  // by SMS, and a real address is only the fallback if SMS fails.
+  if (!byPhone && !realEmail) {
     throw ApiError.badRequest(
-      'This account has no usable email address. Please contact support.',
+      'This account has no usable email address. Sign in with your mobile number instead.',
       'NO_EMAIL_ON_ACCOUNT',
     );
   }
 
-  // Keyed by ACCOUNT ID, not by the typed address: the Redis attempt counter,
-  // cooldown and daily cap then follow the account, and cannot be reset by
-  // varying the spelling of an address or by reaching the same account through
-  // a different identifier later.
+  // Keyed by ACCOUNT ID, not by the typed identifier: the Redis attempt
+  // counter, cooldown and daily cap follow the account, and cannot be reset by
+  // switching between phone and email or by respelling either.
   const result = await otpService.requestOtp(existing.id, {
-    email: existing.email,
+    // Only a phone login is delivered by SMS. An email login keeps going to
+    // the inbox the person just typed, which is where they are looking.
+    phone: byPhone ? existing.phone : null,
+    email: realEmail,
     name: existing.name,
   });
 
-  return {
-    ...result,
-    message: result.sentTo
-      ? `A verification code has been sent to ${result.sentTo}`
-      : 'A verification code has been sent',
-  };
+  let message = 'A verification code has been sent';
+  if (result.channel === 'sms') message = `A verification code has been sent by SMS to ${result.sentTo}`;
+  else if (result.sentTo) message = `A verification code has been sent to ${result.sentTo}`;
+
+  return { ...result, message };
 }
 
 /* ------------------------------------------------------------------ *
  * Verify → log in
  * ------------------------------------------------------------------ */
 
-async function verifyAndLogin({ email, code }, meta = {}) {
-  const user = await findAccountByEmail(email);
+async function verifyAndLogin({ phone, email, code }, meta = {}) {
+  let user;
+  try {
+    user = await findAccount({ phone, email });
+  } catch (err) {
+    // An ambiguous number never had a code issued (requestOtp refused it),
+    // so report it the same way as any other code that cannot match.
+    if (err?.code === 'PHONE_AMBIGUOUS') user = null;
+    else throw err;
+  }
 
   // Resolved BEFORE the code is checked, because the code is stored under the
   // account id. No account means there is no bucket to check against, so this
@@ -155,4 +219,4 @@ async function verifyAndLogin({ email, code }, meta = {}) {
   return { user: publicUser(user), accessToken, refreshToken };
 }
 
-module.exports = { requestOtp, verifyAndLogin };
+module.exports = { requestOtp, verifyAndLogin, findAccountByPhone };
