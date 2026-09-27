@@ -24,7 +24,9 @@ const CONFIG = {
   minimumFare: 200,
   driverAllowance: 400,   // bata per day
   nightAllowance: 300,    // flat
-  nightChargePct: 10,     // plus 10% of base + distance
+  nightChargePct: 10,     // plus 10% of the distance charge
+  // Retired: kept here only to prove the engine ignores it. See the
+  // "never uplifts a base fare" test below.
   nightStartHour: 21,
   nightStartMinute: 55,
   nightEndHour: 6,
@@ -50,6 +52,62 @@ const quote = (overrides = {}, config = CONFIG) =>
     },
     config
   );
+
+describe('demand pricing — disabled', () => {
+  // These guard a DELIBERATE product decision, not an implementation detail.
+  // If someone re-enables surge, these fail loudly rather than a premium
+  // quietly reappearing on every fare.
+
+  it('charges nothing extra when a caller requests a surge multiplier', () => {
+    const plain = quote();
+    const surged = quote({ surge: 2 });
+    expect(surged.surgeAmount).toBe('0.00');
+    expect(surged.total).toBe(plain.total);
+  });
+
+  it('ignores a surge band left open on the rate card', () => {
+    // The migration pins min/max_surge to 1.00, but the engine must not depend
+    // on that having been run — an un-migrated row must still price at 1x.
+    const staleBand = { ...CONFIG, minSurge: 0.5, maxSurge: 2 };
+    const q = fare.computeFare(
+      { tripType: 'ONE_WAY', distanceKm: 20, durationMin: 40, pickupAt: ist('12:00'), surge: 2 },
+      staleBand
+    );
+    expect(q.meta.surgeMultiplier).toBe('1.00');
+    expect(q.surgeAmount).toBe('0.00');
+  });
+
+  it('shows no demand pricing line in the breakdown', () => {
+    const q = quote({ surge: 1.8 });
+    expect(q.breakdown.some((l) => l.label.startsWith('Demand pricing'))).toBe(false);
+  });
+});
+
+describe('return leg — the full distance, both ways', () => {
+  it('charges the return at 100% of the outbound distance', () => {
+    const q = quote({ distanceKm: 100 }, { ...CONFIG, returnEmptyPct: 100 });
+    // 100 km x 14 = 1400 out, and the same again for the empty return.
+    expect(q.distance).toBe('1400.00');
+    expect(q.returnEmpty).toBe('1400.00');
+  });
+
+  it('labels a full return in kilometres, not as a percentage', () => {
+    // A rider reads "100.00 km x 14.00/km" and can check it against the
+    // outbound line above. "100% of distance" has to be decoded first.
+    const q = quote({ distanceKm: 100 }, { ...CONFIG, returnEmptyPct: 100 });
+    const line = q.breakdown.find((l) => l.label.startsWith('Return journey'));
+    expect(line).toBeDefined();
+    expect(line.label).toContain('km x');
+  });
+
+  it('never charges a return leg on a round trip, whose distance is already doubled', () => {
+    const q = quote(
+      { tripType: 'ROUND_TRIP', distanceKm: 200, returnAt: ist('18:00') },
+      { ...CONFIG, returnEmptyPct: 100 }
+    );
+    expect(q.returnEmpty).toBe('0.00');
+  });
+});
 
 describe('night window — 21:55 to 06:00, to the minute', () => {
   it('does not charge at 21:54, one minute before the window opens', () => {
@@ -100,8 +158,20 @@ describe('night window — 21:55 to 06:00, to the minute', () => {
 
   it('adds the flat allowance and the percentage together', () => {
     const q = quote({ pickupAt: ist('23:00') });
-    // base 100 + distance (20 x 14 = 280) = 380; 10% = 38; plus flat 300.
-    expect(q.night).toBe('338.00');
+    // The percentage is a share of the DISTANCE charge alone: the base fare was
+    // retired, so there is no longer a flat component for it to uplift.
+    // distance (20 x 14 = 280); 10% = 28; plus flat 300.
+    expect(q.night).toBe('328.00');
+  });
+
+  it('never uplifts a base fare, because there is no longer one to uplift', () => {
+    // Guards the retirement itself. A rate card row that still carries a
+    // base_fare (one seeded before the migration, say) must not put it back
+    // into the fare — the engine hardcodes a zero base and ignores the column.
+    const withStaleBase = quote({ pickupAt: ist('23:00') }, { ...CONFIG, baseFare: 9999 });
+    expect(withStaleBase.base).toBe('0.00');
+    expect(withStaleBase.night).toBe('328.00');
+    expect(withStaleBase.breakdown.some((l) => l.label === 'Base fare')).toBe(false);
   });
 });
 
@@ -219,7 +289,7 @@ describe('invoice lines', () => {
     expect(night).toBeDefined();
     expect(night.description).toContain('21:55');
     expect(night.description).toContain('06:00');
-    expect(night.amount).toBe('338.00');
+    expect(night.amount).toBe('328.00');
   });
 
   it('shows the driver allowance with the per-day rate and day count', () => {

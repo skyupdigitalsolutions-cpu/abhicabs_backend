@@ -106,6 +106,17 @@ function assertDistinctEndpoints(tripType, pickupPoint, dropPoint) {
 const REQUIRES_OUTSTATION_DROP = new Set(['ONE_WAY', 'ROUND_TRIP']);
 
 /**
+ * Fallback city-limits radius, in km, for a city row that predates the
+ * local_radius_km column — or, more realistically, for one still being served
+ * from a cache entry written before the migration ran.
+ *
+ * Matches the schema default. Deliberately NOT a fallback to radiusKm: that is
+ * the bug this whole change exists to fix, and a stale cache must not be able
+ * to reintroduce it.
+ */
+const DEFAULT_LOCAL_RADIUS_KM = 25;
+
+/**
  * Is this drop inside the pickup city?
  *
  * "Same city" is decided by the pickup city's own service radius, not by
@@ -118,12 +129,57 @@ const REQUIRES_OUTSTATION_DROP = new Set(['ONE_WAY', 'ROUND_TRIP']);
  * would cost an API call per quote and then hinge on whether a provider spells
  * a suburb as its own locality or as part of the parent city.
  */
-function isDropInsideCity(dropPoint, city) {
-  return geo.isWithinRadius(
-    dropPoint.lat, dropPoint.lng,
-    city.centreLat, city.centreLng,
-    Number(city.radiusKm)
-  );
+function cityLimitsKm(city) {
+  /*
+   * localRadiusKm, NOT radiusKm. The two answer different questions and using
+   * the wrong one is what made this function wrong for months:
+   *
+   *   radiusKm       service REACH — "will we send a car here?" Deliberately
+   *                  generous; Bengaluru is 60 km so outskirts pickups work.
+   *   localRadiusKm  city LIMITS   — "is this still the same city?" Must be
+   *                  tight, because anything past the urban edge is a real
+   *                  outstation trip.
+   *
+   * With the 60 km service radius standing in for city limits, every satellite
+   * town read as "inside Bengaluru": Hoskote 25 km, Nelamangala 26 km,
+   * Attibele 28 km, Bidadi 30 km, Anekal 31 km, Devanahalli 33 km, Hosur 36 km
+   * (a different STATE), Malur 38 km, Magadi 40 km, Ramanagara 44 km,
+   * Kanakapura 51 km, Chikkaballapur 54 km. A rider booking Bengaluru → Hosur
+   * was told their pickup and drop were in the same city and silently
+   * downgraded to a local rental.
+   *
+   * The fallback matters: `city` is read through a long-lived cache, so an
+   * entry cached before the column existed would yield undefined here. Falling
+   * back to the schema default rather than to radiusKm means a stale cache
+   * cannot resurrect the bug — it just uses a slightly generic city size.
+   */
+  const local = Number(city.localRadiusKm);
+  if (Number.isFinite(local) && local > 0) {
+    // Never wider than what we actually serve. A "city" bigger than the
+    // service area is meaningless and would re-widen this test.
+    return Math.min(local, Number(city.radiusKm));
+  }
+  return Math.min(DEFAULT_LOCAL_RADIUS_KM, Number(city.radiusKm));
+}
+
+/**
+ * Is this trip entirely inside the operating city?
+ *
+ * BOTH endpoints are tested, not just the drop.
+ *
+ * Checking only the drop got the reverse case wrong in exactly the same way:
+ * a pickup in Ramanagara with a drop in Koramangala is an inbound outstation
+ * trip, but the drop is inside the city, so it was downgraded to a local
+ * rental — a product that cannot serve it, since the car has to travel 44 km
+ * before the meter starts. A trip is local only when it starts AND ends in
+ * town.
+ */
+function isSameCityTrip(pickupPoint, dropPoint, city) {
+  const limit = cityLimitsKm(city);
+  const inside = (p) =>
+    p &&
+    geo.isWithinRadius(p.lat, p.lng, city.centreLat, city.centreLng, limit);
+  return inside(pickupPoint) && inside(dropPoint);
 }
 
 /**
@@ -144,16 +200,18 @@ function isDropInsideCity(dropPoint, city) {
  * Returns null when no switch applies, so callers can treat it as "did anything
  * change?" rather than having to know the rules.
  */
-async function resolveLocalSwitch(tripType, dropPoint, city) {
+async function resolveLocalSwitch(tripType, pickupPoint, dropPoint, city, chosenPackageId) {
   if (!REQUIRES_OUTSTATION_DROP.has(tripType)) return null;
-  if (!isDropInsideCity(dropPoint, city)) return null;
+  if (!isSameCityTrip(pickupPoint, dropPoint, city)) return null;
 
-  const pkg = await prisma.rentalPackage.findFirst({
+  // Distinct labels, cheapest row per label, shortest first — the same shape
+  // the rental picker already renders, so the app can show these directly.
+  const packages = await prisma.rentalPackage.findMany({
     where: { cityId: Number(city.id), isActive: true },
     orderBy: [{ includedHours: 'asc' }, { packageFare: 'asc' }],
   });
 
-  if (!pkg) {
+  if (packages.length === 0) {
     // A city with no rental packages cannot serve a local trip at all, so there
     // is nothing to switch TO. Saying so is better than switching to a product
     // that will fail at the next step.
@@ -163,19 +221,73 @@ async function resolveLocalSwitch(tripType, dropPoint, city) {
     );
   }
 
-  return {
+  const byLabel = [];
+  const seen = new Set();
+  for (const p of packages) {
+    if (seen.has(p.label)) continue;
+    seen.add(p.label);
+    byLabel.push({
+      rentalPackageId: p.id,
+      label: p.label,
+      includedHours: p.includedHours,
+      includedKm: p.includedKm,
+    });
+  }
+
+  /*
+   * THE RIDER CHOOSES THE PACKAGE. WE DO NOT.
+   *
+   * This used to pick the shortest active package — 4 hrs / 40 km — and quote
+   * on it. The reasoning was "the smallest commitment that can serve the trip",
+   * but a rental is sold by DURATION, and the shortest one is only the right
+   * answer if the rider happens to be done in four hours. Nobody asked them.
+   * They landed on a fare for terms they had never seen, and the only clue was
+   * one line of small print in a notice modal.
+   *
+   * So when no package has been chosen yet, we refuse to guess: the switch is
+   * reported with the available packages attached and the app asks. Once the
+   * rider picks one it comes back on the next quote as chosenPackageId and we
+   * price it.
+   *
+   * `needsPackage` is what the client branches on, rather than having to infer
+   * it from a null id.
+   */
+  const chosen = chosenPackageId
+    ? byLabel.find((p) => p.rentalPackageId === Number(chosenPackageId)) ?? null
+    : null;
+
+  const base = {
     from: tripType,
     to: 'HOURLY',
-    reason: 'DROP_INSIDE_PICKUP_CITY',
+    reason: 'TRIP_INSIDE_PICKUP_CITY',
     // Copy for the app to show. Written here rather than in the client so every
     // surface says the same thing.
     title: 'Switched to Local',
     message:
-      `Since your pickup and drop-off are both in ${city.name}, ` +
-      `we've switched your outstation trip to a local ride.`,
-    rentalPackageId: pkg.id,
-    rentalPackageLabel: pkg.label,
-    rentalHours: pkg.includedHours,
+      `Both your pickup and drop-off are inside ${city.name}, so this is a ` +
+      `local trip rather than an outstation one.`,
+    packages: byLabel,
+  };
+
+  // A package the rider explicitly asked for (or one carried over from an
+  // earlier quote in this flow). Price it.
+  if (chosen || chosenPackageId) {
+    return {
+      ...base,
+      needsPackage: false,
+      rentalPackageId: chosen ? chosen.rentalPackageId : Number(chosenPackageId),
+      rentalPackageLabel: chosen ? chosen.label : null,
+      rentalHours: chosen ? chosen.includedHours : null,
+    };
+  }
+
+  return {
+    ...base,
+    needsPackage: true,
+    prompt: 'Choose how long you need the cab for.',
+    rentalPackageId: null,
+    rentalPackageLabel: null,
+    rentalHours: null,
   };
 }
 
@@ -201,8 +313,10 @@ async function resolveLocalSwitch(tripType, dropPoint, city) {
  *
  * Bump this whenever a migration changes fare_configs.
  *   v2 — 20260928090000_oneway_full_return (return_empty_pct -> 100)
+ *   v3 — 20260929090000_retire_base_fare   (base_fare -> 0)
+ *   v4 — 20260929092000_disable_demand_pricing (min/max_surge -> 1)
  */
-const FARE_CFG_CACHE_VERSION = 'v2';
+const FARE_CFG_CACHE_VERSION = 'v4';
 const fareCfgPrefix = (cityId, vehicleClass) =>
   `fare:cfg:${FARE_CFG_CACHE_VERSION}:${cityId}:${vehicleClass}:`;
 
@@ -628,7 +742,18 @@ async function getQuote(input) {
     requestedSurge: surge,
   });
 
-  const localSwitch = await resolveLocalSwitch(tripType, dropPoint, city);
+  const localSwitch = await resolveLocalSwitch(
+    tripType, pickupPoint, dropPoint, city, rentalPackageId,
+  );
+
+  // See the matching guard in the fare-list path: a rental with no package has
+  // no fare, and inventing one would quote terms the rider never chose.
+  if (localSwitch && localSwitch.needsPackage) {
+    throw new ApiError(409, 'LOCAL_PACKAGE_REQUIRED', localSwitch.message, {
+      switchedToLocal: localSwitch,
+    });
+  }
+
   const effectiveTripType = localSwitch ? localSwitch.to : tripType;
   const effectivePackageId = localSwitch ? localSwitch.rentalPackageId : rentalPackageId;
   const effectiveHours = localSwitch ? null : rentalHours;
@@ -945,7 +1070,26 @@ async function quoteAllClasses(input) {
     requestedSurge: input.surge,
   });
 
-  const localSwitch = await resolveLocalSwitch(input.tripType, dropPoint, city);
+  const localSwitch = await resolveLocalSwitch(
+    input.tripType, pickupPoint, dropPoint, city, input.rentalPackageId,
+  );
+
+  /*
+   * A switch with no package chosen cannot be priced, because a rental's fare
+   * IS its package. Rather than guess a package and show a fare for terms the
+   * rider never agreed to, refuse and hand back everything the app needs to
+   * ask: the notice copy and the list of packages.
+   *
+   * 409 rather than 400 — nothing about the request was malformed. It is a
+   * conflict between the product asked for and the trip described, and it is
+   * resolved by the rider answering one question, not by fixing a field.
+   */
+  if (localSwitch && localSwitch.needsPackage) {
+    throw new ApiError(409, 'LOCAL_PACKAGE_REQUIRED', localSwitch.message, {
+      switchedToLocal: localSwitch,
+    });
+  }
+
   const effectiveTripType = localSwitch ? localSwitch.to : input.tripType;
   const effectivePackageId = localSwitch ? localSwitch.rentalPackageId : input.rentalPackageId;
   const effectiveHours = localSwitch ? null : input.rentalHours;

@@ -271,6 +271,19 @@ model City {
   centreLng Decimal @map("centre_lng") @db.Decimal(10, 7)
   radiusKm  Int     @default(50) @map("radius_km")
 
+  /// CITY LIMITS — a different question from radiusKm above.
+  ///
+  /// radiusKm is service REACH: how far out we will send a car. It is
+  /// deliberately generous (60 km for Bengaluru) so outskirts pickups are
+  /// accepted.
+  ///
+  /// localRadiusKm is where the CITY itself ends, and it is what decides
+  /// whether a drop counts as "same city" — i.e. whether an outstation booking
+  /// gets downgraded to a local rental. It must be TIGHT: with the 60 km
+  /// service radius doing this job, Hosur, Ramanagara, Devanahalli and every
+  /// other satellite town read as "inside Bengaluru".
+  localRadiusKm Int  @default(25) @map("local_radius_km")
+
   timezone  String @default("Asia/Kolkata") @db.VarChar(48)
   languages Json   @default("[\"en\",\"hi\"]")
 
@@ -297,7 +310,12 @@ model FareConfig {
   tripType     TripType @map("trip_type")
 
   // --- shared components ---
-  baseFare        Decimal @map("base_fare") @db.Decimal(10, 2)
+  /// RETIRED. Always 0 — the flat per-trip base fare was removed from the
+  /// product. Kept as a zeroed column, not dropped, because `base_fare` is part
+  /// of the configSnapshot frozen onto every booking's fareBasis; dropping it
+  /// would break the read path for bookings already taken. The fare engine
+  /// hardcodes a zero base and does not read this.
+  baseFare        Decimal @default(0) @map("base_fare") @db.Decimal(10, 2)
   perKm           Decimal @map("per_km") @db.Decimal(10, 2)
   perMinute       Decimal @default(0) @map("per_minute") @db.Decimal(10, 2)
   // @default(0) so a rate card can be created without a floor. fare.service
@@ -352,8 +370,13 @@ model FareConfig {
   hourlyKmPerHour Int     @default(10) @map("hourly_km_per_hour")
 
   // --- surge bounds (MVAG caps dynamic pricing) ---
-  maxSurge Decimal @default(2.00) @map("max_surge") @db.Decimal(4, 2)
-  minSurge Decimal @default(0.50) @map("min_surge") @db.Decimal(4, 2)
+  /// Demand pricing is DISABLED: both bounds are pinned to 1.00, so the band
+  /// has no width and no fare can carry a premium. The fare engine enforces
+  /// this independently (clampSurge returns 1 unconditionally) — these columns
+  /// exist so the rate card reads honestly and so restoring surge is a
+  /// deliberate two-part change rather than one forgotten line.
+  maxSurge Decimal @default(1.00) @map("max_surge") @db.Decimal(4, 2)
+  minSurge Decimal @default(1.00) @map("min_surge") @db.Decimal(4, 2)
 
   effectiveFrom DateTime @default(now()) @map("effective_from")
   isActive      Boolean  @default(true) @map("is_active")

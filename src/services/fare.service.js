@@ -27,11 +27,19 @@
  *   3. time charge         durationMin x perMinute        (one-way only)
  *   4. return-empty        % of distance charge           (one-way only)
  *   5. driver allowance    bata x days                    (NOT airport)
- *   6. waiting charge      chargeable hours x rate        (any trip type)
- *   7. night allowance     flat + % of (base + distance)  (NOT airport)
+ *   6. waiting charge      not charged — always zero
+ *   7. night allowance     flat + % of distance           (NOT airport)
  *   7b. airport surcharge  flat                           (airport only)
- *   8. surge               multiplies the subtotal, bounded by config
+ *   8. surge               DISABLED — always 1x, so always zero
  *   9. minimum fare floor  applied LAST
+ *
+ * THERE IS NO DEMAND PRICING. clampSurge returns 1 unconditionally, so no fare
+ * carries a premium regardless of tier, urgency or what a caller requests. See
+ * the note on clampSurge for why it is neutralised there rather than removed.
+ *
+ * THERE IS NO BASE FARE. The flat per-trip amount was removed; a fare is the
+ * distance driven plus only the allowances that represent a real cost. See the
+ * note at step 2 for why the column and the `base` key survive as zeroes.
  *
  * The night percentage deliberately excludes bata and waiting: those are fixed
  * allowances, not distance-driven, and uplifting them would overcharge.
@@ -257,13 +265,39 @@ function touchesNight(pickupAt, returnAt, window, timeZone = DEFAULT_TIMEZONE) {
  * means an out-of-range surge from a caller cannot produce an illegal fare —
  * it is silently corrected rather than trusted.
  */
+/**
+ * DEMAND PRICING IS DISABLED. This always returns 1.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A CLAMP AND NOT A DELETION
+ * ---------------------------------------------------------------------------
+ * The surge machinery upstream is substantial: surge.service classifies the
+ * pickup into an area tier, reads rule rows, and decides a multiplier from how
+ * soon the pickup is. Ripping that out would mean touching the area-tier
+ * tables, both quote paths, the booking record and every screen that reports
+ * `surge`, and it would throw away work that a later decision to switch
+ * demand pricing back on would have to rebuild from nothing.
+ *
+ * Forcing the multiplier to 1 here instead neutralises all of it at the one
+ * point where a multiplier becomes money. Every caller keeps its shape,
+ * `surgeAmount` comes out as '0.00', the breakdown line is skipped because it
+ * only renders for a non-zero amount, and no fare can carry a premium no
+ * matter what any rule row or request says.
+ *
+ * TO RE-ENABLE: delete the early return below. The original clamping logic is
+ * intact underneath it, and the MVAG 0.5x-2x bounds it enforces still apply.
+ */
 function clampSurge(requested, config) {
+  return M.dec(1);
+
+  /* eslint-disable no-unreachable */
   const value = M.dec(requested ?? 1);
   const lo = M.dec(config.minSurge ?? 0.5);
   const hi = M.dec(config.maxSurge ?? 2);
   if (value.lessThan(lo)) return lo;
   if (value.greaterThan(hi)) return hi;
   return value;
+  /* eslint-enable no-unreachable */
 }
 
 /* ------------------------------------------------------------------ *
@@ -534,8 +568,25 @@ function computeFare(input, config) {
 
   /* -- 2. base + distance ------------------------------------------ */
 
-  const base = M.dec(config.baseFare);
-  breakdown.push({ label: 'Base fare', amount: M.toStr(base) });
+  /*
+   * BASE FARE IS RETIRED.
+   *
+   * It was a flat per-trip amount (Rs 400-1200 by class) charged before a
+   * single kilometre was driven, and it is no longer part of the product. The
+   * fare is now distance x per-km, plus only the allowances that represent a
+   * real cost: driver bata, the night allowance, and demand pricing.
+   *
+   * Held as a hard zero rather than deleted outright. `base` is a key in the
+   * fareBasis frozen onto every booking ever taken, and in the invoice and
+   * admin surfaces that read it. Removing the key would read as `undefined`
+   * downstream and silently poison a sum; an explicit zero cannot. The
+   * fare_configs.base_fare column is likewise zeroed by migration rather than
+   * dropped, so an old booking's frozen snapshot still reads honestly.
+   *
+   * Note the knock-on: the night percentage below was a share of
+   * (base + distance) and is now a share of distance alone.
+   */
+  const base = M.dec(0);
 
   const distanceCharge = M.round2(M.mul(billableKm, config.perKm));
 
@@ -661,8 +712,9 @@ function computeFare(input, config) {
     touchesNightWindow && !exemptFromAllowances && (nightPct.greaterThan(0) || nightFlat.greaterThan(0));
 
   if (nightIsChargeable) {
+    // Base fare is retired, so this is a share of the DISTANCE charge alone.
     const pctPart = nightPct.greaterThan(0)
-      ? M.round2(M.pct(M.add(base, distanceCharge), nightPct))
+      ? M.round2(M.pct(distanceCharge, nightPct))
       : M.dec(0);
     nightCharge = M.round2(M.add(nightFlat, pctPart));
 
@@ -671,7 +723,7 @@ function computeFare(input, config) {
     // percentage part. The note carries the detail if anyone asks.
     const detail = [];
     if (nightFlat.greaterThan(0)) detail.push(`flat ${M.toStr(nightFlat)}`);
-    if (nightPct.greaterThan(0)) detail.push(`${M.toStr(nightPct)}% of base + distance`);
+    if (nightPct.greaterThan(0)) detail.push(`${M.toStr(nightPct)}% of distance`);
 
     breakdown.push({
       label: 'Night allowance',
@@ -805,7 +857,11 @@ function computeFare(input, config) {
         : null,
 
       surgeMultiplier: surge.toFixed(2),
+      // Always true when anything other than 1x was asked for, because demand
+      // pricing is off and every request is forced to 1x. Kept so the reason a
+      // fare carries no premium is answerable from the frozen fare alone.
       surgeWasClamped: !surge.equals(M.dec(requestedSurge ?? 1)),
+      surgeDisabled: true,
       belowMinimumFare: belowMinimum,
       roundingAdjustment: M.toStr(roundingAdjustment),
     },
@@ -818,7 +874,10 @@ function computeFare(input, config) {
       fareConfigId: config.id ?? null,
       cityId: config.cityId ?? null,
       vehicleClass: config.vehicleClass ?? null,
-      baseFare: M.toStr(config.baseFare),
+      // Always '0.00'. Read from a literal rather than from config, so a rate
+      // card row that has not yet been migrated to zero cannot reintroduce a
+      // base fare into a frozen snapshot.
+      baseFare: '0.00',
       perKm: M.toStr(config.perKm),
       perMinute: M.toStr(config.perMinute ?? 0),
       minimumFare: M.toStr(config.minimumFare ?? 0),

@@ -234,7 +234,11 @@ INSERT INTO "fare_configs"
    "minimum_fare", "cancellation_fee", "return_empty_pct",
    "driver_allowance", "night_allowance", "night_charge_pct",
    "night_start_hour", "night_start_minute", "night_end_hour", "night_end_minute")
-SELECT c."id", v.cls, 'ONE_WAY', v.base, v.km, 0, v.min_fare, v.cancel, 40.00,
+-- return_empty_pct is 100: a one-way driver returns empty over the whole
+-- distance, and the full return leg is charged. Seeded at 100 rather than
+-- relying on 20260928090000_oneway_full_return to correct it afterwards — a
+-- freshly seeded database should not need a migration to be priced right.
+SELECT c."id", v.cls, 'ONE_WAY', v.base, v.km, 0, v.min_fare, v.cancel, 100.00,
        v.bata, v.night_flat, 10.00,
        21, 55, 6, 0
 FROM "cities" c
