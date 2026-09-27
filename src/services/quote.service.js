@@ -272,6 +272,71 @@ async function priceableSets() {
   );
 }
 
+/**
+ * Which city's rate cards should price a trip starting here.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS REPLACED A HARD REJECTION
+ * ---------------------------------------------------------------------------
+ * Serviceability used to be a single test: is the pickup inside the requested
+ * city's radius? Outside it, the quote was refused.
+ *
+ * That conflated two different questions. `service_states` already answers
+ * the jurisdictional one — will we operate here at all — and a pickup in
+ * Mysuru passes it. The radius answers an operational one: which depot's
+ * prices apply. Refusing Mysuru because it is 126 km from the Bengaluru
+ * centre told a customer in a state we serve that we do not serve them.
+ *
+ * So the radius now SELECTS a city rather than gating the trip: the nearest
+ * active city wins, and its rate cards price the journey. A pickup inside the
+ * requested city keeps using it, so nothing changes for a normal booking.
+ *
+ * WHAT THIS DOES NOT SOLVE, and someone should decide on it:
+ * dispatch assigns vehicles by cityId. A Mysuru pickup priced against
+ * Bengaluru will look for a Bengaluru vehicle, and that driver has 126 km to
+ * travel before the trip starts. For an outstation operator that may be
+ * exactly right. For a local one it is not, and the answer is a Mysuru city
+ * row with its own fleet and rate cards.
+ */
+async function resolveOperatingCity(pickupPoint, requestedCity) {
+  if (maps.isServiceable(pickupPoint, requestedCity).ok) {
+    return { city: requestedCity, switched: false, distanceKm: 0 };
+  }
+
+  const cities = await cache.getOrSet(
+    cache.keys.citiesActive(),
+    () => prisma.city.findMany({ where: { isActive: true } }),
+    { ttl: cache.TTL.STATIC },
+  );
+
+  if (!cities.length) {
+    throw ApiError.badRequest('No service cities are configured', 'NO_SERVICE_CITY');
+  }
+
+  let nearest = null;
+  let nearestKm = Infinity;
+
+  for (const candidate of cities) {
+    const km = geo.haversineKm(pickupPoint, {
+      lat: Number(candidate.centreLat),
+      lng: Number(candidate.centreLng),
+    });
+    if (km < nearestKm) {
+      nearest = candidate;
+      nearestKm = km;
+    }
+  }
+
+  return {
+    city: nearest,
+    // True whenever the trip is priced by a city other than the one asked for,
+    // so the response can say so rather than a rider wondering why a Mysuru
+    // trip quotes Bengaluru rates.
+    switched: nearest.id !== requestedCity.id,
+    distanceKm: Number(nearestKm.toFixed(1)),
+  };
+}
+
 async function getFareConfig(cityId, vehicleClass, tripType) {
   /*
    * Reject an unknown class BEFORE a cache key exists for it.
@@ -506,7 +571,7 @@ async function getQuote(input) {
 
   /* -- 1. city + service area, before spending anything -- */
 
-  const city = await getCity(cityId);
+  let city = await getCity(cityId);
 
   // HOURLY (local rental) has no fixed destination. If no drop was given, use the
   // pickup as a placeholder so downstream code has coordinates; the fare comes
@@ -536,13 +601,15 @@ async function getQuote(input) {
     { label: 'drop', point: dropPoint || null },
   ]);
 
-  const serviceable = maps.isServiceable(pickupPoint, city);
-  if (!serviceable.ok) {
-    throw ApiError.badRequest(
-      `Pickup is outside the ${city.name} service area (${serviceable.distanceKm} km from centre, limit ${serviceable.radiusKm} km)`,
-      'OUTSIDE_SERVICE_AREA'
-    );
-  }
+  /*
+   * The radius SELECTS a city now, it does not gate the trip.
+   *
+   * The state check above already decided whether we operate here. This picks
+   * whose rate cards apply, falling back to the nearest active city when the
+   * pickup is outside the one the app asked for.
+   */
+  const operating = await resolveOperatingCity(pickupPoint, city);
+  city = operating.city;
 
   // An outstation request that never leaves the city becomes a local rental
   // rather than an error. Everything below then prices the LOCAL product, and
@@ -738,7 +805,7 @@ async function getQuote(input) {
  * is identical, only the pricing model differs.
  */
 async function compareTripTypes(input) {
-  const city = await getCity(input.cityId);
+  let city = await getCity(input.cityId);
 
   const [pickupPoint, dropPoint] = await Promise.all([
     resolveLocation(input.pickup, 'pickup'),
@@ -758,10 +825,10 @@ async function compareTripTypes(input) {
     { label: 'drop', point: dropPoint || null },
   ]);
 
-  const serviceable = maps.isServiceable(pickupPoint, city);
-  if (!serviceable.ok) {
-    throw ApiError.badRequest('Pickup is outside the service area', 'OUTSIDE_SERVICE_AREA');
-  }
+  // Same rule as the single-class quote: nearest city prices it, the state
+  // check decides whether we operate here at all.
+  const operating = await resolveOperatingCity(pickupPoint, city);
+  city = operating.city;
 
   // This endpoint exists to compare ONE_WAY against ROUND_TRIP for one route.
   // Both are outstation products, so a same-city drop leaves nothing to
@@ -840,7 +907,7 @@ async function compareTripTypes(input) {
 
 /** Every vehicle class priced for one trip — powers the class picker. */
 async function quoteAllClasses(input) {
-  const city = await getCity(input.cityId);
+  let city = await getCity(input.cityId);
 
   const isHourly = input.tripType === 'HOURLY';
   // HOURLY has no fixed destination — default drop to pickup if absent.
@@ -863,10 +930,10 @@ async function quoteAllClasses(input) {
     { label: 'drop', point: dropPoint || null },
   ]);
 
-  const serviceable = maps.isServiceable(pickupPoint, city);
-  if (!serviceable.ok) {
-    throw ApiError.badRequest('Pickup is outside the service area', 'OUTSIDE_SERVICE_AREA');
-  }
+  // Same rule as the single-class quote: nearest city prices it, the state
+  // check decides whether we operate here at all.
+  const operating = await resolveOperatingCity(pickupPoint, city);
+  city = operating.city;
 
   // An outstation request that never leaves the city becomes a local rental.
   // Everything below prices the LOCAL product and the switch is reported back.
