@@ -26,6 +26,24 @@ function wire() {
   if (wired) return;
   wired = true;
 
+  /*
+   * "We've received your booking" — sent the moment a booking is created.
+   *
+   * Bookings used to confirm themselves at creation, so the BOOKING_CONFIRMED
+   * push below fired on every booking and the rider always heard something.
+   * Now every booking waits for an admin to confirm it, BOOKING_CONFIRMED only
+   * fires then, and a rider who had just booked heard NOTHING — which read as
+   * "notifications are broken". This fills that gap with honest wording: the
+   * booking is received, not yet confirmed.
+   */
+  bus.on(EVENTS.BOOKING_CREATED, (p) => {
+    add(QUEUE.NOTIFICATIONS, 'booking-received', {
+      type: 'BOOKING_RECEIVED',
+      bookingId: p.bookingId,
+      to: null,
+    });
+  });
+
   bus.on(EVENTS.BOOKING_CONFIRMED, (p) => {
     add(QUEUE.NOTIFICATIONS, 'booking-confirmed', {
       type: 'BOOKING_CONFIRMED',

@@ -21,6 +21,13 @@ const pushService = require('../services/push.service');
 
 /** Message templates by notification type. Params fill the template. */
 const TEMPLATES = {
+  // Push-only today: the producer sends no phone number, so the WhatsApp/SMS
+  // leg is skipped. The template name is here for when that channel goes live.
+  BOOKING_RECEIVED: {
+    channel: 'whatsapp',
+    template: 'booking_received',
+    render: (b) => ({ bookingNumber: b.bookingNumber, pickup: b.pickupAddress }),
+  },
   BOOKING_CONFIRMED: {
     channel: 'whatsapp',
     template: 'booking_confirmed',
@@ -40,6 +47,12 @@ const TEMPLATES = {
 
 /** Push (FCM) copy by notification type — title/body shown in the tray. */
 const PUSH = {
+  // Honest about where the booking stands: received, awaiting the admin's
+  // confirmation — which arrives as its own "Booking confirmed" push.
+  BOOKING_RECEIVED: (b) => ({
+    title: 'Booking received',
+    body: `We've received your booking ${b.bookingNumber}. We'll notify you as soon as it's confirmed.`,
+  }),
   BOOKING_CONFIRMED: (b) => ({
     title: 'Booking confirmed',
     body: `Your booking ${b.bookingNumber} is confirmed.`,
@@ -104,10 +117,22 @@ async function handle(job) {
   // double-send is acceptable; a dropped confirmation is not.
   const rec = outcome.result;
 
-  // 1) WhatsApp/SMS (durable channel). Only when a phone number is present.
+  // 1) WhatsApp/SMS. Only when a phone number is present.
+  //
+  //    CAUGHT. This used to be a bare await, so a provider failure threw
+  //    before the push below ever ran — and on retry runOnce reports the
+  //    record as done and the handler returns early, so the push was lost for
+  //    good, not merely delayed. The msg91 provider is a stub that ALWAYS
+  //    throws, so NOTIFY_PROVIDER=msg91 plus an auth key (now set for login
+  //    SMS) would have silently killed every push. A failure here is logged
+  //    and the push still goes out.
   if (rec.to) {
-    const provider = notifyProvider.getProvider();
-    await provider.send({ to: rec.to, channel: rec.channel, template: rec.template, params: rec.params });
+    try {
+      const provider = notifyProvider.getProvider();
+      await provider.send({ to: rec.to, channel: rec.channel, template: rec.template, params: rec.params });
+    } catch (err) {
+      console.error(`[notification] ${rec.channel} failed for ${type} ${bookingId}: ${err.message}`);
+    }
   }
 
   // 2) FCM push to the customer's devices. Independent of the phone channel and
