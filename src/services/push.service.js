@@ -52,10 +52,16 @@ function getMessaging() {
 /* -------- Send (mock | fcm) -------- */
 
 // FCM errors meaning "token is dead, delete it".
+//
+// 'messaging/invalid-argument' used to be in this list. FCM returns it for a
+// MALFORMED MESSAGE too, not only a bad token — so one bad payload deleted
+// every recipient's device row, and from then on every push found
+// "no-tokens" and sent nothing, silently, until each rider happened to reopen
+// the app and re-register. Only errors that are unambiguously about the token
+// delete it now; anything else is logged and the token is kept.
 const DEAD = new Set([
   'messaging/registration-token-not-registered',
   'messaging/invalid-registration-token',
-  'messaging/invalid-argument',
 ]);
 
 async function send(tokens, title, body, data) {
@@ -78,7 +84,14 @@ async function send(tokens, title, body, data) {
 
   const invalidTokens = [];
   res.responses.forEach((r, i) => {
-    if (!r.success && DEAD.has(r.error?.code)) invalidTokens.push(tokens[i]);
+    if (r.success) return;
+    if (DEAD.has(r.error?.code)) invalidTokens.push(tokens[i]);
+    // Every refusal is logged with FCM's own code and reason. These used to
+    // be discarded, so a push Firebase rejected looked exactly like a push
+    // that was never attempted. The token itself is never logged.
+    console.error(
+      `[push] FCM refused device …${String(tokens[i]).slice(-6)}: ${r.error?.code || 'unknown'} — ${r.error?.message || ''}`,
+    );
   });
   return { successCount: res.successCount, invalidTokens };
 }
@@ -122,16 +135,48 @@ async function listTokens(userId) {
 
 /* -------- Public: send to a user -------- */
 
+/** "…a1b2c3" — enough to tell users apart in a log, not enough to identify. */
+const shortId = (id) => `…${String(id).slice(-6)}`;
+
 async function pushToUser(userId, { title, body, data = {} }) {
   const rows = await prisma.deviceToken.findMany({ where: { userId }, select: { token: true } });
   const tokens = rows.map((r) => r.token);
-  if (!tokens.length) return { sent: 0, reason: 'no-tokens' };
+  if (!tokens.length) {
+    // Logged: this was the one outcome that left NO trace — the job "worked",
+    // nothing was sent, and nothing said why. It means this rider's app has
+    // never registered a device (not signed in on it, notifications denied,
+    // or the registration call failed).
+    console.log(`[push] no registered device for user ${shortId(userId)} — "${title}" not sent`);
+    return { sent: 0, reason: 'no-tokens' };
+  }
 
   const { successCount, invalidTokens } = await send(tokens, title, body, data);
   if (invalidTokens.length) {
     await prisma.deviceToken.deleteMany({ where: { token: { in: invalidTokens } } }).catch(() => {});
   }
+  console.log(
+    `[push] "${title}" -> ${successCount}/${tokens.length} device(s) for user ${shortId(userId)}` +
+      (invalidTokens.length ? ` (${invalidTokens.length} dead token(s) removed)` : ''),
+  );
   return { sent: successCount };
 }
 
-module.exports = { pushToUser, registerToken, unregisterToken, listTokens };
+/**
+ * States the push mode ONCE, at worker start — so "are pushes actually going
+ * to Firebase?" is answered by the first lines of the log, not by the first
+ * push that happens to be tried. The worker is a separate Railway service
+ * with its OWN variables: Firebase set on the API service alone does nothing
+ * here, because it is the worker that sends.
+ */
+function describeMode() {
+  if (env.push.provider !== 'fcm') {
+    console.warn(
+      `[push] PUSH_PROVIDER is "${env.push.provider}" — pushes are only LOGGED, not delivered. ` +
+        'Set PUSH_PROVIDER=fcm and the Firebase service account on THIS (worker) service.',
+    );
+    return 'mock';
+  }
+  return getMessaging() ? 'fcm' : 'mock';
+}
+
+module.exports = { pushToUser, registerToken, unregisterToken, listTokens, describeMode };

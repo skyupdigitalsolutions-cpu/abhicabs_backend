@@ -170,6 +170,57 @@ async function reportPreaggregation() {
   return reportService.refreshPreaggregates();
 }
 
+/**
+ * "Your trip is in an hour" — finds trips starting in about an hour and queues
+ * one reminder push for each.
+ *
+ * WINDOW: pickup 50–65 minutes from now. The job runs every 5 minutes, so a
+ * 15-minute window catches every trip at least twice — one missed run (a
+ * worker restart, a slow tick) still reminds everyone. Sending twice is
+ * prevented by the notification job itself: it is keyed
+ * notif:TRIP_REMINDER:<bookingId> in runOnce, so a second queueing is a no-op.
+ *
+ * A trip booked less than 50 minutes ahead gets NO reminder, on purpose: the
+ * rider booked it minutes ago, and "your trip is in an hour" would be wrong.
+ *
+ * CONFIRMED and later only. A PENDING booking has not been accepted by an
+ * admin, and reminding a rider about a trip nobody has agreed to run would
+ * promise something the business has not.
+ */
+async function tripReminderSweeper() {
+  const now = Date.now();
+  const due = await prisma.booking.findMany({
+    where: {
+      status: { in: ['CONFIRMED', 'ALLOCATED', 'EN_ROUTE'] },
+      pickupAt: {
+        gte: new Date(now + 50 * 60 * 1000),
+        lte: new Date(now + 65 * 60 * 1000),
+      },
+    },
+    select: { id: true },
+    take: 500,
+  });
+
+  // Required here, not at the top: the queue module and this one are both
+  // loaded by the worker, and a lazy require keeps them from depending on
+  // each other at load time.
+  const { enqueue, QUEUE } = require('../queues');
+  let queued = 0;
+  for (const b of due) {
+    try {
+      await enqueue(QUEUE.NOTIFICATIONS, 'trip-reminder', {
+        type: 'TRIP_REMINDER',
+        bookingId: b.id,
+        to: null,
+      });
+      queued += 1;
+    } catch (err) {
+      console.error(`[trip-reminder] could not queue ${b.id}: ${err.message}`);
+    }
+  }
+  return { scanned: due.length, queued };
+}
+
 /* ------------------------------------------------------------------ *
  * Registry — the worker maps a scheduled job's name to its handler.
  * ------------------------------------------------------------------ */
@@ -182,6 +233,7 @@ const HANDLERS = {
   'stale-driver-cleanup': staleDriverCleanup,
   'cache-warming': cacheWarming,
   'report-preaggregation': reportPreaggregation,
+  'trip-reminder': tripReminderSweeper,
 };
 
 /**
@@ -192,6 +244,7 @@ const SCHEDULES = [
   { name: 'stale-driver-cleanup', pattern: '*/1 * * * *' },   // every minute
   { name: 'pending-payment-sweeper', pattern: '*/5 * * * *' }, // every 5 min
   { name: 'abandoned-booking-sweeper', pattern: '*/5 * * * *' }, // every 5 min
+  { name: 'trip-reminder', pattern: '*/5 * * * *' },           // every 5 min
   { name: 'cache-warming', pattern: '*/15 * * * *' },          // every 15 min
   { name: 'report-preaggregation', pattern: '*/10 * * * *' },  // every 10 min
   { name: 'session-pruning', pattern: '0 * * * *' },           // hourly

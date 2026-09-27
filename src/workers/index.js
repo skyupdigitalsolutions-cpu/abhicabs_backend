@@ -154,6 +154,14 @@ async function start() {
   await registerSchedules();
 
   console.log(`[worker] up — ${workers.length} queues, concurrency ${concurrency}`);
+
+  // Push mode, stated at boot — this worker is what sends notifications, so
+  // its OWN variables decide whether they reach phones. See describeMode.
+  try {
+    require('../services/push.service').describeMode();
+  } catch (err) {
+    console.error(`[push] could not determine push mode: ${err.message}`);
+  }
 }
 
 /**

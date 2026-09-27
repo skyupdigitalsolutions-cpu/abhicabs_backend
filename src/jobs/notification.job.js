@@ -20,7 +20,42 @@ const notifyProvider = require('../services/providers/notify.provider');
 const pushService = require('../services/push.service');
 
 /** Message templates by notification type. Params fill the template. */
+/* ---------------- formatting for reminder copy ---------------- */
+
+/** "5:04 pm" in India time. The worker runs in UTC on Railway. */
+function istTime(date) {
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+/** "SKYUP Digital Solutions LLP, Dasarahalli Main Road, ..." -> "SKYUP Digital Solutions LLP" */
+function placeName(address) {
+  if (!address) return null;
+  const head = String(address).split(',')[0].trim();
+  return head.length > 1 ? head : String(address);
+}
+
 const TEMPLATES = {
+  // Sent ~1 hour before pickup by the trip-reminder sweeper (jobs/scheduled).
+  // Push-only today — the sweeper sends no phone number.
+  TRIP_REMINDER: {
+    channel: 'whatsapp',
+    template: 'trip_reminder',
+    render: (b) => ({
+      bookingNumber: b.bookingNumber,
+      time: istTime(b.pickupAt),
+      pickup: placeName(b.pickupAddress),
+      // A local rental has no destination — its "drop" is the pickup again.
+      drop: b.tripType === 'HOURLY' ? null : placeName(b.dropAddress),
+    }),
+  },
+
   // Push-only today: the producer sends no phone number, so the WhatsApp/SMS
   // leg is skipped. The template name is here for when that channel goes live.
   BOOKING_RECEIVED: {
@@ -47,6 +82,17 @@ const TEMPLATES = {
 
 /** Push (FCM) copy by notification type — title/body shown in the tray. */
 const PUSH = {
+  // "In an hour you have a trip from here to here."
+  TRIP_REMINDER: (b) => {
+    const p = b.params || {};
+    const route = p.drop ? `from ${p.pickup} to ${p.drop}` : `from ${p.pickup}`;
+    return {
+      title: 'Your trip is in an hour',
+      body: p.time
+        ? `Pickup at ${p.time} ${route}. Please be ready at the pickup point.`
+        : `Your trip ${route} starts in about an hour.`,
+    };
+  },
   // Honest about where the booking stands: received, awaiting the admin's
   // confirmation — which arrives as its own "Booking confirmed" push.
   BOOKING_RECEIVED: (b) => ({
@@ -88,7 +134,16 @@ async function handle(job) {
       // non-transactional external call fired after commit.
       const booking = await tx.booking.findUnique({
         where: { id: bookingId },
-        select: { bookingNumber: true, pickupAddress: true, customerId: true },
+        // dropAddress / pickupAt / tripType: the trip reminder names the
+        // route and the pickup time.
+        select: {
+          bookingNumber: true,
+          pickupAddress: true,
+          dropAddress: true,
+          pickupAt: true,
+          tripType: true,
+          customerId: true,
+        },
       });
       if (!booking) throw new Error(`[notification] booking ${bookingId} not found`);
 
@@ -108,6 +163,7 @@ async function handle(job) {
   if (outcome.skipped) {
     // Already recorded (and, on the happy path, already sent) by a prior
     // delivery. Do nothing — this is the "one effect, not two" branch.
+    console.log(`[notification] ${type} for booking …${String(bookingId).slice(-6)} already sent — skipped`);
     return { skipped: true };
   }
 
@@ -140,10 +196,11 @@ async function handle(job) {
   //    skipped by runOnce, and push is a lossy-tolerable channel). The SMS/
   //    WhatsApp path above remains the durable one.
   const pushTpl = PUSH[type];
+  let pushResult = null;
   if (rec.customerId && pushTpl) {
     try {
       const { title, body } = pushTpl(rec);
-      await pushService.pushToUser(rec.customerId, {
+      pushResult = await pushService.pushToUser(rec.customerId, {
         title,
         body,
         data: {
@@ -156,6 +213,14 @@ async function handle(job) {
       console.error(`[notification] push failed for ${type} ${bookingId}: ${err.message}`);
     }
   }
+
+  // One line per notification, in production too. Completed jobs are not
+  // logged there (workers/index.js), so without this a notification that ran
+  // and one that never ran looked identical in the worker log.
+  console.log(
+    `[notification] ${type} ${rec.bookingNumber} -> ` +
+      (pushResult ? `push ${JSON.stringify(pushResult)}` : 'no push for this type'),
+  );
 
   return { sent: !!rec.to, pushed: !!(rec.customerId && pushTpl), bookingNumber: rec.bookingNumber };
 }
