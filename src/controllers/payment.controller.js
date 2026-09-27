@@ -25,10 +25,31 @@ exports.createOrder = asyncHandler(async (req, res) => {
     req.user,
     meta(req)
   );
+
+  /*
+   * The gateway's PUBLIC key, sent so the app can open the checkout sheet.
+   *
+   * key_id is public by design — Razorpay's own docs put it in client-side
+   * code, and it can only be used to open a checkout against an order that
+   * already exists on our account. The key SECRET never leaves the server and
+   * is not in this response.
+   *
+   * Sent from here rather than baked into the app build so that rotating a key
+   * or moving from test to live is a server env change, not an app-store
+   * release. An app already on a rider's phone picks up the new key on its next
+   * order.
+   *
+   * Null for the mock provider, which has no checkout to open — the app treats
+   * that as "nothing to pay through a gateway" rather than crashing on a
+   * missing key.
+   */
+  const provider = paymentProvider.getProvider();
+  const keyId = provider.name === 'razorpay' ? env.payment.razorpay.keyId : null;
+
   res.status(reused ? 200 : 201).json({
     success: true,
     message: reused ? 'Returning existing open order' : 'Payment order created',
-    data: { payment, reused },
+    data: { payment, reused, provider: provider.name, keyId },
   });
 });
 
