@@ -263,6 +263,9 @@ model City {
   id      Int    @id @default(autoincrement())
   name    String @db.VarChar(80)
   state   String @db.VarChar(80)
+  /// Revenue district. Lets a rate card or a GST registration be scoped to
+  /// Kalaburagi separately from Bengaluru Urban. Nullable: older rows have none.
+  district String? @db.VarChar(80)
   country String @default("IN") @db.Char(2)
 
   // Service area. Bookings outside this are rejected BEFORE any maps API call
@@ -994,6 +997,19 @@ model Invoice {
   totalAmount  Decimal @map("total_amount") @db.Decimal(12, 2)
 
   placeOfSupply String? @map("place_of_supply") @db.VarChar(80)
+
+  /// WHO issued this, snapshotted at issue time. A registration can be
+  /// superseded and a rate can move; an invoice a customer holds must keep
+  /// explaining itself regardless.
+  sellerGstin     String?  @map("seller_gstin") @db.VarChar(15)
+  sellerState     String?  @map("seller_state") @db.VarChar(80)
+  sellerLegalName String?  @map("seller_legal_name") @db.VarChar(180)
+  sellerAddress   String?  @map("seller_address")
+  /// The rate actually applied, and whether it was backed out of the fare or
+  /// added to it. Stored so the arithmetic on the invoice can be re-checked
+  /// years later without guessing what the settings were that day.
+  gstRatePct      Decimal  @default(0) @map("gst_rate_pct") @db.Decimal(5, 2)
+  gstInclusive    Boolean  @default(true) @map("gst_inclusive")
   hsnSac        String? @map("hsn_sac") @db.VarChar(10)
   notes         String?
   pdfUrl        String? @map("pdf_url") // populated later; JSON payload first
@@ -1469,3 +1485,53 @@ model ServiceState {
   @@map("service_states")
 }
 
+
+
+/// ---------------------------------------------------------------------------
+/// GST
+/// ---------------------------------------------------------------------------
+
+/// One row per state the client is registered in.
+///
+/// Deliberately a single table rather than registrations + rates + settings:
+/// at two registrations and four trip types the split costs more in joins and
+/// admin screens than it saves. The price is that adding a fifth trip type is
+/// a schema change, and interstateByRoute repeats per row — keep those in step.
+model GstConfig {
+  id       Int     @id @default(autoincrement())
+  /// Matched against the booking's pickup city state. Store exactly as
+  /// cities.state is written.
+  state    String  @db.VarChar(80)
+  district String? @db.VarChar(80)
+  gstin    String  @unique @db.VarChar(15)
+
+  /// As they must appear on a tax invoice. Snapshotted onto each invoice at
+  /// issue, so fixing a typo here never rewrites an invoice a customer holds.
+  legalName String  @map("legal_name") @db.VarChar(180)
+  address   String?
+
+  ratePct     Decimal @default(18.00) @map("rate_pct") @db.Decimal(5, 2)
+  /// True = the quoted fare already contains the tax, which is how fares are
+  /// priced today. False adds it on top and raises every fare by the rate.
+  isInclusive Boolean @default(true) @map("is_inclusive")
+
+  /// Per trip type, so GST can be removed from one without touching the rest.
+  applyOneWay    Boolean @default(true) @map("apply_one_way")
+  applyRoundTrip Boolean @default(true) @map("apply_round_trip")
+  applyAirport   Boolean @default(true) @map("apply_airport")
+  applyHourly    Boolean @default(true) @map("apply_hourly")
+
+  /// False: split by PLACE OF SUPPLY (the pickup), making every trip
+  /// intra-state. True: split by route, pickup state vs drop state.
+  /// Confirm with a CA before changing.
+  interstateByRoute Boolean @default(false) @map("interstate_by_route")
+  hsnSac            String  @default("9964") @map("hsn_sac") @db.VarChar(10)
+
+  /// False retires a registration without deleting it, so invoices issued
+  /// under it stay explainable.
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("gst_config")
+}

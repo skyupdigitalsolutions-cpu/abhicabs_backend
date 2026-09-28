@@ -23,6 +23,8 @@ const maps = require('./maps.service');
 const fare = require('./fare.service');
 const geo = require('../lib/geo');
 const { ApiError } = require('../utils/helpers');
+const gst = require('./gst.service');
+const M = require('../lib/money');
 const serviceArea = require('../lib/serviceArea');
 
 /** Longest trip the router will price. Guards against an absurd destination. */
@@ -1195,6 +1197,42 @@ async function quoteAllClasses(input) {
     .filter(Boolean);
 
   options.sort((a, b) => Number(a.total) - Number(b.total));
+
+  /*
+   * TAX, PER OPTION.
+   *
+   * Attached at quote time so the rider can see what GST is embedded in the
+   * price BEFORE booking, rather than meeting it for the first time on the
+   * invoice. Resolved through gst.service, which is the same path
+   * billing.service uses at invoice time — two copies of this arithmetic would
+   * eventually disagree, and the one the customer saw would not be the one
+   * they were billed.
+   *
+   * On the default INCLUSIVE setting `tax.total` equals the fare's own total,
+   * so nothing about pricing changes; the tax is information, not an addition.
+   * If an admin switches a rate to exclusive, `tax.total` is what is actually
+   * payable and the app shows that.
+   *
+   * Resolved once per trip, not per option: the rate depends on trip type and
+   * pickup state, neither of which varies across the vehicle list. Only the
+   * amount differs, so applyGst is what runs per option.
+   */
+  const taxRate = await gst.resolveRate(effectiveTripType, city.state);
+  const splitKind = await gst.resolveSplitKind(city.state, dropPoint?.state || null);
+
+  for (const opt of options) {
+    const applied = gst.applyGst(opt.total, taxRate, splitKind);
+    opt.tax = {
+      ratePct: applied.ratePct,
+      isInclusive: applied.isInclusive,
+      applies: taxRate.applies,
+      splitKind,
+      amount: M.toStr(applied.tax),
+      taxable: M.toStr(applied.taxable),
+      // What the rider actually pays. Same as opt.total when inclusive.
+      payable: M.toStr(applied.total),
+    };
+  }
 
   return {
     trip: {
