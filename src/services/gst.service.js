@@ -106,6 +106,8 @@ async function resolveRate(tripType, pickupState, accountType) {
   const column = APPLY_COLUMN[tripType];
   // An unknown trip type is not silently taxed: a new enum value that nobody
   // added a column for must read as "off", not as "18% by default".
+  const tripTypeOk = column ? Boolean(cfg[column]) : false;
+
   /*
    * WHO is taxed. Corporate only.
    *
@@ -220,9 +222,11 @@ function applyGst(amount, { ratePct, isInclusive, applies }, splitKind) {
  * the total, so a rider can see what is embedded before booking rather than
  * discovering it on the invoice afterwards.
  */
-async function quoteTax(fareTotal, { tripType, pickupState, dropState }) {
+async function quoteTax(fareTotal, { tripType, pickupState, dropState, accountType }) {
   const [rate, splitKind] = await Promise.all([
-    resolveRate(tripType, pickupState),
+    // accountType must be passed through: without it every caller of quoteTax
+    // resolves as retail and reports no tax, including for a corporate rider.
+    resolveRate(tripType, pickupState, accountType),
     resolveSplitKind(pickupState, dropState),
   ]);
 
