@@ -240,13 +240,31 @@ async function create(input, actor, meta = {}) {
     select: { isGuest: true },
   });
 
-  const guestContact = customerRow?.isGuest
-    ? {
-        guestName: input.guestName ?? null,
-        guestPhone: input.guestPhone ?? null,
-        guestEmail: input.guestEmail ?? null,
-      }
-    : {};
+  /*
+   * TRAVELLER CONTACT — "booking for someone else".
+   *
+   * These three columns were added for GUEST bookings from the website, where
+   * the account is a throwaway with no phone on it. They were therefore only
+   * read when customer.isGuest, on the reasoning that a signed-in customer's
+   * own record is the source of truth and duplicating it would let the two
+   * drift.
+   *
+   * That reasoning holds only while the traveller IS the account holder. A
+   * rider booking for a parent, a colleague or a child is not duplicating
+   * their own details — they are supplying someone else's, and the driver must
+   * call THAT person, not the person who paid. Storing them here is not drift;
+   * it is the whole point.
+   *
+   * So the fields are now accepted from any customer. Nothing else changes:
+   * they stay null when the app does not send them, which is what a booking
+   * for oneself does, so every existing booking and every existing caller
+   * behaves exactly as before.
+   */
+  const guestContact = {
+    guestName: input.guestName ?? null,
+    guestPhone: input.guestPhone ?? null,
+    guestEmail: input.guestEmail ?? null,
+  };
 
   /*
    * A guest booking must carry a name and a number.
