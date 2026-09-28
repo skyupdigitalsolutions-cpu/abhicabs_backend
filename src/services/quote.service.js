@@ -1217,7 +1217,7 @@ async function quoteAllClasses(input) {
    * pickup state, neither of which varies across the vehicle list. Only the
    * amount differs, so applyGst is what runs per option.
    */
-  const taxRate = await gst.resolveRate(effectiveTripType, city.state);
+  const taxRate = await gst.resolveRate(effectiveTripType, city.state, input.accountType);
   const splitKind = await gst.resolveSplitKind(city.state, dropPoint?.state || null);
 
   for (const opt of options) {

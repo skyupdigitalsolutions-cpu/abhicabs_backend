@@ -311,7 +311,31 @@ async function stats() {
   return { total, retail, corporate, linkedToCorporate: withCorporate };
 }
 
+/**
+ * The account type for a signed-in user, for tax decisions.
+ *
+ * Read from the customer record rather than taken from a request body: it
+ * decides whether GST is charged, and a client that could name its own account
+ * type could name its way out of tax, or into it.
+ *
+ * Returns 'RETAIL' when there is no user or no customer record. Erring toward
+ * the untaxed case means a misconfiguration shows up as a missing tax line
+ * someone notices, rather than a charge the customer never agreed to.
+ *
+ * Cheap enough to call on every quote: one indexed lookup on the primary key,
+ * selecting a single column.
+ */
+async function accountTypeFor(userId) {
+  if (!userId) return 'RETAIL';
+  const row = await prisma.customer.findUnique({
+    where: { userId },
+    select: { accountType: true },
+  });
+  return row?.accountType === 'CORPORATE' ? 'CORPORATE' : 'RETAIL';
+}
+
 module.exports = {
+  accountTypeFor,
   findById,
   findOrCreate,
   list,

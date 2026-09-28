@@ -5,6 +5,7 @@
  */
 
 const quote = require('../services/quote.service');
+const customerService = require('../services/customer.service');
 const fare = require('../services/fare.service');
 const maps = require('../services/maps.service');
 const { prisma } = require('../config/prisma');
@@ -24,7 +25,17 @@ exports.compare = asyncHandler(async (req, res) => {
 
 /** POST /fares/options — every vehicle class, cheapest first. */
 exports.options = asyncHandler(async (req, res) => {
-  const data = await quote.quoteAllClasses(req.body);
+  /*
+   * accountType comes from the SESSION, never from the request body.
+   *
+   * It decides whether GST is charged, so a client that could name its own
+   * account type could name its way out of tax — or, just as bad, into it.
+   * Read from the customer record attached to the authenticated user.
+   *
+   * Absent or unknown reads as retail, which is the untaxed case.
+   */
+  const accountType = await customerService.accountTypeFor(req.user?.id);
+  const data = await quote.quoteAllClasses({ ...req.body, accountType });
   res.json({ success: true, data });
 });
 

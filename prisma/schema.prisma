@@ -1513,7 +1513,15 @@ model GstConfig {
   ratePct     Decimal @default(18.00) @map("rate_pct") @db.Decimal(5, 2)
   /// True = the quoted fare already contains the tax, which is how fares are
   /// priced today. False adds it on top and raises every fare by the rate.
-  isInclusive Boolean @default(true) @map("is_inclusive")
+  /// False = the tax is ADDED to the fare. This is the live setting: a
+  /// corporate fare bills at fare + 18%, not fare-with-18%-inside.
+  isInclusive Boolean @default(false) @map("is_inclusive")
+
+  /// WHO is taxed. Corporate only: a personal rider sees no GST anywhere and
+  /// receives a bill of supply, which is what billing.service has always issued
+  /// for retail.
+  applyRetail    Boolean @default(false) @map("apply_retail")
+  applyCorporate Boolean @default(true) @map("apply_corporate")
 
   /// Per trip type, so GST can be removed from one without touching the rest.
   applyOneWay    Boolean @default(true) @map("apply_one_way")

@@ -99,14 +99,30 @@ async function resolveConfig(pickupState) {
  * trip type has been switched off on the row. The rate is still reported in
  * the second case so an admin screen can show what WOULD apply.
  */
-async function resolveRate(tripType, pickupState) {
+async function resolveRate(tripType, pickupState, accountType) {
   const cfg = await resolveConfig(pickupState);
   if (!cfg) return NO_TAX;
 
   const column = APPLY_COLUMN[tripType];
   // An unknown trip type is not silently taxed: a new enum value that nobody
   // added a column for must read as "off", not as "18% by default".
-  const applies = column ? Boolean(cfg[column]) : false;
+  /*
+   * WHO is taxed. Corporate only.
+   *
+   * A personal rider is not taxed, which is what billing.service has always
+   * done — retail invoices are NON_TAX bills of supply. Gating here keeps the
+   * QUOTE honest against the INVOICE: before this, a personal rider saw
+   * "Includes GST @18%" on the fare card for a fare that was then billed with
+   * no tax line at all.
+   *
+   * An unknown or missing account type reads as retail, i.e. not taxed. Erring
+   * toward no tax means a misconfiguration surfaces as a missing line someone
+   * notices, rather than a charge the customer never agreed to.
+   */
+  const accountOk =
+    accountType === 'CORPORATE' ? Boolean(cfg.applyCorporate) : Boolean(cfg.applyRetail);
+
+  const applies = tripTypeOk && accountOk && Number(cfg.ratePct) > 0;
 
   return {
     ratePct: Number(cfg.ratePct),
