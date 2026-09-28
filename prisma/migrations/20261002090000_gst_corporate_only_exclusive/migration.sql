@@ -37,4 +37,4 @@ ALTER TABLE "gst_config" ALTER COLUMN "is_inclusive" SET DEFAULT false;
 UPDATE "gst_config"
    SET "is_inclusive"    = false,
        "apply_retail"    = false,
-       "apply_corporate" = true;
+       "apply_corporate" = true; 
