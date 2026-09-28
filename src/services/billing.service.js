@@ -30,6 +30,7 @@
 const { prisma, isUniqueViolation } = require('../config/prisma');
 const { ApiError } = require('../utils/helpers');
 const M = require('../lib/money');
+const gstService = require('./gst.service');
 const env = require('../config/env');
 const audit = require('./audit.service');
 
@@ -121,11 +122,20 @@ const BILLING_SELECT = {
   distanceKm: true,
   fareBasis: true,
   meta: true,
+  // Read by createInvoice for tax. tripType selects the per-trip-type GST
+  // toggle; the two states decide CGST+SGST vs IGST.
+  tripType: true,
+  pickupState: true,
+  dropState: true,
   city: { select: { id: true, name: true, state: true, welfareFeePct: true } },
   customer: {
     select: {
       userId: true,
       accountType: true,
+      // The customer's OWN GSTIN, so a corporate rider who set one on their
+      // profile can claim input credit without an admin creating a corporate
+      // account for them.
+      gstin: true,
       user: { select: { id: true, name: true, email: true } },
     },
   },
@@ -207,31 +217,73 @@ async function createInvoice(tx, booking, fare, isCorporate) {
   const series = env.billing.invoiceSeries;
   const invoiceNumber = await nextInvoiceNumber(tx, series, fy);
 
-  const supplierState = booking.city?.state || 'Karnataka';
+  /*
+   * The PICKUP state decides which registration bills the trip.
+   *
+   * booking.pickupState is what was recorded at booking time and is the more
+   * precise answer; the operating city's state is the fallback for older rows
+   * that predate that column.
+   */
+  const supplierState = booking.pickupState || booking.city?.state || 'Karnataka';
 
   let type;
   let gst;
   let billTo;
 
+  /*
+   * TAX COMES FROM gst_config, NOT FROM env.
+   *
+   * This used to read env.billing.gstRatePct and split it with a local
+   * inclusive-only helper. Two problems followed from that. The rate could not
+   * be changed without a deploy, and — worse — the QUOTE already resolves tax
+   * through gst.service, so the figure a corporate customer agreed to at
+   * checkout and the figure they were invoiced came from two different
+   * sources. They agreed while both happened to say the same number.
+   *
+   * Same resolver, same inputs, same answer. The pickup state chooses the
+   * registration, per the requirement: a Bengaluru pickup bills on Karnataka
+   * whatever the destination.
+   */
+  const gstConfig = await gstService.resolveConfig(supplierState);
+  const rate = await gstService.resolveRate(
+    booking.tripType,
+    supplierState,
+    isCorporate ? 'CORPORATE' : 'RETAIL'
+  );
+  const splitKind = await gstService.resolveSplitKind(
+    supplierState,
+    booking.dropState || null
+  );
+
+  const applied = gstService.applyGst(fare, rate, splitKind);
+  gst = applied;
+
+  /*
+   * TAX invoice only when tax was actually charged AND we have a GSTIN to
+   * issue it under. A tax invoice without a seller GSTIN is not a valid tax
+   * invoice, so a missing registration produces a bill of supply rather than
+   * an invalid document.
+   */
+  type = rate.applies && gstConfig ? 'TAX' : 'NON_TAX';
+
   if (isCorporate) {
-    type = 'TAX';
-    const recipientState = booking.corporate?.billingState || supplierState;
-    const intraState =
-      recipientState.trim().toLowerCase() === supplierState.trim().toLowerCase();
-    gst = splitGstInclusive(fare, env.billing.gstRatePct, intraState);
     billTo = {
       name: booking.corporate?.companyName || 'Corporate',
       address: booking.corporate?.billingAddress || null,
-      gstin: booking.corporate?.gstin || null,
+      /*
+       * The RECIPIENT's GSTIN — the customer's own number, which is what lets
+       * them claim input credit. Falls back to the customer record, since a
+       * corporate rider can now set a GSTIN on their own profile without an
+       * admin creating a corporate account for them.
+       */
+      gstin: booking.corporate?.gstin || booking.customer?.gstin || null,
     };
   } else {
-    // Retail: no tax. A bill of supply — subtotal == taxable == total.
-    type = 'NON_TAX';
-    gst = { taxable: fare, cgst: M.dec(0), sgst: M.dec(0), igst: M.dec(0), total: fare };
     billTo = {
       name: booking.customer?.user?.name || 'Customer',
       address: null,
-      gstin: null,
+      // A retail customer may still have supplied one.
+      gstin: booking.customer?.gstin || null,
     };
   }
 
@@ -255,7 +307,25 @@ async function createInvoice(tx, booking, fare, isCorporate) {
       igst: gst.igst.toFixed(2),
       totalAmount: gst.total.toFixed(2),
       placeOfSupply: supplierState,
-      hsnSac: env.billing.sacCode,
+      hsnSac: gstConfig?.hsnSac || env.billing.sacCode,
+
+      /*
+       * THE COMPANY'S OWN GST DETAILS, ON EVERY INVOICE.
+       *
+       * Recorded for retail bills of supply too, not only tax invoices: a bill
+       * of supply still has to identify who issued it, and a customer holding
+       * one should be able to see the company's GSTIN.
+       *
+       * Snapshotted rather than joined at read time. A registration can be
+       * superseded and a rate can move; an invoice a customer already holds
+       * must keep explaining itself exactly as issued.
+       */
+      sellerGstin: gstConfig?.gstin || null,
+      sellerState: gstConfig?.state || supplierState,
+      sellerLegalName: gstConfig?.legalName || null,
+      sellerAddress: gstConfig?.address || null,
+      gstRatePct: applied.ratePct.toFixed(2),
+      gstInclusive: applied.isInclusive,
       lines: {
         create: buildInvoiceLines(booking, gst.taxable, fare),
       },

@@ -159,6 +159,44 @@ async function update(id, data, actor) {
  * DELETE
  * ---------------------------------------------------------------- */
 
+/**
+ * Close an account.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS NOT ALWAYS A ROW DELETE
+ * ---------------------------------------------------------------------------
+ * It used to be `prisma.user.delete`, which threw a foreign-key error — and a
+ * 500 — for anyone who had ever booked. Booking.customer is onDelete: Restrict,
+ * so Postgres refuses to remove a customer that bookings point at. Accounts
+ * with no bookings deleted fine, which is why it looked like it worked.
+ *
+ * Restrict is RIGHT, and loosening it would be the wrong fix. The delete screen
+ * promises "completed trips keep their invoices, which we are required to
+ * retain for tax purposes" — a GST invoice must stay intact and must keep
+ * referring to a real counterparty. You cannot both erase the customer and
+ * retain a compliant invoice trail.
+ *
+ * So there are two outcomes, and which one applies depends only on whether
+ * there is anything the law requires us to keep:
+ *
+ *   NO history at all      -> the row really is deleted. Nothing to retain, so
+ *                             nothing is kept.
+ *   Any booking or ledger  -> the identity is destroyed and the rows stay. Name,
+ *     entry                  email and phone are overwritten with values that
+ *                             cannot be reversed to the originals, the password
+ *                             is replaced with an unusable hash, sessions are
+ *                             revoked, and addresses and device tokens are
+ *                             deleted outright.
+ *
+ * In both cases the person can never sign in again and no readable personal
+ * data about them remains. That is what the screen promises, and now it is
+ * what happens.
+ *
+ * WHY THE PLACEHOLDERS LOOK LIKE THEY DO
+ * email and phone are UNIQUE, so they cannot simply be blanked — two closed
+ * accounts would collide on NULL-less uniqueness or on the same literal. The id
+ * is already unique and is not personal data on its own, so it seeds both.
+ */
 async function remove(id, actor) {
   const target = await prisma.user.findUnique({ where: { id } });
   if (!target) throw ApiError.notFound('User not found');
@@ -168,10 +206,89 @@ async function remove(id, actor) {
   }
   if (target.role === 'ADMIN') await assertNotLastAdmin(id);
 
-  // Cascade removes the user's refresh tokens, so their sessions die with the
-  // account.
-  await prisma.user.delete({ where: { id } });
-  return { message: 'User deleted', id };
+  /*
+   * A trip that is still running cannot be abandoned: a driver is en route, or
+   * a car is occupied, and money may still be owed in either direction.
+   * Refused with a message the rider can act on rather than a foreign-key
+   * error they cannot.
+   */
+  const liveBooking = await prisma.booking.findFirst({
+    where: {
+      customerId: id,
+      status: {
+        in: ['PENDING', 'CONFIRMED', 'ALLOCATED', 'EN_ROUTE', 'REACHED', 'ONGOING', 'ARRIVED'],
+      },
+    },
+    select: { bookingNumber: true, status: true },
+  });
+
+  if (liveBooking) {
+    throw ApiError.badRequest(
+      `You have a trip in progress (${liveBooking.bookingNumber}). Complete or cancel it before closing your account.`,
+      'ACTIVE_BOOKING'
+    );
+  }
+
+  const [bookingCount, ledgerCount] = await Promise.all([
+    prisma.booking.count({ where: { customerId: id } }),
+    prisma.ledgerEntry.count({ where: { userId: id } }),
+  ]);
+
+  const mustRetain = bookingCount > 0 || ledgerCount > 0;
+
+  return prisma.$transaction(async (tx) => {
+    // Sessions die first, in both paths. Doing it inside the transaction means
+    // an account cannot end up scrubbed but still signed in somewhere.
+    await tx.refreshToken.updateMany({
+      where: { userId: id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    // Not personal history — just settings and routing. Removed outright in
+    // both paths, which is what "saved addresses and notification settings are
+    // removed" on the delete screen means.
+    await tx.deviceToken.deleteMany({ where: { userId: id } });
+    await tx.address.deleteMany({ where: { customerId: id } });
+
+    if (!mustRetain) {
+      // Nothing to keep. Cascades take refresh tokens and the customer row.
+      await tx.user.delete({ where: { id } });
+      return { message: 'Account deleted', id, retained: false };
+    }
+
+    const tag = id.replace(/-/g, '').slice(0, 12);
+
+    await tx.user.update({
+      where: { id },
+      data: {
+        name: 'Deleted user',
+        email: `deleted+${tag}@deleted.invalid`,
+        phone: null,
+        // A bcrypt-shaped string that no password can produce, so the row can
+        // never authenticate even if isActive were flipped back by mistake.
+        password: `!deleted!${tag}`,
+        isActive: false,
+      },
+    });
+
+    // The customer record carries its own contact details and a GSTIN.
+    await tx.customer.updateMany({
+      where: { userId: id },
+      data: { alternatePhone: null, gstin: null },
+    });
+
+    /*
+     * Guest contact on past bookings is a THIRD party's data — someone the
+     * account holder booked for, who never agreed to our retaining their
+     * number. Cleared with the account.
+     */
+    await tx.booking.updateMany({
+      where: { customerId: id },
+      data: { guestName: null, guestPhone: null, guestEmail: null },
+    });
+
+    return { message: 'Account closed', id, retained: true };
+  });
 }
 
 /** Soft alternative to deletion — preserves history, blocks access. */
