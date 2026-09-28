@@ -45,6 +45,19 @@ const BOOKING_SELECT = {
   cancelledByType: true,
   cancellationReason: true,
   specialRequests: true,
+  /*
+   * Who is actually travelling, when that is not the account holder.
+   *
+   * Set from the app's "I'm booking for someone else" switch. Without these in
+   * the select the columns were written on create and then never read back, so
+   * the rider could not check what they had entered and — the part that
+   * matters — no screen could show the driver who to call at the kerb.
+   *
+   * Null on a booking made for oneself, where the customer record is the
+   * source of truth.
+   */
+  guestName: true,
+  guestPhone: true,
   confirmedAt: true,
   reachedAt: true,
   startedAt: true,
