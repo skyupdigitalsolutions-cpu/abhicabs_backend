@@ -123,10 +123,16 @@ const BILLING_SELECT = {
   fareBasis: true,
   meta: true,
   // Read by createInvoice for tax. tripType selects the per-trip-type GST
-  // toggle; the two states decide CGST+SGST vs IGST.
+  // toggle; the trip's state decides CGST+SGST vs IGST.
+  //
+  // NOTE: pickupState/dropState are NOT columns on Booking — they exist only on
+  // BookingRequest. Selecting them here made prisma.booking.findUnique() throw
+  // "Unknown field `pickupState`", which crashed EVERY trip completion (invoice
+  // generation). The place of supply is derived from the operating city's state
+  // instead (createInvoice already falls back to booking.city.state), and
+  // dropState is treated as unknown (→ INTRA-state GST), which is correct for
+  // a same-city trip and the safe default otherwise.
   tripType: true,
-  pickupState: true,
-  dropState: true,
   city: { select: { id: true, name: true, state: true, welfareFeePct: true } },
   customer: {
     select: {
