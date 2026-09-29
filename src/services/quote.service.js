@@ -1049,6 +1049,27 @@ async function quoteAllClasses(input) {
   // routing call, so a request that can never succeed costs no maps quota.
   assertDistinctEndpoints(input.tripType, pickupPoint, dropPoint);
 
+  /*
+   * INTERMEDIATE STOPS — the same resolution the single-class quote() does.
+   *
+   * This function did not read input.stops at all. It priced pickup → drop in
+   * a straight line while quote(), which runs at BOOKING time, routed through
+   * every stop. So a trip with a stop was quoted on the direct distance and
+   * then created at the real one, and the two numbers had no relationship the
+   * rider could see.
+   *
+   * Hebbal → Gulbarga → Hubli is the case that exposed it: the fare list
+   * showed 409 km (Hebbal to Hubli direct) and the booking was made at 948 km.
+   * The rider agreed to Rs 15,525 and was charged against Rs 36,019.
+   *
+   * Ignored for HOURLY, which prices from the package rather than the route.
+   */
+  const stopPoints = isHourly
+    ? []
+    : await Promise.all(
+        (input.stops || []).map((st, i) => resolveLocation(st, `stop ${i + 1}`))
+      );
+
   // Jurisdiction before geometry: a route into a state we do not serve is
   // refused here, with a code the app turns into "send a booking request".
   await assertWithinServiceStates([
@@ -1106,11 +1127,23 @@ async function quoteAllClasses(input) {
     );
   }
 
-  // HOURLY prices from the package, so skip the distance lookup (and its
-  // SAME_LOCATION guard when drop==pickup).
+  /*
+   * HOURLY prices from the package, so the distance lookup is skipped (and its
+   * SAME_LOCATION guard when drop == pickup).
+   *
+   * With stops, the route is pickup → stop₁ → … → drop and getPathDistance
+   * sums the legs — each leg Redis-cached exactly like a plain pickup→drop
+   * lookup, so a multi-stop quote costs no more maps quota on a repeat.
+   *
+   * This mirrors quote() deliberately. The two functions answer the same
+   * question for one class and for many, and any difference between them shows
+   * up as a fare that changes between the screen and the booking.
+   */
   const route = isHourlyNow
     ? { distanceKm: 0, durationMin: 0, provider: 'none', estimated: false }
-    : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
+    : stopPoints.length
+      ? await maps.getPathDistance([pickupPoint, ...stopPoints, dropPoint], { maxKm: MAX_TRIP_KM })
+      : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
 
   /*
    * Only classes a rider can SEE — an ACTIVE vehicle_catalog row.
