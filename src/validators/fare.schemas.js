@@ -2,6 +2,7 @@
 
 /**
  * src/validators/fare.schemas.js
+ * 
  *
  * Note what the client never sends: an amount. It supplies WHERE and WHEN; the
  * server decides WHAT IT COSTS. A client-supplied fare would be trivially
