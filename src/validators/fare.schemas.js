@@ -44,6 +44,22 @@ const baseQuote = {
   // Optional so HOURLY (local rental) can quote with no drop. The quote service
   // defaults it to pickup for HOURLY and skips the distance leg.
   drop: location.optional().nullable(),
+  /*
+   * INTERMEDIATE STOPS.
+   *
+   * These were absent, and Zod strips unknown keys — so the app sent them,
+   * validate() silently deleted them, and quote.service received
+   * `input.stops === undefined` no matter what the rider had entered. The fare
+   * screen priced pickup → drop direct while booking creation (which uses
+   * booking.schemas, where stops ARE declared) priced the real route.
+   *
+   * Hebbal → Gulbarga → Hubli quoted at 398 km and was booked at 948 km. The
+   * rider agreed to Rs 15,111 and was charged against Rs 36,019.
+   *
+   * max(10) matches booking.schemas so a route that quotes cannot then be
+   * refused at booking for having too many stops.
+   */
+  stops: z.array(location).max(10).optional(),
   pickupAt: z.string().datetime({ offset: true }).or(z.string().min(10)),
   returnAt: z.string().datetime({ offset: true }).or(z.string().min(10)).optional().nullable(),
   waitingMinutes: z.coerce.number().int().min(0).max(10080).default(0),
