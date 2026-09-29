@@ -477,12 +477,45 @@ async function collectCash(bookingId, actor, meta = {}) {
       amount: balance.toFixed(2),
     });
 
+    /*
+     * IS THE TRIP NOW FINISHABLE?
+     *
+     * Money is settled, but completion is not this function's to perform: a
+     * driver cannot complete a trip without the END odometer reading and its
+     * photo (see lifecycle.completeTrip), and cash collection carries neither.
+     * Calling completeTrip from here would either fail for every driver who
+     * has not yet submitted the reading, or force us to skip a check that
+     * exists to stop disputed distances.
+     *
+     * So this reports whether the only remaining blocker is the odometer. The
+     * driver app uses it to send the reading and call /complete immediately
+     * after collecting, turning two taps into one — and when the reading was
+     * already submitted at the kerb, nothing is left to do but complete.
+     *
+     * Read inside the transaction so it reflects the balance just cleared.
+     */
+    const endReading = await tx.booking.findUnique({
+      where: { id: bookingId },
+      select: { endOdometerKm: true, endOdometerPhotoUrl: true, status: true },
+    });
+
+    const hasOdometer =
+      endReading?.endOdometerKm != null && !!endReading?.endOdometerPhotoUrl;
+
     return {
       bookingId,
       bookingNumber: booking.bookingNumber,
       collected: balance.toFixed(2),
       balanceDue: '0.00',
       method: 'CASH',
+      /*
+       * Nothing is owed and the trip is not finished yet.
+       * `readyToComplete` says the driver can call /complete right now;
+       * `needsOdometer` says what is missing if not.
+       */
+      tripStatus: endReading?.status ?? booking.status,
+      readyToComplete: endReading?.status === 'ARRIVED' && hasOdometer,
+      needsOdometer: endReading?.status === 'ARRIVED' && !hasOdometer,
     };
   });
 }

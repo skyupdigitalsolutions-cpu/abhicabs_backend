@@ -20,7 +20,8 @@
  *   POST /:id/complete  ARRIVED   -> COMPLETED (end odometer required; invoice +
  *                                   ledger + release vehicle)
  *   POST /:id/odometer  ONGOING|ARRIVED — end odometer photo & reading, no status change
- *   POST /:id/collect-cash — money, no status change
+ *   POST /:id/collect-cash — settles the balance in cash, and completes the
+ *                            trip when the end odometer reading is already in
  */
 
 const paymentService = require('../services/payment.service');
@@ -37,6 +38,7 @@ const meta = (req) => ({ ip: req.ip || '', userAgent: req.get('user-agent') || '
 /** Non-terminal states a driver can still be actively working. */
 const ACTIVE_STATUSES = ['ALLOCATED', 'EN_ROUTE', 'REACHED', 'ONGOING', 'ARRIVED'];
 const bookingStopService = require('../services/bookingStop.service');
+const lifecycle = require('../services/lifecycle.service');
 
 /**
  * Driver-safe projection of a booking. Deliberately excludes startOtp and all
@@ -429,8 +431,54 @@ exports.complete = asyncHandler(async (req, res) => {
  * Collect the outstanding cash balance after the ride. Idempotent.
  */
 exports.collectCash = asyncHandler(async (req, res) => {
-  const result = await paymentService.collectCash(req.params.bookingId, req.user, meta(req));
-  res.json({ success: true, message: 'Cash collected', data: result });
+  const { bookingId } = req.params;
+  const result = await paymentService.collectCash(bookingId, req.user, meta(req));
+
+  /*
+   * CASH SETTLES THE TRIP, NOT JUST THE MONEY.
+   *
+   * collectCash zeroed the balance and left the status alone — the comment at
+   * the top of this file still says "money, no status change". So a driver
+   * took the cash, the rider owed nothing, and the trip sat at ARRIVED
+   * indefinitely: never in history, never invoiced, still counted as live.
+   *
+   * Completion is attempted here rather than inside collectCash because it has
+   * a precondition cash cannot satisfy on its own — the END odometer reading
+   * and photo. When the driver recorded those at the kerb (which the app can
+   * do while the rider is paying), there is nothing left to wait for and the
+   * trip finishes on this one call.
+   *
+   * WHEN IT CANNOT COMPLETE, THE CASH STILL STANDS. The payment is already
+   * committed in its own transaction; a failure here must not be reported as
+   * though the money had not been taken. The response says what is missing and
+   * the driver submits the reading, then calls /complete as before.
+   */
+  if (result.readyToComplete) {
+    try {
+      const booking = await lifecycle.completeTrip(bookingId, req.user, meta(req));
+      return res.json({
+        success: true,
+        message: 'Cash collected and trip completed',
+        data: { ...result, completed: true, booking },
+      });
+    } catch (err) {
+      // Logged, not thrown: the driver needs to know the cash was recorded.
+      console.warn('[cash] collected but could not complete', bookingId, err?.message);
+      return res.json({
+        success: true,
+        message: 'Cash collected. Complete the trip to finish.',
+        data: { ...result, completed: false, completeError: err?.message ?? null },
+      });
+    }
+  }
+
+  res.json({
+    success: true,
+    message: result.needsOdometer
+      ? 'Cash collected. Add the end odometer reading to finish the trip.'
+      : 'Cash collected',
+    data: { ...result, completed: false },
+  });
 });
 
 /**
