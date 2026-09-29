@@ -421,20 +421,68 @@ async function collectCash(bookingId, actor, meta = {}) {
   }
 
   return prisma.$transaction(async (tx) => {
-    const payment = await tx.payment.create({
-      data: {
+    /*
+     * AN OPEN BALANCE ORDER MAY ALREADY EXIST — SETTLE IT, DO NOT ADD A SECOND.
+     *
+     * uq_payment_open_per_purpose forbids two live payments with the same
+     * (booking_id, purpose). That constraint is right: it is what stops a
+     * customer being charged twice for one balance.
+     *
+     * But the rider reaching for the card first is completely normal. Tapping
+     * "Pay" creates a CREATED balance order; if they then abandon the sheet —
+     * or it never opened — that row stays live. The driver taking cash a minute
+     * later hit the constraint and saw "A record with that booking_id, purpose
+     * already exists", with no way to collect at all.
+     *
+     * The right resolution is to CAPTURE the order that already exists rather
+     * than open a rival one. The rider is paying the same balance by a
+     * different method; there was only ever one debt.
+     *
+     * Only an unsettled row is taken over. A CAPTURED one means the balance was
+     * already paid, and the guard above has already returned in that case.
+     */
+    const open = await tx.payment.findFirst({
+      where: {
         bookingId,
-        provider: 'cash',
-        amount: balance.toFixed(2),
-        currency: 'INR',
-        method: 'CASH',
-        status: PAYMENT_STATUS.CAPTURED,
         purpose: PAYMENT_PURPOSE.BALANCE,
-        paidAt: new Date(),
-        rawResponse: { offline: true, collectedByDriverId: actor.id },
+        status: { in: [PAYMENT_STATUS.CREATED, PAYMENT_STATUS.AUTHORISED] },
       },
-      select: { id: true },
+      select: { id: true, provider: true },
     });
+
+    const payment = open
+      ? await tx.payment.update({
+          where: { id: open.id },
+          data: {
+            provider: 'cash',
+            method: 'CASH',
+            amount: balance.toFixed(2),
+            status: PAYMENT_STATUS.CAPTURED,
+            paidAt: new Date(),
+            rawResponse: {
+              offline: true,
+              collectedByDriverId: actor.id,
+              // Kept so the trail shows the rider started a gateway payment and
+              // finished in cash, rather than looking like a cash-only trip.
+              supersededProvider: open.provider,
+            },
+          },
+          select: { id: true },
+        })
+      : await tx.payment.create({
+          data: {
+            bookingId,
+            provider: 'cash',
+            amount: balance.toFixed(2),
+            currency: 'INR',
+            method: 'CASH',
+            status: PAYMENT_STATUS.CAPTURED,
+            purpose: PAYMENT_PURPOSE.BALANCE,
+            paidAt: new Date(),
+            rawResponse: { offline: true, collectedByDriverId: actor.id },
+          },
+          select: { id: true },
+        });
 
     try {
       await tx.ledgerEntry.create({
