@@ -36,6 +36,7 @@ const meta = (req) => ({ ip: req.ip || '', userAgent: req.get('user-agent') || '
 
 /** Non-terminal states a driver can still be actively working. */
 const ACTIVE_STATUSES = ['ALLOCATED', 'EN_ROUTE', 'REACHED', 'ONGOING', 'ARRIVED'];
+const bookingStopService = require('../services/bookingStop.service');
 
 /**
  * Driver-safe projection of a booking. Deliberately excludes startOtp and all
@@ -456,4 +457,47 @@ exports.recordOdometer = asyncHandler(async (req, res) => {
     message: result.replaced ? 'End odometer reading updated' : 'End odometer reading recorded',
     data: result,
   });
+});
+
+/* ------------------------------------------------------------------ *
+ * Intermediate stops
+ * ------------------------------------------------------------------ */
+
+/**
+ * GET the stops of a trip, plan joined to progress.
+ *
+ * Returned even when the trip has not started, so the driver can see the whole
+ * route before setting off — which is the point of showing stops at all.
+ */
+exports.listStops = asyncHandler(async (req, res) => {
+  const stops = await bookingStopService.listForBooking(req.params.bookingId);
+  res.json({ success: true, data: { stops } });
+});
+
+/**
+ * Mark a stop reached.
+ *
+ * lat/lng are optional and come from the driver's device. Optional because a
+ * refused location permission or a lost fix must not stop the driver recording
+ * that they arrived — the timestamp is the important part; the position is
+ * corroboration.
+ */
+exports.arriveAtStop = asyncHandler(async (req, res) => {
+  const stops = await bookingStopService.arrive(
+    req.params.bookingId,
+    Number(req.params.seq),
+    req.user.id,
+    { lat: req.body?.lat ?? null, lng: req.body?.lng ?? null }
+  );
+  res.json({ success: true, message: 'Stop marked as reached', data: { stops } });
+});
+
+/** Mark a stop left, which closes the waiting time at it. */
+exports.departStop = asyncHandler(async (req, res) => {
+  const stops = await bookingStopService.depart(
+    req.params.bookingId,
+    Number(req.params.seq),
+    req.user.id
+  );
+  res.json({ success: true, message: 'Stop completed', data: { stops } });
 });

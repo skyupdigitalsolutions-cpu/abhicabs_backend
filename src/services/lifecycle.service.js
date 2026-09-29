@@ -42,6 +42,7 @@ const fare = require('./fare.service');
 const maps = require('./maps.service');
 const M = require('../lib/money');
 const { BOOKING_SELECT, STATUS_FLOW, ACTIVE_STATUSES } = require('../models/booking.model');
+const bookingStopService = require('./bookingStop.service');
 
 /* ------------------------------------------------------------------ *
  * Transition table
@@ -384,6 +385,25 @@ async function startTrip(
       );
     },
   });
+
+  /*
+   * Open a progress row for each intermediate stop, now that the trip is
+   * actually running.
+   *
+   * At START rather than at booking, so a booking that is cancelled leaves no
+   * stop rows behind, and — more usefully — a booking with NO rows reads as
+   * "predates stop tracking" rather than "stalled at the first stop". Those
+   * two look identical if rows are created when the booking is made.
+   *
+   * Never allowed to fail the start. A driver with a passenger in the car must
+   * not be blocked from beginning the trip because a bookkeeping insert threw;
+   * the rows can be created by the first arrive() instead, which upserts.
+   */
+  try {
+    await bookingStopService.initialiseForTrip(booking.id);
+  } catch (err) {
+    console.warn('[lifecycle] could not initialise stop progress', booking.bookingNumber, err?.message);
+  }
 
   emit(EVENTS.BOOKING_STATUS_CHANGED, {
     bookingId: booking.id,

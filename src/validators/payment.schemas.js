@@ -12,6 +12,31 @@ const idParamSchema = z.object({ id: uuid });
 
 const bookingIdParamSchema = z.object({ bookingId: uuid });
 
+/**
+ * A stop on a trip, addressed by its index into the booking's stops array.
+ *
+ * Coerced, because a path parameter is always a string. Non-negative integer
+ * only: the upper bound depends on how many stops THIS booking has, which a
+ * schema cannot know, so bookingStop.service checks it against the actual
+ * array and returns NO_SUCH_STOP.
+ */
+const stopParamSchema = z.object({
+  bookingId: uuid,
+  seq: z.coerce.number().int().min(0),
+});
+
+/**
+ * Where the driver was when they marked the stop.
+ *
+ * Both optional: a refused location permission or a lost fix must not prevent
+ * a driver recording that they arrived. The timestamp is the record; the
+ * coordinates are corroboration.
+ */
+const stopArriveSchema = z.object({
+  lat: z.coerce.number().min(-90).max(90).optional().nullable(),
+  lng: z.coerce.number().min(-180).max(180).optional().nullable(),
+});
+
 /** An empty multipart field is ABSENT, not zero. */
 const blankToUndefined = (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
 
@@ -129,6 +154,8 @@ module.exports = {
   listInvoicesQuerySchema,
   idParamSchema,
   bookingIdParamSchema,
+  stopParamSchema,
+  stopArriveSchema,
   odometerSubmitSchema,
   providerParamSchema,
   createOrderSchema,

@@ -653,6 +653,9 @@ model Booking {
   dropLat       Decimal @map("drop_lat") @db.Decimal(10, 7)
   dropLng       Decimal @map("drop_lng") @db.Decimal(10, 7)
   stops         Json    @default("[]") // intermediate stops for round trips
+  /// Progress against those stops: when the driver reached and left each one.
+  /// Separate from `stops`, which is the plan — see BookingStop.
+  stopProgress  BookingStop[]
 
   pickupAt DateTime  @map("pickup_at")
   returnAt DateTime? @map("return_at") // required for ROUND_TRIP
@@ -1545,3 +1548,42 @@ model GstConfig {
 }
  
  
+
+/// When a driver reached and left one intermediate stop.
+///
+/// Progress only. The stop's location lives in Booking.stops (a JSON array);
+/// this joins to it by `seq`, so there is one source of truth for WHERE a stop
+/// is and a separate one for WHAT HAPPENED there. Duplicating the address
+/// would let the two drift the moment a booking is edited.
+///
+/// Rows are created when the trip starts, so a booking with no rows predates
+/// stop tracking — which is different from a journey stalled at stop 1, and
+/// the app can say so.
+model BookingStop {
+  id        BigInt @id @default(autoincrement())
+  bookingId String @map("booking_id") @db.Uuid
+
+  /// Zero-based index into Booking.stops.
+  seq Int
+
+  /// Snapshotted only so a stop can still be named if the booking's JSON is
+  /// later edited. Never preferred over Booking.stops.
+  address String?
+
+  arrivedAt  DateTime? @map("arrived_at")
+  departedAt DateTime? @map("departed_at")
+
+  /// Where the driver actually was when they marked it — what makes this
+  /// evidence rather than a claim. Null when the device had no fix.
+  arrivedLat Decimal? @map("arrived_lat") @db.Decimal(10, 7)
+  arrivedLng Decimal? @map("arrived_lng") @db.Decimal(10, 7)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@unique([bookingId, seq])
+  @@index([bookingId, seq])
+  @@map("booking_stops")
+}

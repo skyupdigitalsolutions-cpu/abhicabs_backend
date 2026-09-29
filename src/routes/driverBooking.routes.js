@@ -88,4 +88,30 @@ router.post(
   ctrl.recordOdometer
 );
 
+/* ---------------- intermediate stops ---------------- */
+
+/**
+ * The full route with progress. Readable in any state so the driver can see
+ * where the trip goes before accepting or starting it.
+ */
+router.get(
+  '/:bookingId/stops',
+  validate({ params: s.bookingIdParamSchema }),
+  ctrl.listStops
+);
+
+// ONGOING only — see bookingStop.service. Both are idempotent, so a retry on a
+// bad connection is safe and keeps the first timestamp.
+router.post(
+  '/:bookingId/stops/:seq/arrive',
+  validate({ params: s.stopParamSchema, body: s.stopArriveSchema }),
+  ctrl.arriveAtStop
+);
+
+router.post(
+  '/:bookingId/stops/:seq/depart',
+  validate({ params: s.stopParamSchema }),
+  ctrl.departStop
+);
+
 module.exports = router;

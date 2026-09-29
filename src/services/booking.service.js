@@ -32,6 +32,7 @@ const audit = require('./audit.service');
 const funnel = require('./funnel.service');
 const discountService = require('./discount.service');
 const M = require('../lib/money');
+const env = require('../config/env');
 const { emit, EVENTS } = require('../lib/events');
 const { BOOKING_SELECT, BOOKING_LIST_SELECT } = require('../models/booking.model');
 
@@ -139,7 +140,25 @@ async function settleAttempt(attemptId, { outcome, bookingId = null, failureReas
  * percentage rather than a flat figure because a flat advance makes no sense
  * across a Rs 800 local trip and a Rs 20,000 outstation booking.
  */
-const PARTIAL_PCT = Number(process.env.PARTIAL_PAYMENT_PCT || 50);
+/*
+ * ONE advance percentage, read from one place.
+ *
+ * There were two, and they disagreed. This constant read PARTIAL_PAYMENT_PCT
+ * and defaulted to 50; env.payment.advancePercent reads
+ * PAYMENT_ADVANCE_PERCENT and defaults to 25. Because splitPayment freezes
+ * advanceDue onto the booking's fareBasis, and payment.service prefers that
+ * frozen value over its own config, the 50 always won and the 25 was never
+ * reached — it looked like a live setting but was dead code.
+ *
+ * The rider saw 25% on the payment screen (the app's own constant, matching
+ * the env default) and was then charged 50% by Razorpay. On a Rs 15,111 fare
+ * that is Rs 3,777.75 promised against Rs 7,555.50 taken.
+ *
+ * Now there is a single source. PARTIAL_PAYMENT_PCT is no longer read at all;
+ * if it is set in any environment it does nothing, which is the intended
+ * outcome — one name for one number.
+ */
+const PARTIAL_PCT = env.payment.advancePercent;
 
 function splitPayment(total, paymentMode) {
   const fare = M.dec(total);

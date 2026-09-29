@@ -23,6 +23,7 @@ const payment = require('./payment.service');
 const allocation = require('./allocation.service');
 const billing = require('./billing.service');
 const location = require('./location.service');
+const bookingStop = require('./bookingStop.service');
 
 /**
  * Everything the trip-detail screen needs, in one owner-scoped call.
@@ -39,10 +40,28 @@ async function bookingSummary(bookingId, actor) {
   // The rest are independent — run them together. Each is tolerant of "nothing
   // yet" (no payments, not allocated, no invoice, not live), so a partial trip
   // returns a partial-but-valid summary rather than erroring.
-  const [payments, activeAllocation, invoice] = await Promise.all([
+  const [payments, activeAllocation, invoice, stops] = await Promise.all([
     payment.listForBooking(bookingId).catch(() => []),
     allocation.getForBooking(bookingId).catch(() => null),
     billing.getInvoiceForBooking(bookingId).catch(() => null),
+    /*
+     * The rider's own view of stop progress.
+     *
+     * Added to the summary rather than as a separate customer endpoint: the
+     * trip screen already fetches this on a poll, so the progress arrives with
+     * the driver's position and the status, and cannot disagree with them
+     * across two requests landing out of order.
+     *
+     * Same shape the driver sees, minus nothing — where the car has been is
+     * the rider's own trip, not privileged information. arrivedLat/Lng are not
+     * included by listForBooking, so the driver's exact position is not leaked
+     * either way.
+     *
+     * Caught to [] like its neighbours: a booking made before stop tracking
+     * existed, or a read that fails, must still return a usable summary rather
+     * than breaking the whole trip screen.
+     */
+    bookingStop.listForBooking(bookingId).catch(() => []),
   ]);
 
   // Live driver position only makes sense while the trip is in motion and a
@@ -80,6 +99,12 @@ async function bookingSummary(bookingId, actor) {
     allocation: allocationView,
     invoice,
     liveLocation,
+    /**
+     * Intermediate stops with progress. Empty for a trip with no stops, and
+     * also for one booked before stop tracking — those are told apart by the
+     * `tracked` flag on each entry rather than by the array being empty.
+     */
+    stops,
   };
 }
 
