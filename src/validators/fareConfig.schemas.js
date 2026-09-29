@@ -8,6 +8,17 @@
  * Every money field is coerced from a string, because an HTML number input
  * hands you "450" and not 450. Coercing here means the service never has to
  * wonder which it got.
+ *
+ * NOTE ON baseFare — it is deliberately absent from this file.
+ *
+ * The flat per-trip base fare was retired from the product. The column still
+ * exists (`fare_configs.base_fare`, Decimal @default(0)) because it is part of
+ * the configSnapshot frozen onto every past booking's fareBasis, and the fare
+ * engine hardcodes a literal '0.00' rather than reading it. Since no key named
+ * baseFare is declared below and Zod strips unknown keys, a stray baseFare sent
+ * by an older admin build is silently dropped and the column takes its default
+ * of 0. There is no longer any way to write a non-zero base fare through the
+ * admin API, which is the intent.
  */
 
 const { z } = require('zod');
@@ -37,7 +48,6 @@ const tripType = z.enum(TRIP_TYPES);
  * and update can make every key optional without duplicating the list.
  */
 const fields = {
-  baseFare: money,
   perKm: money,
   perMinute: money,
   minimumFare: money,
@@ -79,14 +89,12 @@ const optionalFields = Object.fromEntries(
 );
 
 /**
- * A rate card is useless without a base and a per-km, so those two are
- * required.
+ * perKm is the only rate a card cannot do without — it is what the distance
+ * leg is priced from, and the column is NOT NULL with no default. Everything
+ * else defaults to 0, which reads as "this rule is off".
  *
  * minimumFare is OPTIONAL. Omitting it means "no floor enforced", which the
- * engine already supported — fare.service reads `config.minimumFare ?? 0` —
- * but this schema demanded it, so the admin form's blank field produced a
- * 400 and the Create button looked dead. Everything else defaults to 0,
- * which reads as "this rule is off".
+ * engine already supported — fare.service reads `config.minimumFare ?? 0`.
  */
 const createSchema = z
   .object({
@@ -95,17 +103,15 @@ const createSchema = z
      * declared after it.
      *
      * Spread last, it silently won: optionalFields contains an optional
-     * `baseFare` and `perKm` too, so those overwrote the required versions
-     * above them and a rate card with NO base fare and NO per-km rate passed
-     * validation. Prisma then rejected the insert, since both columns are NOT
-     * NULL with no default — a 500 where a 400 naming the missing field
-     * belonged.
+     * `perKm` too, so it overwrote the required version above it and a rate
+     * card with NO per-km rate passed validation. Prisma then rejected the
+     * insert, since the column is NOT NULL with no default — a 500 where a 400
+     * naming the missing field belonged.
      */
     ...optionalFields,
     cityId: z.coerce.number().int().positive(),
     vehicleClass,
     tripType,
-    baseFare: money,
     perKm: money,
   })
   .superRefine(surgeBandIsSane);
