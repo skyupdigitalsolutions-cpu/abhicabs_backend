@@ -43,6 +43,9 @@ const maps = require('./maps.service');
 const M = require('../lib/money');
 const { BOOKING_SELECT, STATUS_FLOW, ACTIVE_STATUSES } = require('../models/booking.model');
 const bookingStopService = require('./bookingStop.service');
+const email = require('./email.service');
+const gstService = require('./gst.service');
+const env = require('../config/env');
 
 /* ------------------------------------------------------------------ *
  * Transition table
@@ -405,6 +408,25 @@ async function startTrip(
     console.warn('[lifecycle] could not initialise stop progress', booking.bookingNumber, err?.message);
   }
 
+  /*
+   * Tell the rider to check the start reading.
+   *
+   * Now, not later: the rider is beside the car and the dial is still visible.
+   * A dispute about the starting number after the trip is one nobody can
+   * settle, because the evidence drove away.
+   *
+   * Emitted alongside the status change rather than folded into it — a
+   * notification saying "your trip started" and one saying "check this number"
+   * are different asks, and a rider who dismisses the first should still get
+   * the second.
+   */
+  emit(EVENTS.ODOMETER_START_RECORDED, {
+    bookingId: booking.id,
+    bookingNumber: booking.bookingNumber,
+    odometerKm: booking.startOdometerKm ?? null,
+    photoUrl: booking.startOdometerPhotoUrl ?? null,
+  });
+
   emit(EVENTS.BOOKING_STATUS_CHANGED, {
     bookingId: booking.id,
     bookingNumber: booking.bookingNumber,
@@ -760,6 +782,56 @@ async function completeTrip(bookingId, actor, meta, { finalFare = null, odometer
       await allocationService.releaseVehicleForBooking(tx, bookingId, 'completed', meta);
     },
   });
+
+  /*
+   * Email the invoice.
+   *
+   * After the transaction, deliberately. finaliseBooking wrote the invoice
+   * inside the COMPLETED transition; sending mail from inside that transaction
+   * would hold a database lock open for the length of an SMTP round trip, and a
+   * provider timeout would roll back a completed trip.
+   *
+   * Not awaited for the same reason a rider should not watch a spinner while a
+   * mail server thinks. sendInvoiceEmail never throws, so a failure here cannot
+   * reach the driver completing the trip — it is logged, and the invoice is
+   * still downloadable in the app.
+   */
+  void (async () => {
+    try {
+      const inv = await billing.getInvoiceForBooking(bookingId).catch(() => null);
+      if (!inv) return;
+
+      const full = await prisma.booking.findUnique({
+        where: { id: bookingId },
+        select: {
+          bookingNumber: true, tripType: true, vehicleClass: true,
+          pickupAddress: true, dropAddress: true, pickupAt: true,
+          distanceKm: true, finalFare: true, estimatedFare: true,
+          customer: { select: { user: { select: { name: true, email: true, phone: true } } } },
+        },
+      });
+      if (!full) return;
+
+      const gstConfig = await gstService
+        .resolveConfig(inv.placeOfSupply)
+        .catch(() => null);
+
+      await email.sendInvoiceEmail({
+        to: full.customer?.user?.email ?? null,
+        name: full.customer?.user?.name ?? null,
+        invoice: inv,
+        booking: full,
+        customer: full.customer?.user ?? null,
+        seller: {
+          address: gstConfig?.address ?? null,
+          gstin: inv.sellerGstin ?? gstConfig?.gstin ?? null,
+          supportEmail: env.mail?.replyTo || 'support@abhicabs.in',
+        },
+      });
+    } catch (err) {
+      console.error('[lifecycle] invoice email failed:', err.message);
+    }
+  })();
 
   // Day 11: one durable TripEvent marking the trip end. Lifecycle-boundary
   // write, not part of the ping firehose.

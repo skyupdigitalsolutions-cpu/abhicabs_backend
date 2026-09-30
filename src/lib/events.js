@@ -52,6 +52,15 @@ const EVENTS = Object.freeze({
   BOOKING_STATUS_CHANGED: 'booking.status_changed',
   PAYMENT_RECEIVED: 'payment.received',
   ALLOCATION_MADE: 'allocation.made',
+  /**
+   * The driver has photographed and entered the START odometer reading.
+   *
+   * Emitted so the rider can check the number before the trip begins, while
+   * they are standing next to the car and the dial is still visible. Raised
+   * after the fact and the rider is arguing about a reading nobody can go back
+   * and look at.
+   */
+  ODOMETER_START_RECORDED: 'odometer.start_recorded',
 });
 
 /**

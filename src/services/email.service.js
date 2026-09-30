@@ -175,4 +175,57 @@ async function sendTripStartOtpEmail({ to, name, code, bookingNumber, pickupAt }
   return { ...result, to: maskEmail(to) };
 }
 
-module.exports = { sendOtpEmail, sendTripStartOtpEmail, maskEmail, isConfigured };
+/* ------------------------------------------------------------------ *
+ * Invoice
+ * ------------------------------------------------------------------ */
+
+/**
+ * Email a completed trip's invoice.
+ *
+ * THE INVOICE IS THE EMAIL BODY, not an attachment.
+ *
+ * A PDF attachment is the obvious choice and the worse one: many clients block
+ * attachments from unknown senders by default, most mobile clients will not
+ * preview one inline, and generating it would mean running a headless browser
+ * on the API container. Inline HTML renders in the inbox, on a phone, without a
+ * download — and the app still produces a real PDF locally from the same markup
+ * when the rider asks to download it.
+ *
+ * Never throws. This is called after a payment has already settled and a trip
+ * has already completed; a mail provider being down must not roll back money or
+ * fail a request. A failure is logged and the rider can still download the
+ * invoice in the app.
+ */
+async function sendInvoiceEmail({ to, name, invoice, booking, customer, seller }) {
+  if (!to) {
+    // A phone-first signup has a placeholder address. Nothing to do, and not
+    // an error — it is the normal state for a large share of riders.
+    return { skipped: true, reason: 'NO_EMAIL' };
+  }
+
+  try {
+    const { buildInvoiceHtml, buildInvoiceText } = require('./invoiceTemplate');
+
+    const html = buildInvoiceHtml({ invoice, booking, customer, seller });
+    const text = buildInvoiceText({ invoice, booking });
+
+    const isTax = invoice?.type === 'TAX';
+    const subject = `${isTax ? 'Tax invoice' : 'Invoice'} ${invoice?.invoiceNumber ?? ''} — ${BRAND}`.trim();
+
+    const result = await getProvider().send({ to, subject, text, html });
+
+    console.log(`[mail] invoice ${invoice?.invoiceNumber} sent to ${maskEmail(to)} (${result.messageId})`);
+    return { ...result, to: maskEmail(to) };
+  } catch (err) {
+    console.error('[mail] invoice send failed:', err.message);
+    return { failed: true, error: err.message };
+  }
+}
+
+module.exports = {
+  sendOtpEmail,
+  sendTripStartOtpEmail,
+  sendInvoiceEmail,
+  maskEmail,
+  isConfigured,
+};

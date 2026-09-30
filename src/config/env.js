@@ -202,6 +202,22 @@ const env = {
     sacCode: process.env.INVOICE_SAC_CODE || '996412',
   },
 
+  /* ---------------- Assistant (chatbot) ---------------- */
+  assistant: {
+    /*
+     * The key NEVER leaves the server. The app talks to our endpoint, which
+     * talks to OpenAI — so a key is not shipped in a binary anyone can unpack,
+     * and we keep the ability to cap usage, log, and refuse off-topic requests.
+     */
+    apiKey: process.env.OPENAI_API_KEY || '',
+    // Small and cheap: this answers questions about a cab service, not a
+    // research assistant. Override per environment if needed.
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    // A hard ceiling on one reply, so a runaway response cannot cost a fortune
+    // or fill a phone screen.
+    maxTokens: Number(process.env.OPENAI_MAX_TOKENS || 400),
+  },
+
   /* ---------------- Payments ---------------- */
   payment: {
     // 'mock' (default, offline) or 'razorpay'. The factory falls back to mock

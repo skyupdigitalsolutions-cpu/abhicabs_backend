@@ -118,4 +118,8 @@ router.use('/admin/location', apiLimiter, locationRoutes.ops);
 router.use('/location', apiLimiter, locationRoutes.rider);
 router.use('/admin/audit', apiLimiter, require('./audit.routes'));
 
+// The in-app help bot. apiLimiter on top of the route's own writeLimiter,
+// because every call costs money upstream at OpenAI.
+router.use('/assistant', apiLimiter, require('./assistant.routes'));
+
 module.exports = router;

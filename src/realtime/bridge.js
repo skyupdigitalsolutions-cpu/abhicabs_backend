@@ -104,6 +104,23 @@ function wire(io) {
     io.to(rooms.DISPATCH).emit('trip:status', body);
   });
 
+  /* ---- odometer.start_recorded → the booking room only ---- */
+
+  bus.on(EVENTS.ODOMETER_START_RECORDED, (payload) => {
+    /*
+     * The rider's room only, not dispatch. Ops already see the reading on the
+     * trip record; this exists so the customer app can put the number and the
+     * photo in front of the rider while the car is still beside them.
+     */
+    io.to(rooms.booking(payload.bookingId)).emit('odometer:start', {
+      bookingId: payload.bookingId,
+      bookingNumber: payload.bookingNumber,
+      odometerKm: payload.odometerKm,
+      photoUrl: payload.photoUrl,
+      at: payload.at,
+    });
+  });
+
   /* ---- booking.cancelled → booking room + dispatch ---- */
 
   bus.on(EVENTS.BOOKING_CANCELLED, (payload) => {

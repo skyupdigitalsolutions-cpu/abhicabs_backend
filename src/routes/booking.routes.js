@@ -85,6 +85,18 @@ router.patch(
 /** The customer's tax/non-tax invoice for a completed booking. */
 router.get('/:id/invoice', validate({ params: ls.idParamSchema }), invoiceCtrl.myInvoice);
 
+/**
+ * The invoice as HTML, for the app to render to a PDF locally.
+ *
+ * Same template the emailed copy uses, so the downloaded document and the one
+ * in the rider's inbox cannot differ.
+ */
+router.get(
+  '/:id/invoice/html',
+  validate({ params: ls.idParamSchema }),
+  invoiceCtrl.myInvoiceHtml
+);
+
 /* ---------------- cancellation ---------------- */
 
 /**
