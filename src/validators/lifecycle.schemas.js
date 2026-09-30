@@ -66,7 +66,22 @@ const policyQuerySchema = z.object({
   tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']),
 });
 
+/**
+ * A rating and an optional comment.
+ *
+ * Integer 1-5 only. Half stars look friendly and make every average
+ * incomparable with the ones already stored, and the database CHECK would
+ * reject them anyway.
+ */
+const reviewSchema = z.object({
+  rating: z.coerce.number().int().min(1).max(5),
+  // Generous but bounded: long enough for a real account of what went wrong,
+  // short enough that it cannot be used to store a payload.
+  comment: z.string().trim().max(2000).optional().nullable(),
+});
+
 module.exports = {
+  reviewSchema,
   idParamSchema,
   cancelSchema,
   adminCancelSchema,

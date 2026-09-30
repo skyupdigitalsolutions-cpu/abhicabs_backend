@@ -14,6 +14,7 @@ const express = require('express');
 const ctrl = require('../controllers/booking.controller');
 const life = require('../controllers/lifecycle.controller');
 const invoiceCtrl = require('../controllers/invoice.controller');
+const reviewCtrl = require('../controllers/review.controller');
 const { validate } = require('../middlewares/validate');
 const { requireAuth, attachPermissions } = require('../middlewares/auth');
 const { idempotent } = require('../middlewares/idempotency');
@@ -103,5 +104,19 @@ router.post(
   validate({ params: ls.idParamSchema, body: ls.cancelSchema }),
   life.cancel
 );
+
+/* ---------------- review ---------------- */
+
+/**
+ * The rider rates their own completed trip. Upserts, so the modal can be
+ * reopened and the rating changed.
+ */
+router.post(
+  '/:id/review',
+  validate({ params: ls.idParamSchema, body: ls.reviewSchema }),
+  reviewCtrl.submit
+);
+
+router.get('/:id/review', validate({ params: ls.idParamSchema }), reviewCtrl.mine);
 
 module.exports = router;

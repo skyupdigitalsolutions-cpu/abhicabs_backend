@@ -656,6 +656,8 @@ model Booking {
   /// Progress against those stops: when the driver reached and left each one.
   /// Separate from `stops`, which is the plan — see BookingStop.
   stopProgress  BookingStop[]
+  /// The rider's rating of this trip, once given. At most one.
+  review        TripReview?
 
   pickupAt DateTime  @map("pickup_at")
   returnAt DateTime? @map("return_at") // required for ROUND_TRIP
@@ -1586,4 +1588,44 @@ model BookingStop {
   @@unique([bookingId, seq])
   @@index([bookingId, seq])
   @@map("booking_stops")
+}
+
+
+/// A rider's rating and comment for one completed trip.
+///
+/// Separate from Driver.ratingAvg, which is an aggregate: that can say a driver
+/// averages 4.6 and cannot say which trip went wrong or what the rider wrote.
+/// Ops need the individual rows.
+model TripReview {
+  /// One review per booking, so the booking IS the key. Editing a rating
+  /// updates the row rather than adding a second.
+  bookingId String @id @map("booking_id") @db.Uuid
+
+  customerId String @map("customer_id") @db.Uuid
+
+  /// Snapshotted, not joined through the allocation: allocations are released
+  /// at trip end and can be reassigned, but the review must keep pointing at
+  /// whoever actually drove. Null when the trip had no allocation recorded —
+  /// a review of the service is still worth keeping.
+  driverId String? @map("driver_id") @db.Uuid
+
+  /// 1 to 5. Range enforced by a CHECK in the database too, because a value
+  /// outside it poisons every average computed from it.
+  rating  Int
+  comment String?
+
+  /// Ops workflow: NEW | REVIEWED | ACTIONED. A one-star review nobody reads
+  /// is worse than none.
+  status    String  @default("NEW") @db.VarChar(16)
+  adminNote String? @map("admin_note")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([rating, createdAt])
+  @@index([driverId, createdAt])
+  @@map("trip_reviews")
 }
