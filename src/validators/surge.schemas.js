@@ -6,7 +6,14 @@
 
 const { z } = require('zod');
 
-const tier = z.enum(['METRO', 'TALUKA', 'VILLAGE']);
+/**
+ * The four tiers, most-served to least.
+ *
+ * Must match the AreaTier enum in schema.prisma. Adding one here without the
+ * migration lets an admin save a tier the database will reject; adding it in
+ * the migration without this silently refuses a tier that exists.
+ */
+const tier = z.enum(['METRO', 'DISTRICT', 'TALUKA', 'VILLAGE']);
 
 const latitude = z.coerce.number().min(-90).max(90);
 const longitude = z.coerce.number().min(-180).max(180);
@@ -72,6 +79,14 @@ const updateAreaSchema = z
  */
 const updateRuleSchema = z
   .object({
+    /*
+     * The short-notice window, in minutes. 1440 = 24 hours.
+     *
+     * The ceiling matters: a window longer than a day would make every
+     * scheduled booking "immediate" and quietly retire the standing
+     * percentage, which is a surcharge nobody would be able to account for.
+     * 60 in a metro, 240 (four hours) elsewhere — see surge.service.
+     */
     immediateWithinMinutes: z.coerce.number().int().min(1).max(1440).optional(),
     immediatePct: z.coerce.number().min(0).max(100).optional(),
     standardPct: z.coerce.number().min(0).max(100).optional(),

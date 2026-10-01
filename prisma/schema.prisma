@@ -1438,8 +1438,25 @@ model DiscountRedemption {
 /// be larger than a suburb and still be a taluka. Supply is what actually
 /// differs — a metro has drivers idle nearby, a village may have one car
 /// twenty minutes away, and a late booking there costs more to serve.
+/// How well served a place is, which is what decides its surge percentages.
+///
+/// Ordered loosely from most supply to least: a metro has cars idle a few
+/// streets away; a village may have one car twenty minutes out and no second
+/// option if it declines. DISTRICT sits between a metro and a taluka — a
+/// district headquarters town with a real fleet presence, but not a city.
+///
+/// DISTRICT and TALUKA currently carry IDENTICAL surge percentages. They are
+/// still separate tiers and separate surge_rules rows, because that is a
+/// commercial coincidence rather than a rule: the two are different kinds of
+/// place and the business may price them apart later. Collapsing them now
+/// would mean a migration and a reclassification of every area to undo.
+///
+/// ADDING A TIER is a migration (Postgres enums cannot be extended from the
+/// Prisma schema alone) PLUS a surge_rules row, or pickups in that tier fall
+/// through to the FALLBACK_TIER in surge.service and are charged metro rates.
 enum AreaTier {
   METRO
+  DISTRICT
   TALUKA
   VILLAGE
 }
@@ -1485,13 +1502,22 @@ model SurgeRule {
   id   Int      @id @default(autoincrement())
   tier AreaTier @unique
 
-  /// A pickup this soon counts as immediate. 60 = "within the hour".
-  immediateWithinMinutes Int @default(60) @map("immediate_within_minutes")
+  /// A pickup this soon counts as IMMEDIATE, in minutes.
+  ///
+  /// 240 = "within four hours", which is the operating window the business
+  /// works to: outside a metro, finding a car at short notice means calling
+  /// round, and four hours is roughly the point at which that stops being a
+  /// scramble. The default was 60 when surge was metro-only and urgency meant
+  /// "right now".
+  ///
+  /// Per tier, deliberately. A metro can fill a booking inside the hour; a
+  /// village cannot, so the same clock would describe two different realities.
+  immediateWithinMinutes Int @default(240) @map("immediate_within_minutes")
 
   /// Percentage added when the pickup IS that soon.
   immediatePct Decimal @default(0) @map("immediate_pct") @db.Decimal(5, 2)
-  /// Percentage added otherwise — a scheduled booking. Zero in a metro,
-  /// non-zero where supply is thin whenever the trip is booked.
+  /// Percentage added otherwise — a scheduled booking. Lower in a metro,
+  /// higher where supply is thin whenever the trip is booked.
   standardPct  Decimal @default(0) @map("standard_pct") @db.Decimal(5, 2)
 
   isActive  Boolean  @default(true) @map("is_active")

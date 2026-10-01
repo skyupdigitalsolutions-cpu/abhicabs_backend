@@ -30,13 +30,14 @@
  *   6. waiting charge      not charged — always zero
  *   7. night allowance     flat + % of distance           (NOT airport)
  *   7b. airport surcharge  flat                           (airport only)
- *   8. surge               clamped to the card's band     (METRO pickups only)
+ *   8. surge               clamped to the card's band     (by pickup tier)
  *   9. minimum fare floor  RETIRED — the floor is a distance, applied at step 1
  *
- * DEMAND PRICING IS LIVE, AND ONLY INSIDE METRO AREAS. clampSurge enforces the
- * rate card's band; surge.service decides whether a premium applies at all, and
- * charges one only when the PICKUP classifies as METRO, at a percentage an
- * admin has written into surge_rules. Nothing a client sends can raise a fare.
+ * DEMAND PRICING IS LIVE, ACROSS ALL FOUR AREA TIERS. clampSurge enforces the
+ * rate card's band; surge.service decides the percentage from the PICKUP's
+ * tier (metro, district, taluka, village) and how soon the trip is, reading
+ * every figure from a surge_rules row an admin wrote. Nothing a client sends
+ * can raise a fare.
  *
  * THERE IS NO BASE FARE. The flat per-trip amount was removed; a fare is the
  * distance driven plus only the allowances that represent a real cost. See the
@@ -288,8 +289,8 @@ function touchesNight(pickupAt, returnAt, window, timeZone = DEFAULT_TIMEZONE) {
  *
  * What did NOT change is who decides the premium. A multiplier reaching here
  * can only have come from surge.service, which:
- *   • charges a premium ONLY when the pickup classifies as METRO, and
- *   • reads the percentage from a surge_rules row an admin wrote.
+ *   • classifies the pickup into an area tier, and
+ *   • reads that tier's percentages from a surge_rules row an admin wrote.
  * Nothing a client sends can raise a fare — `requestedSurge` is treated as a
  * floor of 1 upstream and is clamped to the rate card's band here.
  *
@@ -923,12 +924,11 @@ function computeFare(input, config) {
       // is the first thing to check when a fare carries less surge than
       // expected.
       surgeWasClamped: !surge.equals(M.dec(requestedSurge ?? 1)),
-      // Demand pricing is enabled, but only ever applies to a METRO pickup —
-      // surge.service returns 1x for every other tier. Kept in the frozen fare
-      // so "why did this trip carry no premium?" is answerable without
-      // re-deriving the tier months later.
+      // Demand pricing is enabled, across all four area tiers. Kept in the
+      // frozen fare so "why did this trip carry no premium?" is answerable
+      // without re-deriving the tier months later — the tier itself and the
+      // percentage that produced the multiplier travel on the quote.
       surgeDisabled: false,
-      surgeMetroOnly: true,
       // The rupee minimum-fare floor is retired; the floor is a distance now.
       // Always false, kept so an old booking's fareBasis reads the same shape.
       belowMinimumFare: belowMinimum,

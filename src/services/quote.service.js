@@ -935,7 +935,7 @@ async function getQuote(input) {
       multiplier: surgeInfo.surge,
       /** The figure to show a rider: 5, 10, 15 — not 1.05. */
       pct: surgeInfo.pct,
-      /** METRO | TALUKA | VILLAGE, and the named area it matched. */
+      /** METRO | DISTRICT | TALUKA | VILLAGE, and the named area it matched. */
       tier: surgeInfo.tier,
       area: surgeInfo.area,
       /** False when no configured area contained the pickup — see FALLBACK_TIER. */
@@ -1387,7 +1387,7 @@ async function quoteAllClasses(input) {
       multiplier: surgeInfo.surge,
       /** The figure to show a rider: 5, 10, 15 — not 1.05. */
       pct: surgeInfo.pct,
-      /** METRO | TALUKA | VILLAGE, and the named area it matched. */
+      /** METRO | DISTRICT | TALUKA | VILLAGE, and the named area it matched. */
       tier: surgeInfo.tier,
       area: surgeInfo.area,
       /** False when no configured area contained the pickup — see FALLBACK_TIER. */

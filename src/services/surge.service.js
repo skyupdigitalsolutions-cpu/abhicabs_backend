@@ -6,42 +6,46 @@
  * Decides what a booking's urgency costs, from WHERE it starts and HOW SOON.
  *
  * ---------------------------------------------------------------------------
- * SURGE APPLIES INSIDE METRO AREAS ONLY
+ * WHY TIERS
  * ---------------------------------------------------------------------------
- * This is the current commercial policy and it is enforced here, in code,
- * rather than only by leaving the other tiers' percentages at zero.
+ * A flat percentage on anything booked at short notice prices a 4am village
+ * pickup exactly like a city-centre one, and the two are not alike: a metro
+ * has drivers idle a few streets away, while a village may have one car twenty
+ * minutes out and no second option if it declines.
  *
- * The reasoning is the same as the airport allowance exemption in
- * fare.service: a rule that lives only in data survives exactly until someone
- * seeds a new tier by copying an existing row, and then it is silently gone
- * with nothing to show that it ever applied. Keeping it here makes "we surge
- * in metros" a property of the product. The migration still zeroes and
- * deactivates the non-metro rules so the table reads honestly, but the
- * resolver does not depend on that having been done.
+ * So the premium follows SUPPLY, not just the clock. Four tiers, each with its
+ * own standing percentage and its own short-notice percentage:
  *
- * It also inverts an asymmetry that was hard to defend. The old tiers charged
- * MORE in a village (10% standing, 15% urgent) than in a city, on the argument
- * that supply is thinner there. That is true, and it meant the customers with
- * the fewest alternatives paid the largest premium. A metro is where demand
- * genuinely spikes against a pool of nearby cars, and it is the only place a
- * premium actually buys the rider a faster pickup.
+ *   METRO     dense fleet, a booking can be filled within the hour
+ *   DISTRICT  a district headquarters with real fleet presence, not a city
+ *   TALUKA    a town served from further out
+ *   VILLAGE   thin supply, often a single car, no fallback if it declines
+ *
+ * EVERY ONE OF THOSE NUMBERS LIVES IN surge_rules AND IS SET BY AN ADMIN from
+ * the dashboard. Nothing here hardcodes a percentage, and nothing here decides
+ * which tiers may charge — a tier with a rule row charges what that row says.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SHORT-NOTICE WINDOW IS PER TIER
+ * ---------------------------------------------------------------------------
+ * `immediateWithinMinutes` is a column, not a constant, because "short notice"
+ * means different things by tier. A metro can fill a booking inside the hour;
+ * a village cannot, so outside the cities the window is measured in hours —
+ * the business works to a two-to-four hour horizon, which is roughly the point
+ * at which finding a car stops being a scramble.
  *
  * ---------------------------------------------------------------------------
  * ONLY AN ADMIN SETS THE NUMBER
  * ---------------------------------------------------------------------------
- * Nothing here hardcodes a percentage. Every figure comes from a surge_rules
- * row, written through PATCH /admin/surge/rules/:tier, which sits behind the
- * FARE_EDIT permission — the same bar as editing a rate card — and is audited
- * as SURGE_RULE_UPDATED with the before and after values.
- *
- * The METRO rule ships at 0%, so enabling surge is a deliberate act by an
- * admin rather than something that switches itself on at deploy. Until then
- * the pipeline runs and charges nothing.
+ * Every figure comes from a surge_rules row, written through
+ * PATCH /admin/surge/rules/:tier, which sits behind the FARE_EDIT permission —
+ * the same bar as editing a rate card — and is audited as SURGE_RULE_UPDATED
+ * with the before and after values.
  *
  * `requestedSurge` from a client can only ever act as a floor of 1 (see
  * resolveSurge), and fare.service clamps the result to the rate card's own
- * min/max band. So there are three gates between a request and a premium, and
- * a client controls none of them.
+ * min/max band. So a client controls nothing: not whether a premium applies,
+ * not how large it is, and not whether its own request is honoured.
  */
 
 const { prisma } = require('../config/prisma');
@@ -68,26 +72,24 @@ const TTL = 6 * 60 * 60;
 const FALLBACK_TIER = 'METRO';
 
 /**
- * The tiers a premium may be charged in. Metro only — see the module note.
+ * Every configured tier may charge. There is no allowlist here any more.
  *
- * A Set rather than a string comparison so opening a second tier later is one
- * entry here plus an admin filling in that tier's percentages, with no logic
- * to rewrite.
+ * An earlier version restricted surge to METRO in code. That was the right
+ * shape for "surge in metro cities" taken literally, and the wrong shape for
+ * the actual commercial policy, which prices all four tiers — so it is gone.
  *
- * NOTE THE INTERACTION WITH FALLBACK_TIER, which is also METRO. An unmatched
- * pickup — one in no configured service area — therefore lands in the only
- * surgeable tier. That is safe because the METRO rule's percentages are what
- * decide the money, and they start at zero: an unclassified place can only
- * ever be charged what an admin has deliberately set for metros. It is also
- * why `matched` travels in the result, so a quote can say whether the tier was
- * a real classification or a default.
+ * WHAT DECIDES A PREMIUM NOW IS THE surge_rules ROW, and nothing else:
+ *   • no row for the tier          -> no premium
+ *   • row with is_active = false   -> no premium
+ *   • row with 0 / 0               -> no premium, but the tier is "on"
+ *
+ * That is deliberately all in data. An admin opening or closing surge for a
+ * tier is a commercial decision made on a Tuesday afternoon; it should not
+ * need a developer, a deploy and a release window. The audit log records who
+ * changed what, which is the control that actually matters.
+ *
+ * FALLBACK_TIER still governs a pickup in no configured area — see classify.
  */
-const SURGEABLE_TIERS = new Set(['METRO']);
-
-/** Is demand pricing charged at all in this tier? */
-function isSurgeable(tier) {
-  return SURGEABLE_TIERS.has(tier);
-}
 
 async function loadAreas() {
   return cache.getOrSet(
@@ -172,21 +174,16 @@ async function resolveSurge({ pickupPoint, pickupAt, requestedSurge = 1 }) {
   const rule = rules.find((r) => r.tier === tier);
 
   /*
-   * Nothing to charge, for either of two reasons:
+   * Nothing to charge, because the tier has no active rule row — either it was
+   * never configured, or an admin switched it off.
    *
-   *   • the tier is not surgeable — currently anything that is not METRO, and
-   *     checked BEFORE the rule is read so a stray non-zero percentage left on
-   *     a taluka or village row cannot reach a fare, or
-   *   • there is no active rule row for the tier, which means an admin
-   *     deactivated it. A missing configuration must never invent a premium.
-   *
-   * `surgeable` travels back so a quote can distinguish "no premium applies
-   * here" from "the premium happens to be 0% today" without re-deriving the
-   * policy.
+   * Charging nothing is the safe direction: a missing configuration must never
+   * invent a premium. The alternative (fall back to another tier's numbers)
+   * would mean a half-finished setup silently billing rural riders at whatever
+   * the metro rate happened to be.
    */
-  const surgeable = isSurgeable(tier);
 
-  if (!surgeable || !rule) {
+  if (!rule) {
     return {
       // Never below 1: a client cannot discount a fare by asking.
       surge: Math.max(Number(requestedSurge) || 1, 1),
@@ -194,7 +191,9 @@ async function resolveSurge({ pickupPoint, pickupAt, requestedSurge = 1 }) {
       tier,
       area,
       matched,
-      surgeable,
+      // False only when the tier has no active rule. Lets a quote distinguish
+      // "surge is not configured here" from "the premium is 0% today".
+      surgeable: false,
       // A pickup in the past is a scheduling error the validator rejects; it
       // is clamped here so it cannot read as negative urgency.
       minutesToPickup: Math.max(0, minutesToPickup),
@@ -233,27 +232,36 @@ async function resolveSurge({ pickupPoint, pickupAt, requestedSurge = 1 }) {
 function buildReason({ pct, immediate, tier, area, rule }) {
   const where = area ? area.name : tier.toLowerCase();
   if (immediate) {
-    const hrs = rule.immediateWithinMinutes;
-    const window = hrs === 60 ? 'the hour' : `${hrs} minutes`;
+    /*
+     * The window, said the way a person would say it. The raw column is
+     * minutes, and "booked within 240 minutes of pickup" is arithmetic the
+     * rider should not have to do to understand a charge on their own fare.
+     */
+    const mins = rule.immediateWithinMinutes;
+    let window;
+    if (mins === 60) window = 'the hour';
+    else if (mins % 60 === 0) window = `${mins / 60} hours`;
+    else window = `${mins} minutes`;
     return `${pct}% added — booked within ${window} of pickup in ${where}.`;
   }
   /*
-   * The scheduled-booking line used to say the area "is served from further
-   * away", which was written for the village tier and is simply untrue of a
-   * metro — the only tier that can reach this branch now. A rider who can see
-   * cars on the map a street away reads that as an excuse.
+   * The standing percentage, which means different things by tier — so the
+   * line does too.
    *
-   * It says demand instead, which is what a standing metro percentage actually
-   * represents and what support can defend on the phone.
+   * In a metro a standing premium is demand: there are cars nearby and the
+   * price reflects how many people want them. Outside one it is distance and
+   * scarcity: the car is coming from further away and there may be only one.
+   * Telling a village rider "demand is high" when they can see an empty road
+   * reads as an excuse; telling a city rider the area "is served from further
+   * away" when cars are visibly a street away reads the same.
    */
-  return `${pct}% added — demand is high in ${where}.`;
+  if (tier === 'METRO') return `${pct}% added — demand is high in ${where}.`;
+  return `${pct}% added — ${where} is served from further away.`;
 }
 
 module.exports = {
   classify,
   resolveSurge,
   invalidate,
-  isSurgeable,
   FALLBACK_TIER,
-  SURGEABLE_TIERS,
 };
