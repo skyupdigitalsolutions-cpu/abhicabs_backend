@@ -319,19 +319,62 @@ model FareConfig {
   /// would break the read path for bookings already taken. The fare engine
   /// hardcodes a zero base and does not read this.
   baseFare        Decimal @default(0) @map("base_fare") @db.Decimal(10, 2)
+  /// The per-kilometre rate, and now the ONLY thing that distinguishes a
+  /// one-way from a round trip.
+  ///
+  /// Each (city, class, TRIP TYPE) has its own row, so ONE_WAY and ROUND_TRIP
+  /// already carry independent rates — e.g. 19.00/km one-way and 12.00/km round
+  /// trip for the same car. That is the whole pricing model now that the
+  /// return-leg percentage is retired: a one-way is billed on the distance it
+  /// actually covers, at the one-way rate; a round trip is billed on both legs
+  /// (quote.service doubles the route) at the lower round-trip rate.
   perKm           Decimal @map("per_km") @db.Decimal(10, 2)
   perMinute       Decimal @default(0) @map("per_minute") @db.Decimal(10, 2)
-  // @default(0) so a rate card can be created without a floor. fare.service
-  // already reads it as `config.minimumFare ?? 0`, so a zero minimum was
-  // always handled correctly by the engine — it just could not be expressed
-  // from the admin form, which required the field and then rejected the
-  // request when it was left blank.
+
+  /// RETIRED. Always 0 — the rupee minimum-fare floor was replaced by a
+  /// minimum DISTANCE floor (`minimumKm` below), which is how the trade
+  /// actually quotes: "minimum 50 km", not "minimum ₹900".
+  ///
+  /// Kept as a zeroed column rather than dropped, for the same reason as
+  /// `baseFare`: `minimumFare` is part of the configSnapshot frozen onto every
+  /// booking's fareBasis, and dropping it would break the read path for
+  /// bookings already taken. The fare engine no longer reads it.
   minimumFare     Decimal @default(0) @map("minimum_fare") @db.Decimal(10, 2)
+
+  /// MINIMUM BILLABLE DISTANCE for a trip on this card.
+  ///
+  /// A trip shorter than this is billed as though it covered this many
+  /// kilometres: billableKm = max(actualKm, minimumKm). 0 = no floor.
+  ///
+  /// This replaced the rupee floor it sits beside. A floor expressed in money
+  /// has to be re-derived every time a rate changes — put the per-km up and
+  /// the old ₹900 minimum silently stops matching the distance it was meant to
+  /// represent — whereas "minimum 50 km" keeps its meaning and prices itself
+  /// off whatever the current rate is. It also reads honestly on the
+  /// breakdown: the rider sees the kilometres they were billed for rather than
+  /// an unexplained "minimum fare adjustment" line.
+  ///
+  /// Distinct from `minKmPerDay`, which is a ROUND_TRIP-only guarantee
+  /// multiplied by the number of days. Where both apply, the larger wins.
+  minimumKm       Decimal @default(0) @map("minimum_km") @db.Decimal(10, 2)
+
   cancellationFee Decimal @default(0) @map("cancellation_fee") @db.Decimal(10, 2)
 
-  // --- ONE_WAY only ---
-  // Outstation one-way: the driver returns empty, so a share of the return
-  // distance may be charged. 0 = disabled.
+  /// RETIRED. Always 0.
+  ///
+  /// This charged a one-way trip a percentage (latterly 100%) of its distance
+  /// again, to pay for the driver returning empty — so a 19.00/km one-way
+  /// actually billed 38.00/km, which is not what the published rate sheet
+  /// said. The business now prices that return into the ONE_WAY `perKm` rate
+  /// itself, which is both simpler to reason about and what the rate card
+  /// already claimed.
+  ///
+  /// The return distance is now billed in exactly one place: a ROUND_TRIP,
+  /// where quote.service doubles the route because the car genuinely drives it
+  /// twice with the passenger aboard.
+  ///
+  /// Kept as a zeroed column, not dropped: it is part of the frozen
+  /// configSnapshot on every past booking. The engine no longer reads it.
   returnEmptyPct Decimal @default(0) @map("return_empty_pct") @db.Decimal(5, 2)
 
   // --- ROUND_TRIP only ---
@@ -373,12 +416,19 @@ model FareConfig {
   hourlyKmPerHour Int     @default(10) @map("hourly_km_per_hour")
 
   // --- surge bounds (MVAG caps dynamic pricing) ---
-  /// Demand pricing is DISABLED: both bounds are pinned to 1.00, so the band
-  /// has no width and no fare can carry a premium. The fare engine enforces
-  /// this independently (clampSurge returns 1 unconditionally) — these columns
-  /// exist so the rate card reads honestly and so restoring surge is a
-  /// deliberate two-part change rather than one forgotten line.
-  maxSurge Decimal @default(1.00) @map("max_surge") @db.Decimal(4, 2)
+  /// The band a surge multiplier is clamped into before it reaches the fare.
+  ///
+  /// Demand pricing is LIVE AGAIN, but only inside metro areas and only on
+  /// percentages an admin has set — see surge.service and SurgeRule. These
+  /// columns are the second, independent limit: whatever the surge rules say,
+  /// no fare on this card can exceed `maxSurge` times its own subtotal. MVAG
+  /// caps dynamic pricing at 2x the notified fare, which is where the default
+  /// comes from.
+  ///
+  /// Leaving maxSurge at 1.00 on a card switches surge off for that card
+  /// alone, which is how a single class or trip type is exempted without
+  /// touching the tier rules.
+  maxSurge Decimal @default(2.00) @map("max_surge") @db.Decimal(4, 2)
   minSurge Decimal @default(1.00) @map("min_surge") @db.Decimal(4, 2)
 
   effectiveFrom DateTime @default(now()) @map("effective_from")
