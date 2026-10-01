@@ -32,6 +32,7 @@ const { prisma } = require('../config/prisma');
 const { ApiError } = require('../utils/helpers');
 const { checkPlace, allowedStateNames } = require('../lib/serviceArea');
 const { emit, EVENTS } = require('../lib/events');
+const { normaliseReturnDate } = require('../lib/returnDate');
 
 /* ------------------------------------------------------------------ *
  * Reference number
@@ -116,7 +117,11 @@ async function create(input, actor, meta = {}) {
       dropState: dropCheck.state || input.dropState || null,
 
       pickupAt: new Date(input.pickupAt),
-      returnAt: input.returnAt ? new Date(input.returnAt) : null,
+      // Normalised the same way a booking's is, so an enquiry converted into a
+      // real trip later does not shift its own return date in the process.
+      // No city is resolved on this path — an enquiry may be for a place we do
+      // not operate in at all — so the default zone applies.
+      returnAt: normaliseReturnDate(input.returnAt, undefined, input.pickupAt),
 
       passengers: input.passengers ?? null,
       note: input.note || null,

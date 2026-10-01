@@ -26,6 +26,7 @@ const { ApiError } = require('../utils/helpers');
 const gst = require('./gst.service');
 const M = require('../lib/money');
 const serviceArea = require('../lib/serviceArea');
+const { normaliseReturnDate, returnDateIsValid } = require('../lib/returnDate');
 
 /** Longest trip the router will price. Guards against an absurd destination. */
 const MAX_TRIP_KM = Number(process.env.MAX_TRIP_KM || 1500);
@@ -317,8 +318,13 @@ async function resolveLocalSwitch(tripType, pickupPoint, dropPoint, city, chosen
  *   v2 — 20260928090000_oneway_full_return (return_empty_pct -> 100)
  *   v3 — 20260929090000_retire_base_fare   (base_fare -> 0)
  *   v4 — 20260929092000_disable_demand_pricing (min/max_surge -> 1)
+ *   v5 — 20261006090000_min_km_oneway_rates_metro_surge
+ *        (minimum_km added, minimum_fare -> 0, return_empty_pct -> 0,
+ *         max_surge reopened to 2.00). This one moves real prices in both
+ *         directions — one-way fares roughly halve — so a stale cached row
+ *         would quote a rider one total and book them at another.
  */
-const FARE_CFG_CACHE_VERSION = 'v4';
+const FARE_CFG_CACHE_VERSION = 'v5';
 const fareCfgPrefix = (cityId, vehicleClass) =>
   `fare:cfg:${FARE_CFG_CACHE_VERSION}:${cityId}:${vehicleClass}:`;
 
@@ -676,13 +682,35 @@ async function getQuote(input) {
   } = input;
 
   if (tripType === 'ROUND_TRIP' && !returnAt) {
-    throw ApiError.badRequest('A round trip needs a return date and time', 'RETURN_TIME_REQUIRED');
+    throw ApiError.badRequest('A round trip needs a return date', 'RETURN_TIME_REQUIRED');
   }
   if (tripType === 'HOURLY' && !rentalPackageId && !rentalHours) {
     throw ApiError.badRequest('An hourly rental needs a package or a number of hours', 'RENTAL_TERMS_REQUIRED');
   }
-  if (returnAt && new Date(returnAt) <= new Date(pickupAt)) {
-    throw ApiError.badRequest('Return time must be after pickup', 'INVALID_RETURN_TIME');
+
+  /*
+   * DATES, NOT INSTANTS.
+   *
+   * A round trip carries a return DATE now — the time picker is gone, because
+   * nothing priced off it (the fare counts calendar days) and it could move
+   * the night allowance on a round trip for no reason the rider could see.
+   *
+   * So the old `returnAt <= pickupAt` test is wrong twice over. It rejects a
+   * same-day return, which is the commonest round trip there is; and the error
+   * it produces talks about a return TIME the rider was never shown. The
+   * comparison that matters is whether the return date is on or after the
+   * pickup's date, in the city's own timezone.
+   *
+   * The city is not loaded yet at this point, so the check runs in the default
+   * zone and the value is re-normalised against the real city timezone further
+   * down, once `city` is resolved. Both markets are IST today, so the two
+   * agree; the re-normalisation is what keeps that true if they ever do not.
+   */
+  if (returnAt && !returnDateIsValid(returnAt, pickupAt)) {
+    throw ApiError.badRequest(
+      'The return date cannot be before the pickup date',
+      'INVALID_RETURN_DATE',
+    );
   }
 
   /* -- 1. city + service area, before spending anything -- */
@@ -840,6 +868,30 @@ async function getQuote(input) {
     matchedPackage = Boolean(rentalPackage);
   }
 
+  /*
+   * The return date, pinned to a fixed hour on its own calendar day in the
+   * CITY's timezone.
+   *
+   * Done here, after `city` is resolved, rather than trusting whatever instant
+   * the client sent. Two things depend on it and both must agree with what is
+   * eventually stored on the booking:
+   *
+   *   chargeableDays  counts calendar days between pickup and return, which
+   *                   drives the driver allowance and the min-km-per-day
+   *                   guarantee;
+   *   touchesNight    asks whether either END of the trip falls in the night
+   *                   window — and before this, an arbitrary client-supplied
+   *                   time could put the return inside it and add a night
+   *                   allowance to a trip that returns at noon.
+   *
+   * Normalising means an older app build still sending a full timestamp prices
+   * a round trip identically to a new one that sends only a date.
+   */
+  const normalisedReturnAt =
+    effectiveTripType === 'ROUND_TRIP'
+      ? normaliseReturnDate(returnAt, city.timezone, pickupAt)
+      : null;
+
   // The city's IANA timezone decides the night window and the calendar-day
   // count. Without it the fare would follow the SERVER's timezone, so the same
   // booking would price differently on a Bengaluru laptop and a UTC server.
@@ -848,7 +900,7 @@ async function getQuote(input) {
       tripType: effectiveTripType,
       distanceKm, durationMin, pickupAt,
       // A switched trip has no return leg to price.
-      returnAt: localSwitch ? null : returnAt,
+      returnAt: localSwitch ? null : normalisedReturnAt,
       waitingMinutes,
       surge: surgeInfo.surge,
       rentalPackage,
@@ -911,7 +963,15 @@ async function getQuote(input) {
         address: p.formattedAddress || null,
       })),
       pickupAt,
-      returnAt,
+      /*
+       * The NORMALISED return, not the raw input — this is the instant the
+       * fare above was actually computed against, and the one the booking will
+       * store. Echoing the client's own value back would let a quote and the
+       * booking made from it disagree about when the trip ends, which is the
+       * kind of discrepancy that only surfaces in a dispute months later.
+       * Null for anything that is not a round trip.
+       */
+      returnAt: normalisedReturnAt ? normalisedReturnAt.toISOString() : null,
       oneWayKm: route.distanceKm,
       totalKm: distanceKm,
       durationMin,
@@ -987,9 +1047,27 @@ async function compareTripTypes(input) {
     getFareConfig(input.cityId, input.vehicleClass, 'ROUND_TRIP').catch(() => null),
   ]);
 
-  const returnAt =
-    input.returnAt ||
-    new Date(new Date(input.pickupAt).getTime() + 10 * 3600 * 1000).toISOString();
+  /*
+   * This endpoint compares a one-way against a round trip for the same route,
+   * so the round-trip half needs a return even when the caller is only asking
+   * "what would the other product cost?" and has not chosen one.
+   *
+   * The fallback is the SAME DAY rather than the ten-hours-later instant it
+   * used to invent. Ten hours past a 14:00 pickup is midnight, which crosses
+   * into the next calendar day — and the fare counts calendar days, so the
+   * comparison silently quoted TWO days of driver allowance and twice the
+   * min-km-per-day guarantee against a one-way that got neither. The round
+   * trip looked worse than it is, on a screen whose entire purpose is to
+   * compare the two fairly.
+   *
+   * Normalised either way, so a caller-supplied return prices here exactly as
+   * it will in getQuote.
+   */
+  const returnAt = normaliseReturnDate(
+    input.returnAt || input.pickupAt,
+    city.timezone,
+    input.pickupAt,
+  );
 
   return {
     trip: {
@@ -1201,6 +1279,24 @@ async function quoteAllClasses(input) {
     packagesByClass = new Map(pkgs.map((p) => [p.vehicleClass, p]));
   }
 
+  /*
+   * Normalised ONCE, outside the loop, exactly as getQuote does it.
+   *
+   * This path and getQuote must agree to the rupee: this one prices the list
+   * the rider chooses from, and getQuote prices the booking they then make. A
+   * raw client timestamp here and a normalised one there would put the two
+   * trips on different calendar-day counts, and the fare would change between
+   * the screen and the confirmation for no reason the rider could see. That
+   * class of mismatch is what the stops bug in this same function was.
+   *
+   * Outside the loop because the answer cannot vary by vehicle class, and
+   * fifteen identical timezone conversions per request is work for nothing.
+   */
+  const normalisedReturnAt =
+    effectiveTripType === 'ROUND_TRIP'
+      ? normaliseReturnDate(input.returnAt, city.timezone, input.pickupAt)
+      : null;
+
   const options = latest
     .map((config) => {
       const rentalPackage = packagesByClass ? packagesByClass.get(config.vehicleClass) || null : null;
@@ -1216,7 +1312,7 @@ async function quoteAllClasses(input) {
             distanceKm: route.distanceKm * multiplier,
             durationMin: route.durationMin * multiplier,
             pickupAt: input.pickupAt,
-            returnAt: input.returnAt,
+            returnAt: normalisedReturnAt,
             waitingMinutes: input.waitingMinutes || 0,
             surge: surgeInfo.surge,
             rentalPackage,

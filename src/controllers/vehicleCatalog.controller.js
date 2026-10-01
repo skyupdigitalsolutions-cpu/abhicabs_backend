@@ -30,6 +30,23 @@ exports.update = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Vehicle updated', data: { vehicle } });
 });
 
+/**
+ * PERMANENT delete of a vehicle class, for one created by mistake.
+ *
+ * Distinct from `deactivate` on a distinct route, not a flag: only one of the
+ * two is reversible, and an admin tool should not be able to send the
+ * destructive one by accident. Refused by the service if anything — a booking,
+ * a vehicle, a rate card, a rental package — still names the class.
+ */
+exports.destroy = asyncHandler(async (req, res) => {
+  const vehicle = await service.destroy(req.params.key, req.user, auditMeta(req));
+  res.json({
+    success: true,
+    message: `${vehicle.name} permanently deleted`,
+    data: { vehicle },
+  });
+});
+
 exports.deactivate = asyncHandler(async (req, res) => {
   const vehicle = await service.deactivate(req.params.key, req.user, auditMeta(req));
   res.json({ success: true, message: `${vehicle.name} retired`, data: { vehicle } });

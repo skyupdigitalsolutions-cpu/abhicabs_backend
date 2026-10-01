@@ -34,6 +34,7 @@ const discountService = require('./discount.service');
 const M = require('../lib/money');
 const env = require('../config/env');
 const { emit, EVENTS } = require('../lib/events');
+const { returnDateIsValid } = require('../lib/returnDate');
 const { BOOKING_SELECT, BOOKING_LIST_SELECT } = require('../models/booking.model');
 
 /* ------------------------------------------------------------------ *
@@ -223,15 +224,33 @@ function validateTiming({ pickupAt, returnAt, tripType, scheduled }) {
 
   if (tripType === 'ROUND_TRIP') {
     if (!returnAt) {
-      throw ApiError.badRequest('A round trip needs a return time', 'RETURN_TIME_REQUIRED');
+      throw ApiError.badRequest('A round trip needs a return date', 'RETURN_DATE_REQUIRED');
     }
-    if (new Date(returnAt).getTime() <= pickup) {
-      throw ApiError.badRequest('Return time must be after pickup', 'INVALID_RETURN_TIME');
+    /*
+     * DATES, NOT INSTANTS — and the reason the old test had to go.
+     *
+     * A round trip carries only a return DATE now. The caller normalises it to
+     * a fixed hour on that day (lib/returnDate), so comparing instants would
+     * reject a perfectly ordinary same-day round trip whose pickup happens to
+     * fall after that hour — a 22:30 departure returning the same date — with
+     * the message "return time must be after pickup", about a time the rider
+     * was never asked for and cannot change.
+     *
+     * The real rule is that the return cannot be on an EARLIER DAY than the
+     * pickup, which is what returnDateIsValid asks. The database CHECK
+     * constraint (`return_at > pickup_at`) still backs this up, and the
+     * normaliser's late-pickup clamp is what keeps the two from disagreeing.
+     */
+    if (!returnDateIsValid(returnAt, pickupAt)) {
+      throw ApiError.badRequest(
+        'The return date cannot be before the pickup date',
+        'INVALID_RETURN_DATE',
+      );
     }
   } else if (returnAt) {
     // The database CHECK constraint enforces this too; rejecting here gives a
     // clearer message than a constraint violation would.
-    throw ApiError.badRequest('A one-way trip cannot have a return time', 'UNEXPECTED_RETURN_TIME');
+    throw ApiError.badRequest('A one-way trip cannot have a return date', 'UNEXPECTED_RETURN_DATE');
   }
 }
 
@@ -478,7 +497,25 @@ async function create(input, actor, meta = {}) {
           stops: quote.trip.stops ?? (input.stops || []),
 
           pickupAt: new Date(input.pickupAt),
-          returnAt: input.returnAt ? new Date(input.returnAt) : null,
+          /*
+           * The return the QUOTE was priced against, not the raw request.
+           *
+           * quote.service normalises a round trip's return date to a fixed
+           * hour on its own calendar day in the city's timezone, and prices
+           * the calendar-day count and the night window off that. Storing the
+           * client's original instant instead would leave the booking saying
+           * one thing and its own frozen fareBasis another — and the database
+           * CHECK constraint (`return_at > pickup_at`) is satisfied by the
+           * normalised value, not necessarily by the raw one.
+           *
+           * Falls back to the request only if the quote did not carry a return
+           * (anything that is not a round trip, where it is null anyway).
+           */
+          returnAt: quote.trip.returnAt
+            ? new Date(quote.trip.returnAt)
+            : input.returnAt
+              ? new Date(input.returnAt)
+              : null,
 
           // Trip-type extras. For HOURLY we store the package the quote actually
           // applied (resolved to this class), not the raw id the app sent.

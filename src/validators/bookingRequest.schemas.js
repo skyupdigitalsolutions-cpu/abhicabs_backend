@@ -15,6 +15,8 @@
 
 const { z } = require('zod');
 
+const { returnDateIsValid } = require('../lib/returnDate');
+
 const uuid = z.string().uuid();
 
 const tripType = z.enum(['ONE_WAY', 'ROUND_TRIP', 'HOURLY', 'AIRPORT']);
@@ -47,7 +49,17 @@ const createSchema = z
     dropState: z.string().trim().max(64).optional(),
 
     pickupAt: futureDate,
-    returnAt: z.string().datetime({ offset: true }).optional(),
+    /**
+     * A round trip's return DATE. Accepts a bare `YYYY-MM-DD` as well as a
+     * full ISO timestamp — the app sends the date now, older builds send a
+     * timestamp, and an enquiry worked by phone should not be refused over the
+     * difference. The service normalises either to a fixed hour on that day.
+     */
+    returnAt: z
+      .string()
+      .datetime({ offset: true })
+      .or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'returnAt must be a date (YYYY-MM-DD)'))
+      .optional(),
 
     passengers: z.coerce.number().int().min(1).max(60).optional(),
     note: z.string().trim().max(500).optional(),
@@ -65,8 +77,11 @@ const createSchema = z
     path: ['returnAt'],
   })
   .refine(
-    (v) => !v.returnAt || new Date(v.returnAt) >= new Date(v.pickupAt),
-    { message: 'Return cannot be before pickup', path: ['returnAt'] },
+    // Compared as DATES, not instants. A return date is only ever "the same
+    // day or later", and comparing timestamps rejects a same-day return whose
+    // pickup is in the evening — see lib/returnDate.
+    (v) => !v.returnAt || returnDateIsValid(v.returnAt, v.pickupAt),
+    { message: 'The return date cannot be before the pickup date', path: ['returnAt'] },
   );
 
 const listQuerySchema = z.object({

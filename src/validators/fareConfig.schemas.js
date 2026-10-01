@@ -9,16 +9,24 @@
  * hands you "450" and not 450. Coercing here means the service never has to
  * wonder which it got.
  *
- * NOTE ON baseFare — it is deliberately absent from this file.
+ * NOTE ON THE RETIRED FIELDS — baseFare, minimumFare and returnEmptyPct are
+ * all deliberately absent from this file.
  *
- * The flat per-trip base fare was retired from the product. The column still
- * exists (`fare_configs.base_fare`, Decimal @default(0)) because it is part of
- * the configSnapshot frozen onto every past booking's fareBasis, and the fare
- * engine hardcodes a literal '0.00' rather than reading it. Since no key named
- * baseFare is declared below and Zod strips unknown keys, a stray baseFare sent
- * by an older admin build is silently dropped and the column takes its default
- * of 0. There is no longer any way to write a non-zero base fare through the
- * admin API, which is the intent.
+ * Each was retired from the product but kept as a zeroed column, because all
+ * three are part of the configSnapshot frozen onto every past booking's
+ * fareBasis and dropping them would break that read path. The fare engine
+ * freezes literal zeroes rather than reading them.
+ *
+ * Since no key of those names is declared below and Zod strips unknown keys, a
+ * stray value sent by an older admin build is silently dropped and the column
+ * keeps its default of 0. There is no longer any way to write a base fare, a
+ * rupee minimum or a return-leg percentage through the admin API, which is the
+ * intent — the last of those in particular, since an admin setting
+ * returnEmptyPct back to 100 would double every one-way fare from a field that
+ * no longer appears anywhere on the rate card.
+ *
+ * What replaced them: the distance floor is `minimumKm`, and the empty return
+ * is priced into the ONE_WAY `perKm` rate.
  */
 
 const { z } = require('zod');
@@ -50,10 +58,29 @@ const tripType = z.enum(TRIP_TYPES);
 const fields = {
   perKm: money,
   perMinute: money,
-  minimumFare: money,
-  cancellationFee: money,
 
-  returnEmptyPct: percent,
+  /**
+   * The minimum BILLABLE DISTANCE, in kilometres. 0 = no floor.
+   *
+   * This replaced `minimumFare`, which is absent from this file for the same
+   * reason `baseFare` is: the column survives for the frozen fareBasis on past
+   * bookings, the engine no longer reads it, and since no key of that name is
+   * declared here Zod strips a stray one sent by an older admin build. There
+   * is no longer any way to write a rupee floor through the admin API.
+   *
+   * `returnEmptyPct` is gone for the same reason — the empty return is priced
+   * into the ONE_WAY per-km rate now, and an admin who could still set that
+   * percentage could silently double every one-way fare from a field whose
+   * effect is invisible on the rate card.
+   *
+   * Capped at 500 km rather than reusing `money`'s ceiling. A floor longer
+   * than the longest trip the router will price (MAX_TRIP_KM, 1500) is a
+   * typo that would bill every short hop as an intercity run, and 500 is
+   * already far beyond any defensible minimum.
+   */
+  minimumKm: z.coerce.number().min(0).max(500),
+
+  cancellationFee: money,
 
   minKmPerDay: z.coerce.number().int().min(0).max(2000),
   waitingPerHour: money,
@@ -93,8 +120,9 @@ const optionalFields = Object.fromEntries(
  * leg is priced from, and the column is NOT NULL with no default. Everything
  * else defaults to 0, which reads as "this rule is off".
  *
- * minimumFare is OPTIONAL. Omitting it means "no floor enforced", which the
- * engine already supported — fare.service reads `config.minimumFare ?? 0`.
+ * minimumKm is OPTIONAL. Omitting it means "no distance floor", which is the
+ * right default for a new card — a floor is a deliberate commercial decision,
+ * not something a blank form should invent.
  */
 const createSchema = z
   .object({

@@ -187,6 +187,102 @@ async function deactivate(key, actor, meta = {}) {
   return serialise(row);
 }
 
+/**
+ * PERMANENT delete of a vehicle class. No undo.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY RETIRING IS STILL THE NORMAL ANSWER
+ * ---------------------------------------------------------------------------
+ * `vehicleClass` is a free-text string, not a foreign key — it is written onto
+ * bookings, vehicles, rate cards and rental packages as text. So nothing in the
+ * database stops this delete, and that is exactly why the checks below have to
+ * be explicit: deleting a class that bookings reference does not fail, it
+ * silently leaves those bookings naming a class that no longer exists, and
+ * every screen that joins the catalogue for a name and a photo renders a blank.
+ *
+ * Retiring (deactivate) keeps the row and takes the class off the fare screen,
+ * which is the right move for a vehicle the business genuinely stopped
+ * offering. This is for the other case: a class created by mistake, or a
+ * placeholder like the old generic 'sedan' that was never sold and clutters
+ * the admin list permanently.
+ *
+ * REFUSES IF ANYTHING AT ALL REFERENCES IT. Not just active things — a
+ * cancelled booking from last year still names the class on its invoice.
+ */
+async function destroy(key, actor, meta = {}) {
+  const before = await prisma.vehicleCatalog.findUnique({ where: { key } });
+  if (!before) throw ApiError.notFound('Vehicle not found', 'VEHICLE_CLASS_NOT_FOUND');
+
+  /*
+   * Counted in one round trip rather than four awaited in sequence, and
+   * counting EVERY row rather than only active ones.
+   *
+   * The deactivate path above only checks active rate cards, which is correct
+   * for retiring — an inactive card is already out of the way. It is wrong
+   * here: an inactive card is still the evidence for what an old booking was
+   * charged, and deleting the class it prices leaves that unreadable.
+   */
+  const [bookings, vehicles, fares, packages] = await Promise.all([
+    prisma.booking.count({ where: { vehicleClass: key } }),
+    prisma.vehicle.count({ where: { vehicleClass: key } }),
+    prisma.fareConfig.count({ where: { vehicleClass: key } }),
+    prisma.rentalPackage.count({ where: { vehicleClass: key } }),
+  ]);
+
+  const blockers = [
+    bookings && `${bookings} booking(s)`,
+    vehicles && `${vehicles} vehicle(s) in the fleet`,
+    fares && `${fares} rate card(s)`,
+    packages && `${packages} rental package(s)`,
+  ].filter(Boolean);
+
+  if (blockers.length) {
+    throw ApiError.conflict(
+      `${before.name} is still referenced by ${blockers.join(', ')}, so deleting it would leave those records naming a class that no longer exists. ` +
+        'Retire it instead — it disappears from the app but keeps explaining the trips it priced.',
+      'VEHICLE_CLASS_IN_USE',
+    );
+  }
+
+  /*
+   * Images are stored on Cloudinary, not in the row, so deleting the row alone
+   * would orphan every file — paid-for storage nobody can reach or audit.
+   *
+   * Failures here are swallowed deliberately. A file that cannot be removed
+   * (already gone, provider down) must not block the delete the admin asked
+   * for, and leaving the row behind to keep the images tidy would be the wrong
+   * trade. Worth logging so an orphan is at least visible.
+   */
+  for (const image of usableImages(before.images)) {
+    if (!image.publicId) continue;
+    try {
+      await storage.destroy(image.publicId);
+    } catch (err) {
+      console.warn(`[vehicleCatalog] Could not delete image ${image.publicId}:`, err.message);
+    }
+  }
+
+  await prisma.vehicleCatalog.delete({ where: { key } });
+  await invalidate();
+
+  /*
+   * Audited with the FULL `before` and no `after`, which is what makes this
+   * recoverable in practice: the row is gone from the table, but the audit
+   * entry holds everything needed to recreate it if the delete was a mistake.
+   */
+  audit.recordAsync({
+    actor,
+    action: 'VEHICLE_CLASS_DELETED',
+    entityType: 'vehicle_catalog',
+    entityId: before.id,
+    before: serialise(before),
+    after: null,
+    meta,
+  });
+
+  return serialise(before);
+}
+
 async function activate(key, actor, meta = {}) {
   const row = await prisma.vehicleCatalog.update({
     where: { key },
@@ -292,6 +388,7 @@ module.exports = {
   create,
   update,
   deactivate,
+  destroy,
   activate,
   addImage,
   removeImage,

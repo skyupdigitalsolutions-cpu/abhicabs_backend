@@ -162,4 +162,73 @@ async function softDelete(id) {
   });
 }
 
-module.exports = { list, findById, create, update, softDelete };
+/**
+ * PERMANENT delete. The row is gone; there is no undo.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS ALONGSIDE softDelete RATHER THAN REPLACING IT
+ * ---------------------------------------------------------------------------
+ * Retiring was the only option, and it is still the right one for a vehicle
+ * that has done work: its trip history is evidence, and allocations.vehicleId
+ * is `onDelete: Restrict` precisely so that history cannot be erased.
+ *
+ * But the fleet list also accumulates rows that never were vehicles — a
+ * registration typed wrong, a duplicate created by a double-submit, a car
+ * added to the wrong city. Retiring those leaves them in the admin's list
+ * forever, greyed out, indistinguishable from a van that genuinely left the
+ * fleet last year. Admins asked to be able to remove them, and the honest
+ * answer is that a row with no history has nothing to protect.
+ *
+ * SO THE RULE IS: NEVER DRIVEN, NEVER ASSIGNED, NEVER DELETED FROM HISTORY.
+ *
+ * The allocation check is the one that matters and it is made explicitly here
+ * rather than left to the foreign key. Letting Postgres raise the Restrict
+ * violation would work, but it surfaces as a P2003 the admin reads as "500,
+ * something broke" — and it would fire AFTER the driver unlink below, leaving
+ * a driver detached from a vehicle that then refused to delete.
+ */
+async function hardDelete(id) {
+  const vehicle = await prisma.vehicle.findUnique({
+    where: { id },
+    select: { id: true, status: true, registrationNumber: true },
+  });
+  if (!vehicle) throw ApiError.notFound('Vehicle not found');
+
+  // Same guard as the soft delete: a car on a job is not a mistake to tidy up.
+  if (BLOCKS_DELETE.has(vehicle.status)) {
+    throw ApiError.conflict(
+      `Vehicle is currently ${vehicle.status} and cannot be removed until the trip ends`,
+      'VEHICLE_IN_USE'
+    );
+  }
+
+  const allocations = await prisma.allocation.count({ where: { vehicleId: id } });
+  if (allocations > 0) {
+    throw ApiError.conflict(
+      `${vehicle.registrationNumber} has been dispatched on ${allocations} trip(s), so its history cannot be deleted. ` +
+        'Remove it from the fleet instead — it stops appearing in dispatch but keeps its record.',
+      'VEHICLE_HAS_HISTORY'
+    );
+  }
+
+  /*
+   * Drivers point at a vehicle through a plain nullable column
+   * (drivers.assigned_vehicle_id), not a foreign key with a cascade rule. So
+   * deleting the vehicle would leave a driver holding the id of a row that no
+   * longer exists — a dangling reference nothing would notice until a dispatch
+   * query returned a driver with a vehicle that cannot be loaded.
+   *
+   * In one transaction with the delete, so the unlink cannot survive a failed
+   * delete and strand a driver with no vehicle for a car still in the fleet.
+   */
+  return prisma.$transaction(async (tx) => {
+    await tx.driver.updateMany({
+      where: { assignedVehicleId: id },
+      data: { assignedVehicleId: null },
+    });
+
+    return tx.vehicle.delete({ where: { id }, select: VEHICLE_SELECT });
+  });
+}
+
+module.exports = { list, findById, create, update, softDelete, hardDelete };

@@ -34,7 +34,7 @@ const audit = require('./audit.service');
  * rupee amounts are far inside the range where a double is exact to the paisa.
  */
 const DECIMALS = [
-  'baseFare', 'perKm', 'perMinute', 'minimumFare', 'cancellationFee',
+  'baseFare', 'perKm', 'perMinute', 'minimumFare', 'minimumKm', 'cancellationFee',
   'returnEmptyPct', 'waitingPerHour', 'driverAllowance',
   'nightAllowance', 'nightChargePct', 'airportSurcharge',
   'hourlyRate', 'maxSurge', 'minSurge',
@@ -221,18 +221,23 @@ async function create(input, actor, meta = {}) {
   }
 
   /*
-   * A ONE_WAY card with no return percentage gets the business rule — the
-   * full return leg — rather than the column default of 0.
+   * NO returnEmptyPct DEFAULT ANY MORE.
    *
-   * 0 means "the return is free", which is a pricing decision, not a blank.
-   * Left to the default, every one-way card created from the admin form
-   * without that field filled in quietly quoted half the intended fare, and
-   * nothing on the quote said so. An explicit value, 0 included, is kept.
+   * This used to force a new ONE_WAY card to 100 — the full return leg — on
+   * the grounds that a blank field should not silently halve the fare. That
+   * reasoning held while the return leg was how a one-way paid for the
+   * driver's empty drive home. It no longer is: the cost is priced into the
+   * ONE_WAY per_km rate itself, the engine ignores the column, and the
+   * migration zeroed every row.
+   *
+   * Leaving the default in would be actively harmful. The field is no longer
+   * on the admin form, so every card created from here would arrive with
+   * returnEmptyPct missing, get silently set to 100, and look — to anyone
+   * reading the table later — exactly like a deliberate decision to double
+   * one-way fares. The validator strips the key, so the column takes its
+   * default of 0 and the card says what it means.
    */
   const data = { ...input, effectiveFrom };
-  if (data.tripType === 'ONE_WAY' && data.returnEmptyPct == null) {
-    data.returnEmptyPct = 100;
-  }
 
   const row = await prisma.fareConfig.create({
     data,

@@ -32,7 +32,17 @@ router.patch(
   ctrl.update
 );
 
-// Soft delete (deactivate). Physical deletion is intentionally not offered.
+// Soft delete (deactivate). Keeps the vehicle's trip history.
 router.delete('/:id', validate({ params: s.idParamSchema }), ctrl.remove);
+
+/*
+ * PERMANENT delete. Registered AFTER '/:id' is harmless here — the paths
+ * differ by a trailing segment, so Express cannot confuse them — but it is
+ * kept adjacent so the pair is read together.
+ *
+ * Refused by the service unless the vehicle has never been dispatched, so
+ * this cannot be used to erase a trip record. See vehicle.service.hardDelete.
+ */
+router.delete('/:id/permanent', validate({ params: s.idParamSchema }), ctrl.destroy);
 
 module.exports = router;

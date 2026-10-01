@@ -21,7 +21,13 @@ const CONFIG = {
   baseFare: 100,
   perKm: 14,
   perMinute: 1,
+  // Retired: a rupee floor is no longer applied anywhere. Kept non-zero on
+  // purpose so the "ignores a retired minimum fare" test below proves the
+  // engine does not read it, rather than proving nothing because it was 0.
   minimumFare: 200,
+  // The replacement: a floor on billable DISTANCE. 0 = off for most tests,
+  // overridden where the floor itself is what is under test.
+  minimumKm: 0,
   driverAllowance: 400,   // bata per day
   nightAllowance: 300,    // flat
   nightChargePct: 10,     // plus 10% of the distance charge
@@ -34,7 +40,13 @@ const CONFIG = {
   minKmPerDay: 250,
   airportSurcharge: 150,
   maxSurge: 2,
-  minSurge: 0.5,
+  // 1.00, matching the schema default and the migration — NOT the 0.5 this
+  // used to carry. MVAG permits a 0.5x floor and the engine honours whatever
+  // band the card states, so a card left at 0.5 would let the clamp DISCOUNT a
+  // fare. Nothing reaches the engine below 1x today (surge.service floors it),
+  // but a test config that differs from production is exactly where a latent
+  // hazard hides from its own test suite.
+  minSurge: 1,
 };
 
 /** IST instant, so the test states the local wall-clock time it means. */
@@ -53,59 +65,160 @@ const quote = (overrides = {}, config = CONFIG) =>
     config
   );
 
-describe('demand pricing — disabled', () => {
-  // These guard a DELIBERATE product decision, not an implementation detail.
-  // If someone re-enables surge, these fail loudly rather than a premium
-  // quietly reappearing on every fare.
+describe('demand pricing — live, clamped to the rate card band', () => {
+  // Surge is charged again, but ONLY for metro pickups and only at a
+  // percentage an admin set. That decision lives in surge.service, which is
+  // async and database-backed; what the ENGINE owes is the band.
 
-  it('charges nothing extra when a caller requests a surge multiplier', () => {
+  it('applies a multiplier the caller was given', () => {
     const plain = quote();
-    const surged = quote({ surge: 2 });
-    expect(surged.surgeAmount).toBe('0.00');
-    expect(surged.total).toBe(plain.total);
+    const surged = quote({ surge: 1.5 });
+    // 1.5x on a subtotal, so the premium is half the subtotal again.
+    expect(Number(surged.surgeAmount)).toBeCloseTo(Number(plain.subtotal) * 0.5, 2);
+    expect(Number(surged.total)).toBeGreaterThan(Number(plain.total));
   });
 
-  it('ignores a surge band left open on the rate card', () => {
-    // The migration pins min/max_surge to 1.00, but the engine must not depend
-    // on that having been run — an un-migrated row must still price at 1x.
-    const staleBand = { ...CONFIG, minSurge: 0.5, maxSurge: 2 };
+  it('clamps a multiplier above the card ceiling', () => {
+    // MVAG caps dynamic pricing at 2x the notified fare, and maxSurge is where
+    // that lives. A rule row asking for more must not be able to exceed it.
+    const q = quote({ surge: 5 });
+    expect(q.meta.surgeMultiplier).toBe('2.00');
+    expect(q.meta.surgeWasClamped).toBe(true);
+  });
+
+  it('a card left at maxSurge 1.00 is exempt however high the request', () => {
+    // This is how one class or trip type is taken out of surge without
+    // touching the tier rules, so it has to keep working.
+    const exempt = { ...CONFIG, minSurge: 1, maxSurge: 1 };
     const q = fare.computeFare(
       { tripType: 'ONE_WAY', distanceKm: 20, durationMin: 40, pickupAt: ist('12:00'), surge: 2 },
-      staleBand
+      exempt
     );
     expect(q.meta.surgeMultiplier).toBe('1.00');
     expect(q.surgeAmount).toBe('0.00');
   });
 
-  it('shows no demand pricing line in the breakdown', () => {
-    const q = quote({ surge: 1.8 });
+  it('never discounts: a sub-1 multiplier is lifted to the card floor', () => {
+    // Three independent things stop a fare being discounted by a surge value:
+    // surge.service floors its result at 1, min_surge is 1.00 on every row,
+    // and the schema default is 1.00. This covers the last of the three.
+    const q = quote({ surge: 0.2 });
+    expect(q.meta.surgeMultiplier).toBe('1.00');
+    expect(q.surgeAmount).toBe('0.00');
+  });
+
+  it('honours a minSurge below 1 if a card genuinely states one', () => {
+    // Documenting the behaviour rather than endorsing it: the clamp is a BAND
+    // and respects what the card says. MVAG permits 0.5x, so this is legal —
+    // but it means a mis-typed min_surge is a discount, which is why both the
+    // migration and the schema default pin it to 1.00.
+    const discounting = { ...CONFIG, minSurge: 0.5 };
+    const q = fare.computeFare(
+      { tripType: 'ONE_WAY', distanceKm: 20, durationMin: 40, pickupAt: ist('12:00'), surge: 0.2 },
+      discounting
+    );
+    expect(q.meta.surgeMultiplier).toBe('0.50');
+  });
+
+  it('shows no demand pricing line when no premium applies', () => {
+    const q = quote({ surge: 1 });
     expect(q.breakdown.some((l) => l.label.startsWith('Demand pricing'))).toBe(false);
   });
 });
 
-describe('return leg — the full distance, both ways', () => {
-  it('charges the return at 100% of the outbound distance', () => {
-    const q = quote({ distanceKm: 100 }, { ...CONFIG, returnEmptyPct: 100 });
-    // 100 km x 14 = 1400 out, and the same again for the empty return.
+describe('return leg — retired, never charged', () => {
+  // A one-way used to be billed its distance TWICE: once outbound and again
+  // through returnEmptyPct, so a card advertising 14.00/km billed 28.00/km.
+  // The empty return is priced into the ONE_WAY per-km rate now, and the
+  // engine must not be able to re-apply it.
+
+  it('charges a one-way for the distance it covers, once', () => {
+    const q = quote({ distanceKm: 100 });
     expect(q.distance).toBe('1400.00');
-    expect(q.returnEmpty).toBe('1400.00');
+    expect(q.returnEmpty).toBe('0.00');
   });
 
-  it('labels a full return in kilometres, not as a percentage', () => {
-    // A rider reads "100.00 km x 14.00/km" and can check it against the
-    // outbound line above. "100% of distance" has to be decoded first.
+  it('ignores a returnEmptyPct left on an un-migrated rate card', () => {
+    // The migration zeroes the column, but the engine must not depend on that
+    // having been run — this is the regression that would silently double
+    // every one-way fare again.
+    const stale = { ...CONFIG, returnEmptyPct: 100 };
+    const q = quote({ distanceKm: 100 }, stale);
+    expect(q.returnEmpty).toBe('0.00');
+    expect(q.distance).toBe('1400.00');
+  });
+
+  it('shows no return journey line in the breakdown', () => {
     const q = quote({ distanceKm: 100 }, { ...CONFIG, returnEmptyPct: 100 });
-    const line = q.breakdown.find((l) => l.label.startsWith('Return journey'));
-    expect(line).toBeDefined();
-    expect(line.label).toContain('km x');
+    expect(q.breakdown.some((l) => l.label.startsWith('Return journey'))).toBe(false);
   });
 
-  it('never charges a return leg on a round trip, whose distance is already doubled', () => {
+  it('still bills both legs of a round trip, whose distance is already doubled', () => {
+    // The return distance is charged in exactly one place, and this is it.
+    //
+    // 600 km, not 200: quote.service has ALREADY doubled the route by the time
+    // the engine sees it, and CONFIG.minKmPerDay is 250, so a 200 km round
+    // trip is lifted to the 250 km guarantee and would test that floor instead
+    // of the thing this case is about. Same-day return, so days = 1.
     const q = quote(
-      { tripType: 'ROUND_TRIP', distanceKm: 200, returnAt: ist('18:00') },
+      { tripType: 'ROUND_TRIP', distanceKm: 600, returnAt: ist('18:00') },
       { ...CONFIG, returnEmptyPct: 100 }
     );
+    expect(q.meta.billableKm).toBe('600.00');
+    expect(q.distance).toBe('8400.00'); // 600 x 14, both legs, once
     expect(q.returnEmpty).toBe('0.00');
+  });
+
+  it('freezes returnEmptyPct as zero in the snapshot, whatever the card says', () => {
+    const q = quote({ distanceKm: 100 }, { ...CONFIG, returnEmptyPct: 100 });
+    expect(q.configSnapshot.returnEmptyPct).toBe('0.00');
+  });
+});
+
+describe('minimum km — the distance floor that replaced the fare floor', () => {
+  it('bills a short trip at the minimum distance', () => {
+    const q = quote({ distanceKm: 12 }, { ...CONFIG, minimumKm: 50 });
+    expect(q.meta.actualKm).toBe('12.00');
+    expect(q.meta.billableKm).toBe('50.00');
+    expect(q.distance).toBe('700.00'); // 50 x 14
+    expect(q.meta.usedMinimumKm).toBe(true);
+  });
+
+  it('leaves a trip above the floor alone', () => {
+    const q = quote({ distanceKm: 80 }, { ...CONFIG, minimumKm: 50 });
+    expect(q.meta.billableKm).toBe('80.00');
+    expect(q.meta.usedMinimumKmGuarantee).toBe(false);
+  });
+
+  it('says so in the breakdown, with the real distance', () => {
+    // The old rupee floor appeared as an unexplained "Minimum fare adjustment"
+    // with no relationship to anything above it. This names both numbers.
+    const q = quote({ distanceKm: 12 }, { ...CONFIG, minimumKm: 50 });
+    const line = q.breakdown.find((l) => l.label.startsWith('Distance'));
+    expect(line.note).toContain('50');
+    expect(line.note).toContain('12');
+  });
+
+  it('takes the larger of the flat floor and the per-day guarantee', () => {
+    // Both describe the least distance billable, so they must not be summed —
+    // that would double-count a short two-day round trip.
+    const q = quote(
+      { tripType: 'ROUND_TRIP', distanceKm: 40, returnAt: ist('18:00', '2026-09-11') },
+      { ...CONFIG, minimumKm: 50, minKmPerDay: 250 }
+    );
+    // 2 calendar days x 250 = 500, which beats the flat 50.
+    expect(q.meta.billableKm).toBe('500.00');
+    expect(q.meta.usedPerDayKmGuarantee).toBe(true);
+  });
+
+  it('ignores a retired minimum fare entirely', () => {
+    // CONFIG.minimumFare is 200 and this fare lands below it. Nothing should
+    // top it up, and no adjustment line should appear.
+    const q = quote({ distanceKm: 1, durationMin: 1 });
+    expect(q.minimumFareAdjustment).toBe('0.00');
+    expect(q.meta.belowMinimumFare).toBe(false);
+    expect(q.breakdown.some((l) => l.label.startsWith('Minimum fare'))).toBe(false);
+    expect(q.configSnapshot.minimumFare).toBe('0.00');
   });
 });
 

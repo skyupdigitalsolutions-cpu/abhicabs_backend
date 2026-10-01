@@ -59,6 +59,16 @@ adminRouter.delete('/:key', requirePermission(PERM),
   validate({ params: s.keyParamSchema }), ctrl.deactivate);
 
 /*
+ * PERMANENT delete, for a class created by mistake.
+ *
+ * Declared BEFORE the image routes below only for readability — it sits with
+ * the other lifecycle verbs. Express distinguishes it from '/:key' by the
+ * extra segment, and from '/:key/images/*' by the literal.
+ */
+adminRouter.delete('/:key/permanent', requirePermission(PERM),
+  validate({ params: s.keyParamSchema }), ctrl.destroy);
+
+/*
  * Images. multer runs BEFORE validate, because the body does not exist as
  * parsed fields until it has consumed the multipart stream.
  */

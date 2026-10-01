@@ -77,7 +77,7 @@ const estimateSchema = z
   })
   .refine(
     (v) => v.tripType !== 'ROUND_TRIP' || Boolean(v.returnAt),
-    { message: 'A round trip needs a return date and time', path: ['returnAt'] }
+    { message: 'A round trip needs a return date', path: ['returnAt'] }
   )
   .refine(
     (v) => v.tripType !== 'HOURLY' || Boolean(v.rentalPackageId) || Boolean(v.rentalHours),

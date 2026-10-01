@@ -49,7 +49,26 @@ const createBookingSchema = z
     stops: z.array(location).max(10).optional(),
 
     pickupAt: z.string().datetime({ message: 'pickupAt must be an ISO datetime' }),
-    returnAt: z.string().datetime().optional().nullable(),
+    /**
+     * A round trip's return DATE. The time picker was removed — nothing priced
+     * off it, and an arbitrary time could move the night allowance.
+     *
+     * Accepts a bare `YYYY-MM-DD` as well as a full ISO timestamp, because two
+     * app versions are in the field at once: a new build sends the date, an
+     * older one still sends a timestamp. Either way the service normalises it
+     * to a fixed hour on that calendar day in the city's timezone and prices
+     * off that, so the two cannot produce different fares for the same trip.
+     *
+     * The ORDER of the union matters: `.datetime()` is tried first so a real
+     * timestamp is validated as one, with the date form as the fallback. A
+     * loose `z.string().min(10)` on its own would accept "not a date!".
+     */
+    returnAt: z
+      .string()
+      .datetime()
+      .or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'returnAt must be a date (YYYY-MM-DD)'))
+      .optional()
+      .nullable(),
 
     // HOURLY: either a fixed package id, or a flexible hours commitment.
     rentalPackageId: z.coerce.number().int().positive().optional().nullable(),
@@ -106,7 +125,7 @@ const createBookingSchema = z
       .transform((v) => (v ? v : null)),
   })
   .refine((d) => d.tripType !== 'ROUND_TRIP' || !!d.returnAt, {
-    message: 'A round trip needs a return date and time',
+    message: 'A round trip needs a return date',
     path: ['returnAt'],
   })
   .refine((d) => d.tripType !== 'HOURLY' || !!d.rentalPackageId || !!d.rentalHours, {

@@ -22,28 +22,39 @@
  * ---------------------------------------------------------------------------
  * ORDER OF OPERATIONS  (the order is itself a business decision)
  * ---------------------------------------------------------------------------
- *   1. billable distance   max(actual, minimum guarantee)
+ *   1. billable distance   max(actual, minimumKm, minKmPerDay x days)
  *   2. distance charge     billableKm x perKm
  *   3. time charge         durationMin x perMinute        (one-way only)
- *   4. return-empty        % of distance charge           (one-way only)
+ *   4. return-empty        RETIRED — always zero
  *   5. driver allowance    bata x days                    (NOT airport)
  *   6. waiting charge      not charged — always zero
  *   7. night allowance     flat + % of distance           (NOT airport)
  *   7b. airport surcharge  flat                           (airport only)
- *   8. surge               DISABLED — always 1x, so always zero
- *   9. minimum fare floor  applied LAST
+ *   8. surge               clamped to the card's band     (METRO pickups only)
+ *   9. minimum fare floor  RETIRED — the floor is a distance, applied at step 1
  *
- * THERE IS NO DEMAND PRICING. clampSurge returns 1 unconditionally, so no fare
- * carries a premium regardless of tier, urgency or what a caller requests. See
- * the note on clampSurge for why it is neutralised there rather than removed.
+ * DEMAND PRICING IS LIVE, AND ONLY INSIDE METRO AREAS. clampSurge enforces the
+ * rate card's band; surge.service decides whether a premium applies at all, and
+ * charges one only when the PICKUP classifies as METRO, at a percentage an
+ * admin has written into surge_rules. Nothing a client sends can raise a fare.
  *
  * THERE IS NO BASE FARE. The flat per-trip amount was removed; a fare is the
  * distance driven plus only the allowances that represent a real cost. See the
  * note at step 2 for why the column and the `base` key survive as zeroes.
  *
+ * THERE IS NO RETURN-LEG CHARGE ON A ONE-WAY. A one-way is billed for the
+ * kilometres it covers, once, at the ONE_WAY per-km rate — which is set higher
+ * than the ROUND_TRIP rate precisely because the driver returns empty. Return
+ * distance is billed in exactly one place: a round trip, where the car really
+ * does drive it twice. See step 4.
+ *
+ * THE MINIMUM IS A DISTANCE, NOT A SUM OF MONEY. `minimumKm` floors the
+ * billable kilometres at step 1, so a short trip is priced as that distance at
+ * the current rate rather than topped up to a rupee figure that stops meaning
+ * anything the next time the rate card moves.
+ *
  * The night percentage deliberately excludes bata and waiting: those are fixed
  * allowances, not distance-driven, and uplifting them would overcharge.
- * The minimum-fare floor is last so it is a true floor on what is payable.
  *
  * AIRPORT is exempt from steps 5 and 7 — it pays the airport surcharge at 7b
  * instead. See ALLOWANCE_EXEMPT_TRIP_TYPES for why that is enforced here
@@ -266,38 +277,39 @@ function touchesNight(pickupAt, returnAt, window, timeZone = DEFAULT_TIMEZONE) {
  * it is silently corrected rather than trusted.
  */
 /**
- * DEMAND PRICING IS DISABLED. This always returns 1.
+ * DEMAND PRICING IS LIVE AGAIN — FOR METRO PICKUPS ONLY.
  *
  * ---------------------------------------------------------------------------
- * WHY THIS IS A CLAMP AND NOT A DELETION
+ * WHAT CHANGED, AND WHAT DID NOT
  * ---------------------------------------------------------------------------
- * The surge machinery upstream is substantial: surge.service classifies the
- * pickup into an area tier, reads rule rows, and decides a multiplier from how
- * soon the pickup is. Ripping that out would mean touching the area-tier
- * tables, both quote paths, the booking record and every screen that reports
- * `surge`, and it would throw away work that a later decision to switch
- * demand pricing back on would have to rebuild from nothing.
+ * This function used to `return M.dec(1)` unconditionally, which neutralised
+ * the whole surge pipeline at the one point where a multiplier becomes money.
+ * That hard zero is gone: the band is enforced again, exactly as written below.
  *
- * Forcing the multiplier to 1 here instead neutralises all of it at the one
- * point where a multiplier becomes money. Every caller keeps its shape,
- * `surgeAmount` comes out as '0.00', the breakdown line is skipped because it
- * only renders for a non-zero amount, and no fare can carry a premium no
- * matter what any rule row or request says.
+ * What did NOT change is who decides the premium. A multiplier reaching here
+ * can only have come from surge.service, which:
+ *   • charges a premium ONLY when the pickup classifies as METRO, and
+ *   • reads the percentage from a surge_rules row an admin wrote.
+ * Nothing a client sends can raise a fare — `requestedSurge` is treated as a
+ * floor of 1 upstream and is clamped to the rate card's band here.
  *
- * TO RE-ENABLE: delete the early return below. The original clamping logic is
- * intact underneath it, and the MVAG 0.5x-2x bounds it enforces still apply.
+ * So there are two independent limits, deliberately. The tier rules decide
+ * whether a premium applies at all and how big it is; this clamp decides the
+ * most any single rate card will tolerate. A card left at maxSurge = 1.00 is
+ * exempt no matter what the rules say, which is how one class or trip type is
+ * taken out of surge without editing the tiers.
+ *
+ * The MVAG bounds the defaults express (0.5x–2x of the notified fare) are the
+ * reason the ceiling lives on the rate card rather than on the rule: the legal
+ * cap is a property of the published fare, not of how urgent a booking is.
  */
 function clampSurge(requested, config) {
-  return M.dec(1);
-
-  /* eslint-disable no-unreachable */
   const value = M.dec(requested ?? 1);
-  const lo = M.dec(config.minSurge ?? 0.5);
+  const lo = M.dec(config.minSurge ?? 1);
   const hi = M.dec(config.maxSurge ?? 2);
   if (value.lessThan(lo)) return lo;
   if (value.greaterThan(hi)) return hi;
   return value;
-  /* eslint-enable no-unreachable */
 }
 
 /* ------------------------------------------------------------------ *
@@ -434,13 +446,20 @@ function computeHourlyFare(input, config) {
   }
   const afterSurge = M.add(subtotal, surgeAmount);
 
-  const minimumFare = M.dec(config.minimumFare ?? 0);
-  const belowMinimum = afterSurge.lessThan(minimumFare);
-  const minimumFareAdjustment = belowMinimum ? M.sub(minimumFare, afterSurge) : M.dec(0);
-  const beforeRounding = belowMinimum ? minimumFare : afterSurge;
-  if (belowMinimum) {
-    breakdown.push({ label: 'Minimum fare adjustment', amount: M.toStr(minimumFareAdjustment) });
-  }
+  /*
+   * No rupee floor here either — see the long note in computeFare.
+   *
+   * A rental needs one least of all: its price IS a package or a block of
+   * hours the rider chose, so there is no short trip to protect against. The
+   * minimumKm floor does not apply for the same reason — a package already
+   * states its own included kilometres, and layering a second distance floor
+   * on top would bill for km the package covers.
+   *
+   * Kept as an explicit zero so the return shape matches computeFare's and the
+   * fareBasis of every rental already booked.
+   */
+  const minimumFareAdjustment = M.dec(0);
+  const beforeRounding = afterSurge;
 
   const total = M.roundRupee(beforeRounding);
   const roundingAdjustment = M.sub(total, beforeRounding);
@@ -558,13 +577,34 @@ function computeFare(input, config) {
   const actualKm = M.dec(distanceKm);
   const days = isRoundTrip ? chargeableDays(pickupAt, returnAt, timeZone) : 1;
 
-  // A round trip guarantees a minimum billable distance per day. A customer who
-  // keeps the vehicle for two days and drives 40km still occupies it for two
-  // days, and the guarantee is what makes that economic for the operator.
-  const guaranteedKm = isRoundTrip ? M.mul(config.minKmPerDay ?? 0, days) : M.dec(0);
+  /*
+   * TWO DISTANCE FLOORS, AND THE LARGER WINS.
+   *
+   *   minimumKm    a flat floor on ANY trip on this card. "Minimum 50 km",
+   *                the way the trade actually quotes a short hop. This
+   *                replaced the old rupee minimum-fare floor — see below.
+   *
+   *   minKmPerDay  a ROUND_TRIP-only guarantee, multiplied by the number of
+   *                calendar days. A customer who keeps the vehicle for two
+   *                days and drives 40 km still occupies it for two days, and
+   *                the guarantee is what makes that economic for the operator.
+   *
+   * Taking the maximum rather than adding them matters: both describe the same
+   * quantity (the least distance this trip may be billed for), so summing them
+   * would double-count a short two-day round trip.
+   */
+  const flatMinimumKm = M.dec(config.minimumKm ?? 0);
+  const perDayMinimumKm = isRoundTrip ? M.mul(config.minKmPerDay ?? 0, days) : M.dec(0);
+  const guaranteedKm = M.max(flatMinimumKm, perDayMinimumKm);
+
   const billableKm = M.max(actualKm, guaranteedKm);
 
-  const usedGuarantee = isRoundTrip && billableKm.greaterThan(actualKm);
+  const usedGuarantee = billableKm.greaterThan(actualKm);
+  // Which of the two floors is doing the work, so the breakdown note can name
+  // the right one rather than guessing. Ties go to the per-day guarantee,
+  // which is the more specific statement about a round trip.
+  const usedPerDayGuarantee =
+    usedGuarantee && perDayMinimumKm.greaterThanOrEqualTo(flatMinimumKm) && perDayMinimumKm.greaterThan(0);
 
   /* -- 2. base + distance ------------------------------------------ */
 
@@ -597,8 +637,12 @@ function computeFare(input, config) {
    * When the minimum-km guarantee applies, its own note explains the figure.
    */
   let distanceNote = null;
-  if (usedGuarantee) {
+  if (usedPerDayGuarantee) {
     distanceNote = `Minimum ${config.minKmPerDay} km/day x ${days} day(s) applied`;
+  } else if (usedGuarantee) {
+    // The flat floor. Says the actual distance too, so a rider who knows their
+    // trip is 12 km is not left wondering where 50 came from.
+    distanceNote = `Minimum ${M.toStr(flatMinimumKm)} km applied (trip is ${M.toStr(actualKm)} km)`;
   } else if (isRoundTrip && actualKm.greaterThan(0)) {
     distanceNote = `Both ways: ${M.toStr(M.div(actualKm, 2))} km there + ${M.toStr(M.div(actualKm, 2))} km back`;
   }
@@ -622,30 +666,35 @@ function computeFare(input, config) {
     });
   }
 
-  /* -- 4. return-empty (one-way only) ------------------------------- */
+  /* -- 4. return-empty — RETIRED, ALWAYS ZERO ----------------------- *
+   *
+   * A one-way used to be charged its distance a second time (returnEmptyPct,
+   * latterly 100%) to pay for the driver coming back without a passenger. So a
+   * card advertising 19.00/km actually billed 38.00/km, and the rate sheet the
+   * business publishes said one thing while the engine did another.
+   *
+   * THE RETURN IS NOW PRICED INTO THE ONE-WAY PER-KM RATE ITSELF.
+   *
+   * fare_configs is keyed by trip type, so ONE_WAY and ROUND_TRIP already have
+   * independent `perKm` columns and have simply been carrying the same number.
+   * They no longer need to: a one-way is set to the higher all-in rate (e.g.
+   * 19.00/km, which already assumes an empty return) and a round trip to the
+   * lower one (e.g. 12.00/km), because a round trip bills both legs with the
+   * passenger aboard and does not need the loading.
+   *
+   * The result is that RETURN DISTANCE IS BILLED IN EXACTLY ONE PLACE: a
+   * ROUND_TRIP, where quote.service doubles the route before pricing it. A
+   * one-way is billed for the kilometres it actually covers, once.
+   *
+   * Held as a hard zero rather than deleted, for the same reason as the base
+   * fare above it: `returnEmpty` is a key in the fareBasis frozen onto every
+   * booking ever taken and in the invoice and admin surfaces that read it.
+   * Removing it would read as `undefined` downstream and silently poison a
+   * sum; an explicit zero cannot. Reading the literal rather than the column
+   * also means a rate card not yet migrated to 0 cannot reintroduce the charge.
+   */
 
-  // On an outstation one-way the driver returns with no passenger. A share of
-  // that return leg may be charged; 0 in config disables it entirely.
-  let returnEmptyCharge = M.dec(0);
-  const returnPct = M.dec(config.returnEmptyPct ?? 0);
-  if (!isRoundTrip && returnPct.greaterThan(0)) {
-    returnEmptyCharge = M.round2(M.pct(distanceCharge, returnPct));
-    /*
-     * In KILOMETRES when it is the full return (100%), so the line reads like
-     * the outbound one above it — "Return journey (434.19 km x 19.00/km)" —
-     * instead of "100.00% of distance", which a rider has to decode. A partial
-     * percentage keeps the percentage, since the km alone would not explain
-     * the amount.
-     */
-    const isFullReturn = returnPct.equals(100);
-    breakdown.push({
-      label: isFullReturn
-        ? `Return journey (${M.toStr(billableKm)} km x ${M.toStr(config.perKm)}/km)`
-        : `Return journey (${M.toStr(returnPct)}% of ${M.toStr(billableKm)} km)`,
-      amount: M.toStr(returnEmptyCharge),
-      note: 'Driver drives back to the pickup city without a passenger',
-    });
-  }
+  const returnEmptyCharge = M.dec(0);
 
   /* -- 5. driver allowance / bata (every trip type EXCEPT airport) -- *
    *
@@ -781,22 +830,27 @@ function computeFare(input, config) {
 
   /* -- 9. minimum fare floor ---------------------------------------- */
 
-  const minimumFare = M.dec(config.minimumFare ?? 0);
-  const belowMinimum = afterSurge.lessThan(minimumFare);
-  // The top-up that lifts a sub-floor fare to the minimum. Held as a named
-  // amount so the components reconcile:
-  //   subtotal + surgeAmount + minimumFareAdjustment + roundingAdjustment = total.
-  // Without it, subtotal (710.40) plus the named parts does not reach total (800).
-  const minimumFareAdjustment = belowMinimum ? M.sub(minimumFare, afterSurge) : M.dec(0);
-  const beforeRounding = belowMinimum ? minimumFare : afterSurge;
-
-  if (belowMinimum) {
-    breakdown.push({
-      label: 'Minimum fare adjustment',
-      amount: M.toStr(minimumFareAdjustment),
-      note: `Minimum fare for this vehicle class is ${M.toStr(minimumFare)}`,
-    });
-  }
+  /*
+   * THE RUPEE FLOOR IS RETIRED. The floor is now a DISTANCE, applied at step 1.
+   *
+   * A minimum expressed in money has to be re-derived by hand every time a
+   * per-km rate moves: put the rate up and yesterday's ₹900 minimum quietly
+   * stops representing the distance it was written for. "Minimum 50 km" keeps
+   * its meaning and re-prices itself off whatever the current rate is.
+   *
+   * It also reads better. The old floor appeared as a "Minimum fare
+   * adjustment" line with no relationship to anything above it; the new one
+   * simply shows the rider the kilometres they were billed for, with a note
+   * saying the trip was shorter.
+   *
+   * `minimumFareAdjustment` stays in the return shape as an explicit zero —
+   * it is part of the frozen fareBasis on every past booking and is summed by
+   * the invoice and admin surfaces. The component identity still holds:
+   *   subtotal + surgeAmount + minimumFareAdjustment + roundingAdjustment = total.
+   */
+  const minimumFareAdjustment = M.dec(0);
+  const belowMinimum = false;
+  const beforeRounding = afterSurge;
 
   // Whole rupees, applied ONCE at the end. Rounding each component would
   // compound the error and make the breakdown fail to sum to the total.
@@ -836,9 +890,15 @@ function computeFare(input, config) {
     meta: {
       actualKm: M.toStr(actualKm),
       billableKm: M.toStr(billableKm),
-      // The minimum-km-per-day distance floor (round trips only). Distinct from
-      // belowMinimumFare below, which is the minimum-FARE floor.
+      // A distance floor lifted the billable km above what was actually
+      // driven. True for EITHER floor; the two flags below say which.
       usedMinimumKmGuarantee: usedGuarantee,
+      // The ROUND_TRIP per-day guarantee (minKmPerDay x days).
+      usedPerDayKmGuarantee: usedPerDayGuarantee,
+      // The flat per-card floor (minimumKm), which replaced the rupee
+      // minimum-fare floor and applies to every trip type.
+      usedMinimumKm: usedGuarantee && !usedPerDayGuarantee,
+      minimumKm: M.toStr(flatMinimumKm),
       durationMin: Number(durationMin),
       days,
       chargeableWaitMin,
@@ -857,11 +917,20 @@ function computeFare(input, config) {
         : null,
 
       surgeMultiplier: surge.toFixed(2),
-      // Always true when anything other than 1x was asked for, because demand
-      // pricing is off and every request is forced to 1x. Kept so the reason a
-      // fare carries no premium is answerable from the frozen fare alone.
+      // True when the rate card's band moved the multiplier it was handed.
+      // Now that surge is live for metro pickups this is meaningful again: it
+      // says the premium a tier rule asked for was capped by THIS card, which
+      // is the first thing to check when a fare carries less surge than
+      // expected.
       surgeWasClamped: !surge.equals(M.dec(requestedSurge ?? 1)),
-      surgeDisabled: true,
+      // Demand pricing is enabled, but only ever applies to a METRO pickup —
+      // surge.service returns 1x for every other tier. Kept in the frozen fare
+      // so "why did this trip carry no premium?" is answerable without
+      // re-deriving the tier months later.
+      surgeDisabled: false,
+      surgeMetroOnly: true,
+      // The rupee minimum-fare floor is retired; the floor is a distance now.
+      // Always false, kept so an old booking's fareBasis reads the same shape.
       belowMinimumFare: belowMinimum,
       roundingAdjustment: M.toStr(roundingAdjustment),
     },
@@ -880,8 +949,16 @@ function computeFare(input, config) {
       baseFare: '0.00',
       perKm: M.toStr(config.perKm),
       perMinute: M.toStr(config.perMinute ?? 0),
-      minimumFare: M.toStr(config.minimumFare ?? 0),
-      returnEmptyPct: M.toStr(config.returnEmptyPct ?? 0),
+      // Both always '0.00', read from literals rather than from config for the
+      // same reason as baseFare above: a rate card row not yet migrated to
+      // zero must not be able to reintroduce a retired charge into a frozen
+      // snapshot. The rupee floor is replaced by minimumKm, and the one-way
+      // return leg is priced into the ONE_WAY perKm rate.
+      minimumFare: '0.00',
+      returnEmptyPct: '0.00',
+      // The live distance floors, frozen so an extra-distance settlement months
+      // later can be checked against the terms the trip was actually sold on.
+      minimumKm: M.toStr(config.minimumKm ?? 0),
       minKmPerDay: Number(config.minKmPerDay ?? 0),
       driverAllowance: M.toStr(config.driverAllowance ?? 0),
       // Waiting is no longer charged; both are frozen at their config values
