@@ -640,6 +640,15 @@ async function getRoute(origin, destination, opts = {}) {
     return { ...result, cached: false };
   } catch (err) {
     // Never block the UI over a missing route line — draw the straight line.
+    //
+    // But SAY SO. This used to be silent, which meant a map drawing straight
+    // lines through buildings looked identical in the logs to one drawing
+    // real roads, and the only way to notice was to look at the app.
+    console.warn(
+      `[maps] route ${geo.coordKey(origin)} -> ${geo.coordKey(destination)} fell back ` +
+      `to a straight line (provider=${getProvider().name}, breaker=${breaker.state}): ` +
+      `${err.message}`
+    );
     return {
       points: [
         { lat: Number(origin.lat), lng: Number(origin.lng) },
