@@ -373,7 +373,7 @@ const env = {
     },
     // Upload guardrails.
     maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES || 8 * 1024 * 1024), // 8 MB
-    allowedMime: (process.env.UPLOAD_ALLOWED_MIME || 'image/jpeg,image/png,image/webp')
+    allowedMime: (process.env.UPLOAD_ALLOWED_MIME || 'image/jpeg,image/png,image/webp,image/jpg')
       .split(',').map((s) => s.trim()).filter(Boolean),
   },
 
