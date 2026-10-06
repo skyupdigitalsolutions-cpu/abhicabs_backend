@@ -29,6 +29,7 @@ router.get('/', (req, res) => {
       invoices: '/api/v1/admin/invoices',
       reports: '/api/v1/admin/reports',
       fareConfigs: '/api/v1/admin/fare-configs',
+      cities: '/api/v1/admin/cities',
       surge: '/api/v1/admin/surge',
       temporaryDrivers: '/api/v1/admin/temporary-drivers',
       discounts: '/api/v1/admin/discounts',
@@ -73,6 +74,12 @@ router.use('/admin/reports', apiLimiter, require('./report.routes'));
 // had a catch-all; it does not, but keeping the admin mounts grouped is what
 // stops the next one from being forgotten the way this one was.
 router.use('/admin/fare-configs', apiLimiter, require('./fareConfig.routes'));
+
+// Cities. The rate-card screen READS its city dropdown from
+// /admin/fare-configs/cities; these are the writes, which had no home at all
+// until now — the only city endpoint in the API was that lookup, so "add city"
+// fell through every mount to the 404 handler.
+router.use('/admin/cities', apiLimiter, require('./city.routes'));
 
 // Area tiers and surge percentages. Same permission as rate cards — both
 // change what a customer pays.

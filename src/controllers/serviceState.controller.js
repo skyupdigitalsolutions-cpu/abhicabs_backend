@@ -17,12 +17,22 @@ exports.list = asyncHandler(async (req, res) => {
 });
 
 exports.create = asyncHandler(async (req, res) => {
-  const state = await service.create(req.body, req.user);
-  res.status(201).json({
-    success: true,
-    message: `${state.name} added — new quotes will accept it immediately`,
-    data: { state },
-  });
+  const { state, backfilled } = await service.create(req.body, req.user);
+
+  /*
+   * Say so when the built-ins were written. They were already in service, so
+   * nothing changed for a rider — but the admin is about to see four states
+   * they did not add appear in a list that was empty a moment ago, and an
+   * unexplained four rows in a permissions-adjacent table is the kind of thing
+   * that gets escalated.
+   */
+  const message = backfilled.length
+    ? `${state.name} added — new quotes will accept it immediately. ` +
+      `${backfilled.join(', ')} were already in service and are now recorded explicitly, ` +
+      'so adding this state did not replace them.'
+    : `${state.name} added — new quotes will accept it immediately`;
+
+  res.status(201).json({ success: true, message, data: { state, backfilled } });
 });
 
 exports.update = asyncHandler(async (req, res) => {
