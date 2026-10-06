@@ -9,16 +9,29 @@
  * ---------------------------------------------------------------------------
  * WHY A STATE ALLOWLIST AND NOT A RADIUS
  * ---------------------------------------------------------------------------
- * cities.radiusKm already answers "is this pickup near a city we serve", which
- * is the right question for a LOCAL ride. It is the wrong question for an
- * outstation drop: Bengaluru to Hyderabad is 570 km from any centre and is a
- * trip the fleet runs every week, while Bengaluru to Chennai is closer and is
- * not, because there is no operating presence in Tamil Nadu.
+ * cities.radiusKm already answers "is this pickup within reach of a city we
+ * serve", which is the right question for picking a RATE CARD and the wrong one
+ * for jurisdiction. A pickup in a small town 90 km from Hyderabad is outside
+ * every radius and is still a trip the fleet runs, because there are cars and
+ * drivers in Telangana. Radius is geometry; this is permits and presence.
  *
- * cities.state is not the answer either. That column says where a city the
- * fleet operates FROM sits — whereas this list is about where a trip may GO.
- * Deriving one from the other would confine every drop to Karnataka the moment
- * a second city was added.
+ * cities.state is not the answer either. That column says where each city row
+ * sits, so deriving the allowlist from it would confine the fleet to the exact
+ * towns that happen to have a rate card.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS LIST GATES ORIGINS, NOT DESTINATIONS
+ * ---------------------------------------------------------------------------
+ * Read it as "where can we SOURCE a car", not "where may a trip go". Those are
+ * different questions and only the first one has a hard answer: a car exists in
+ * a yard or it does not.
+ *
+ * A trip starting in a listed state may be dropped ANYWHERE. Bengaluru to
+ * Chennai is an ordinary outstation run — the permit covers it, the driver
+ * does it, the car comes home. Only the pickup is checked, in
+ * quote.service.assertPickupWithinServiceStates. A pickup in a state that is
+ * not listed has no car to send, so it becomes a booking request instead and an
+ * admin decides whether to deadhead one out to it.
  *
  * ---------------------------------------------------------------------------
  * THE LIST LIVES IN THE DATABASE
@@ -159,7 +172,12 @@ async function canonicalState(value) {
 }
 
 /**
- * Is this place somewhere the fleet operates?
+ * Is this place somewhere the fleet can source a car from?
+ *
+ * Call it on a PICKUP. Calling it on a drop and refusing the trip is the bug
+ * this module used to have — see the header. It is still called on drop
+ * addresses in bookingRequest.service, but only to canonicalise the state for
+ * the record, never to decide anything.
  *
  * @param {{ state?: string|null, formattedAddress?: string|null }} place
  * @returns {Promise<{ ok: boolean, state: string|null, allowed: string[] }>}
@@ -186,6 +204,21 @@ async function checkPlace(place = {}) {
 function stateFromComponents(components) {
   if (!Array.isArray(components)) return null;
   const hit = components.find((c) => (c.types || []).includes('administrative_area_level_1'));
+  return hit ? hit.long_name || hit.short_name || null : null;
+}
+
+/**
+ * Pull the country out of a Google-style address_components array.
+ *
+ * Returns the LONG name ("India"), because that is what lib/india.js compares
+ * against and what an error message shows a customer. Synchronous and total,
+ * like its siblings: a geocode must not fail because a place has no country
+ * component, so a missing one is null and the caller falls back to the address
+ * string or the bounding box.
+ */
+function countryFromComponents(components) {
+  if (!Array.isArray(components)) return null;
+  const hit = components.find((c) => (c.types || []).includes('country'));
   return hit ? hit.long_name || hit.short_name || null : null;
 }
 
@@ -226,6 +259,7 @@ module.exports = {
   canonicalState,
   checkPlace,
   stateFromComponents,
+  countryFromComponents,
   cityFromComponents,
   normalise,
 };

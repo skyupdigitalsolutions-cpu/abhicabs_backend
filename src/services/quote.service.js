@@ -26,10 +26,22 @@ const { ApiError } = require('../utils/helpers');
 const gst = require('./gst.service');
 const M = require('../lib/money');
 const serviceArea = require('../lib/serviceArea');
+const india = require('../lib/india');
 const { normaliseReturnDate, returnDateIsValid } = require('../lib/returnDate');
 
-/** Longest trip the router will price. Guards against an absurd destination. */
-const MAX_TRIP_KM = Number(process.env.MAX_TRIP_KM || 1500);
+/*
+ * NO DISTANCE CAP.
+ *
+ * MAX_TRIP_KM (1500 km straight line) used to live here. It was removed
+ * because it answered the wrong question: it refused Bengaluru–Delhi, which is
+ * a trip the fleet runs, and accepted Bengaluru–Colombo, which has no road.
+ *
+ * What bounds a trip is the coastline, not a number, so assertWithinIndia
+ * below is the only limit on how far a customer may go. If a cap is ever
+ * genuinely wanted — a commercial one, say "nothing over 2000 km without an
+ * admin" — it belongs in the fare config as a per-city setting an admin can
+ * change, not as an environment variable that needs a redeploy.
+ */
 
 /*
  * Surge now lives in surge.service, keyed on WHERE the pickup is as well as
@@ -601,7 +613,16 @@ async function resolveLocation(input, label) {
 
   if (input.address) {
     const g = await maps.geocode(input.address);
-    return { lat: g.lat, lng: g.lng, formattedAddress: g.formattedAddress, source: 'geocoded' };
+    return {
+      lat: g.lat,
+      lng: g.lng,
+      formattedAddress: g.formattedAddress,
+      // The geocoder already told us the country; carrying it lets
+      // assertWithinIndia decide from the component rather than falling back
+      // to parsing the address string or, worse, to the bounding box.
+      country: g.country || null,
+      source: 'geocoded',
+    };
   }
 
   throw ApiError.badRequest(`Provide ${label} coordinates or an address`, 'LOCATION_REQUIRED');
@@ -613,40 +634,114 @@ async function resolveLocation(input, label) {
  * ------------------------------------------------------------------ */
 
 /**
- * Refuse a route that touches a state the fleet does not operate in.
+ * Refuse a trip that STARTS in a state the fleet does not operate in.
+ *
+ * ---------------------------------------------------------------------------
+ * THE PICKUP IS THE GATE. THE DROP IS NOT.
+ * ---------------------------------------------------------------------------
+ * This used to check both endpoints, and refuse the route if either fell
+ * outside the allowlist. That was the wrong shape of rule for what the
+ * constraint actually is.
+ *
+ * What the allowlist encodes is where the fleet can SOURCE a car: where there
+ * are drivers, a yard, permits taken out, and somewhere to recover a vehicle
+ * that breaks down. All of that is a fact about the ORIGIN. A car starting in
+ * Bengaluru can drive a customer to Chennai, Goa or Kochi and come back — it is
+ * an outstation trip, the drivers do it, and the all-India permit already
+ * covers it. Refusing it because Tamil Nadu is not on the list was turning
+ * away revenue the fleet is equipped to earn.
+ *
+ * The reverse is not true and is why this check still exists. A pickup in
+ * Chennai needs a car that is already in Chennai, and there is none, so no
+ * quote can be honoured. That case still becomes a booking request, where an
+ * admin can decide by hand whether to deadhead a car out to it.
  *
  * Checked SEPARATELY from maps.isServiceable, which asks a different question:
- * that one measures distance from a city centre, which is right for a local
- * ride and wrong for an outstation drop. Bengaluru to Hyderabad is 570 km from
- * any centre and is a trip the fleet runs; Bengaluru to Chennai is closer and
- * is not, because there is no presence in Tamil Nadu. Radius cannot express
- * that — the constraint is permits and recovery, not geometry.
+ * that one measures distance from a city centre, which is right for selecting
+ * a rate card and wrong for deciding jurisdiction.
  *
  * Throws OUTSIDE_SERVICE_STATES, a code the app keys on to offer "send a
  * booking request" instead of a fare. The offending state and the allowlist
  * both travel in `details`, so the app can name them without hardcoding a list
  * that would drift the day a fifth state opens.
+ *
+ * @param {{lat:number, lng:number, formattedAddress?:string|null}} pickupPoint
  */
-async function assertWithinServiceStates(points) {
-  const offending = [];
-
+/**
+ * Refuse a trip that leaves the country.
+ *
+ * THE ONLY LIMIT ON HOW FAR A TRIP MAY GO. The straight-line cap that used to
+ * sit in maps.getDistance is gone — see src/lib/india.js for why a kilometre
+ * number was the wrong rule. Bengaluru to Delhi, Kochi to Guwahati, anything
+ * the customer wants: if both ends are in India the fare engine prices it.
+ *
+ * Checked for EVERY point, not just the drop. A stop is somewhere the car is
+ * actually driven to, so a stop abroad makes the route as impossible as a drop
+ * abroad would; omitting stops here would have left a hole that any route with
+ * a waypoint could be pushed through.
+ *
+ * Deliberately NOT folded into assertPickupWithinServiceStates. That one says
+ * where the fleet chooses to operate and an admin changes it from the admin
+ * panel; this one says what is physically drivable and no admin should be able
+ * to switch it off. They also fail differently: an out-of-state pickup offers a
+ * booking request, and this offers nothing, because there is no road and no
+ * amount of human follow-up creates one.
+ *
+ * @param {{label:string, point:object|null}[]} points
+ */
+function assertWithinIndia(points) {
   for (const { label, point } of points) {
     if (!point) continue;
-    const check = await serviceArea.checkPlace(point);
-    if (!check.ok) offending.push({ label, state: check.state });
-  }
 
-  if (offending.length === 0) return;
+    const check = india.checkInIndia(point);
+    if (check.ok) continue;
+
+    const where = check.country ? ` — it looks like ${check.country}` : '';
+    throw new ApiError(
+      400,
+      'OUTSIDE_INDIA',
+      `We only operate within India. Your ${label} is outside the country${where}. ` +
+        'Please choose a location in India.',
+      {
+        /*
+         * Same shape as OUTSIDE_SERVICE_STATES.details so the rider app can
+         * name the offending endpoint with the component it already has. There
+         * is no canRequest here on purpose: an admin cannot drive to Colombo
+         * either, and offering a callback would be promising something nobody
+         * can deliver.
+         */
+        offending: [{ label, state: check.country || null }],
+        canRequest: false,
+      },
+    );
+  }
+}
+
+async function assertPickupWithinServiceStates(pickupPoint) {
+  if (!pickupPoint) return;
+
+  const check = await serviceArea.checkPlace(pickupPoint);
+  if (check.ok) return;
 
   const allowed = await serviceArea.allowedStateNames();
-  const named = offending
-    .map((o) => (o.state ? `${o.label} (${o.state})` : o.label))
-    .join(' and ');
+
+  /*
+   * Still an ARRAY, still labelled "pickup".
+   *
+   * The rider app reads details.offending and renders "Your pickup (Tamil
+   * Nadu) is outside our service area" from it, and bookingRequest.create
+   * reads the same labels back. Collapsing it to a scalar here would have
+   * meant a coordinated app release for a server-side rule change, and every
+   * build already in the field would have rendered an empty sentence.
+   */
+  const offending = [{ label: 'pickup', state: check.state }];
+  const named = check.state ? `pickup (${check.state})` : 'pickup';
 
   throw new ApiError(
     400,
     'OUTSIDE_SERVICE_STATES',
-    `We do not operate in that area yet — ${named}. We currently serve ${allowed.join(', ')}. ` +
+    `We do not pick up from that area yet — ${named}. We currently pick up in ` +
+      `${allowed.join(', ')}, and can drop anywhere from there. ` +
       'You can send this as a booking request and our team will get back to you.',
     { offending, allowedStates: allowed, canRequest: true },
   );
@@ -737,13 +832,27 @@ async function getQuote(input) {
     ? []
     : await Promise.all((stops || []).map((s, i) => resolveLocation(s, `stop ${i + 1}`)));
 
-  // Jurisdiction before geometry: a route into a state we do not serve is
-  // refused here, with a code the app turns into "send a booking request".
-  await assertWithinServiceStates([
+  /*
+   * Two checks, in this order, before a single kilometre is looked up.
+   *
+   * COUNTRY first: it is synchronous, it needs no database, and a point
+   * outside India fails every later assumption anyway. There is no distance
+   * cap any more — this is what stops an absurd destination.
+   *
+   * STATE second: a trip STARTING where the fleet has no cars is refused with
+   * a code the app turns into "send a booking request". The drop is
+   * deliberately not state-checked — a car sourced from a state we serve may
+   * drive anywhere in India, and refusing those was turning away outstation
+   * work.
+   */
+  assertWithinIndia([
     { label: 'pickup', point: pickupPoint },
-    // null for HOURLY, which has no destination — checkPlace skips it.
+    // null for HOURLY, which has no destination — skipped.
     { label: 'drop', point: dropPoint || null },
+    ...stopPoints.map((p, i) => ({ label: `stop ${i + 1}`, point: p })),
   ]);
+
+  await assertPickupWithinServiceStates(pickupPoint);
 
   /*
    * The radius SELECTS a city now, it does not gate the trip.
@@ -800,8 +909,8 @@ async function getQuote(input) {
   const route = isHourlyNow
     ? { distanceKm: 0, durationMin: 0, provider: 'none', estimated: false }
     : stopPoints.length
-      ? await maps.getPathDistance([pickupPoint, ...stopPoints, dropPoint], { maxKm: MAX_TRIP_KM })
-      : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
+      ? await maps.getPathDistance([pickupPoint, ...stopPoints, dropPoint])
+      : await maps.getDistance(pickupPoint, dropPoint);
 
   // A round trip covers the route twice. The engine expects the TOTAL. A round
   // trip that switched to local no longer has two legs, so it is excluded.
@@ -1004,13 +1113,25 @@ async function compareTripTypes(input) {
   // point-to-point. Guarded as ONE_WAY.
   assertDistinctEndpoints('ONE_WAY', pickupPoint, dropPoint);
 
-  // Jurisdiction before geometry: a route into a state we do not serve is
-  // refused here, with a code the app turns into "send a booking request".
-  await assertWithinServiceStates([
+  /*
+   * Two checks, in this order, before a single kilometre is looked up.
+   *
+   * COUNTRY first: it is synchronous, it needs no database, and a point
+   * outside India fails every later assumption anyway. There is no distance
+   * cap any more — this is what stops an absurd destination.
+   *
+   * STATE second: a trip STARTING where the fleet has no cars is refused with
+   * a code the app turns into "send a booking request". The drop is
+   * deliberately not state-checked — a car sourced from a state we serve may
+   * drive anywhere in India, and refusing those was turning away outstation
+   * work.
+   */
+  assertWithinIndia([
     { label: 'pickup', point: pickupPoint },
-    // null for HOURLY, which has no destination — checkPlace skips it.
     { label: 'drop', point: dropPoint || null },
   ]);
+
+  await assertPickupWithinServiceStates(pickupPoint);
 
   // Same rule as the single-class quote: nearest city prices it, the state
   // check decides whether we operate here at all.
@@ -1027,7 +1148,7 @@ async function compareTripTypes(input) {
     );
   }
 
-  const route = await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
+  const route = await maps.getDistance(pickupPoint, dropPoint);
 
   /*
    * Surge, resolved exactly as getQuote and quoteAllClasses do — on the PICKUP
@@ -1148,13 +1269,27 @@ async function quoteAllClasses(input) {
         (input.stops || []).map((st, i) => resolveLocation(st, `stop ${i + 1}`))
       );
 
-  // Jurisdiction before geometry: a route into a state we do not serve is
-  // refused here, with a code the app turns into "send a booking request".
-  await assertWithinServiceStates([
+  /*
+   * Two checks, in this order, before a single kilometre is looked up.
+   *
+   * COUNTRY first: it is synchronous, it needs no database, and a point
+   * outside India fails every later assumption anyway. There is no distance
+   * cap any more — this is what stops an absurd destination.
+   *
+   * STATE second: a trip STARTING where the fleet has no cars is refused with
+   * a code the app turns into "send a booking request". The drop is
+   * deliberately not state-checked — a car sourced from a state we serve may
+   * drive anywhere in India, and refusing those was turning away outstation
+   * work.
+   */
+  assertWithinIndia([
     { label: 'pickup', point: pickupPoint },
-    // null for HOURLY, which has no destination — checkPlace skips it.
+    // null for HOURLY, which has no destination — skipped.
     { label: 'drop', point: dropPoint || null },
+    ...stopPoints.map((p, i) => ({ label: `stop ${i + 1}`, point: p })),
   ]);
+
+  await assertPickupWithinServiceStates(pickupPoint);
 
   // Same rule as the single-class quote: nearest city prices it, the state
   // check decides whether we operate here at all.
@@ -1220,8 +1355,8 @@ async function quoteAllClasses(input) {
   const route = isHourlyNow
     ? { distanceKm: 0, durationMin: 0, provider: 'none', estimated: false }
     : stopPoints.length
-      ? await maps.getPathDistance([pickupPoint, ...stopPoints, dropPoint], { maxKm: MAX_TRIP_KM })
-      : await maps.getDistance(pickupPoint, dropPoint, { maxKm: MAX_TRIP_KM });
+      ? await maps.getPathDistance([pickupPoint, ...stopPoints, dropPoint])
+      : await maps.getDistance(pickupPoint, dropPoint);
 
   /*
    * Only classes a rider can SEE — an ACTIVE vehicle_catalog row.
@@ -1441,5 +1576,4 @@ module.exports = {
   invalidateFareConfig,
   invalidatePriceable,
   resolveLocation,
-  MAX_TRIP_KM,
 };

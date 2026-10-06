@@ -86,17 +86,28 @@ async function create(input, actor, meta = {}) {
     formattedAddress: input.dropAddress,
   });
 
-  // Recorded at submission so the request still explains ITSELF later. A reason
-  // recomputed at read time would change meaning the day a new state opens, and
-  // an admin reviewing a three-week-old enquiry would see it contradict the
-  // decision that created it.
-  const outside = [
-    !pickupCheck.ok ? `pickup (${pickupCheck.state || 'unknown state'})` : null,
-    !dropCheck.ok ? `drop (${dropCheck.state || 'unknown state'})` : null,
-  ].filter(Boolean);
-
-  const reason = outside.length
-    ? `Outside service area: ${outside.join(' and ')}. Serving ${(await allowedStateNames()).join(', ')}.`
+  /*
+   * Recorded at submission so the request still explains ITSELF later. A reason
+   * recomputed at read time would change meaning the day a new state opens, and
+   * an admin reviewing a three-week-old enquiry would see it contradict the
+   * decision that created it.
+   *
+   * ONLY THE PICKUP MAKES A REQUEST OUT-OF-AREA.
+   *
+   * This used to name the drop too, and quote.service refused those routes, so
+   * the two agreed. Now a drop outside the allowlist is bookable — the quote
+   * prices it — which means a request that reaches here with an out-of-area
+   * drop and a good pickup was NOT refused by the system. Writing "Outside
+   * service area: drop (Kerala)" on it would tell the admin working the queue
+   * that we cannot run the trip, when we can, and the likeliest outcome is a
+   * declined enquiry for a trip the fleet wanted.
+   *
+   * dropCheck is still computed — it resolves and canonicalises dropState for
+   * the record below, which is what an admin filters and reports on.
+   */
+  const reason = !pickupCheck.ok
+    ? `Outside service area: pickup (${pickupCheck.state || 'unknown state'}). ` +
+      `Picking up in ${(await allowedStateNames()).join(', ')}.`
     : 'Submitted as a request by the customer.';
 
   const request = await prisma.bookingRequest.create({

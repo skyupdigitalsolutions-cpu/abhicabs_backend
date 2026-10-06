@@ -73,12 +73,24 @@ const fields = {
    * percentage could silently double every one-way fare from a field whose
    * effect is invisible on the rate card.
    *
-   * Capped at 500 km rather than reusing `money`'s ceiling. A floor longer
-   * than the longest trip the router will price (MAX_TRIP_KM, 1500) is a
-   * typo that would bill every short hop as an intercity run, and 500 is
-   * already far beyond any defensible minimum.
+   * NO UPPER BOUND. This used to be capped at 500 km, justified by
+   * MAX_TRIP_KM — the 1500 km router cap, which no longer exists now that a
+   * trip may run as far as India allows. With the trip itself uncapped, a
+   * ceiling on the floor is arbitrary: there is no length of trip the engine
+   * will refuse, so there is no length of minimum that is self-evidently a
+   * typo. An admin setting 800 km on an intercity-only rate card is making a
+   * commercial decision, and the schema has no basis for overruling it.
+   *
+   * Still `.min(0)`: a negative floor is meaningless, and 0 remains the way to
+   * say "no floor at all", which is the default.
+   *
+   * What this does NOT change is the floor's effect. billableKm is still
+   * max(actualKm, minimumKm, minKmPerDay x days) in fare.service, so a large
+   * value here still bills every short hop on that card as though it ran the
+   * full distance. That is the point of the field; it is now simply trusted
+   * rather than second-guessed.
    */
-  minimumKm: z.coerce.number().min(0).max(500),
+  minimumKm: z.coerce.number().min(0),
 
   cancellationFee: money,
 

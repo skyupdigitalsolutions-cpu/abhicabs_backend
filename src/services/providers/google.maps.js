@@ -20,7 +20,11 @@ const env = require('../../config/env');
 // never imported or defined, so EVERY geocode threw "cityFromComponents is not
 // defined" — the maps breaker then opened and typed addresses could not be
 // located at all (GEOCODE_FAILED on every fare request).
-const { stateFromComponents, cityFromComponents } = require('../../lib/serviceArea');
+const {
+  stateFromComponents,
+  countryFromComponents,
+  cityFromComponents,
+} = require('../../lib/serviceArea');
 
 const NAME = 'google';
 const BASE = 'https://maps.googleapis.com/maps/api';
@@ -96,6 +100,10 @@ async function geocode(address) {
     // administrative_area_level_1 — the state. Carried through so the caller
     // can decide serviceability without a second billed lookup.
     state: stateFromComponents(result.address_components),
+    // Carried for lib/india.js, which prefers an explicit country over parsing
+    // one out of the formatted address. Free here — the components are already
+    // in the response we paid for.
+    country: countryFromComponents(result.address_components),
     city: cityFromComponents(result.address_components),
     /*
      * The place's own extent, when Google has one.
