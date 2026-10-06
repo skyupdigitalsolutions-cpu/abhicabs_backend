@@ -52,6 +52,7 @@ const cache = require('./cache.service');
 const quote = require('./quote.service');
 const audit = require('./audit.service');
 const serviceArea = require('../lib/serviceArea');
+const areaRadius = require('./areaRadius.service');
 
 /* ------------------------------------------------------------------ *
  * Serialisation
@@ -183,6 +184,62 @@ async function stateWarning(state) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Locating a city from its name
+ * ------------------------------------------------------------------ */
+
+/**
+ * Turn "Surat, Gujarat" into a centre and a radius.
+ *
+ * areaRadius.suggest already does the hard part: it geocodes the place, takes
+ * the radius from the map's administrative footprint, then WIDENS it to cover
+ * any airport or existing service area the business has already committed to.
+ * That last step is what stops a derived radius from quietly excluding the
+ * airport — the single most common pickup a tight radius breaks, and a failure
+ * that reports geography (OUTSIDE_SERVICE_AREA) rather than configuration.
+ *
+ * It was written for the surge-area form and never reached city creation,
+ * which is why cities had to be inserted by hand with coordinates someone
+ * looked up themselves.
+ */
+async function resolveCentre({ name, state, centreLat, centreLng, radiusKm, localRadiusKm }) {
+  let resolved = null;
+
+  if (centreLat == null || centreLng == null) {
+    const s = await areaRadius.suggest({ name, state });
+    centreLat = s.centre.lat;
+    centreLng = s.centre.lng;
+    if (radiusKm == null) radiusKm = s.radiusKm;
+    resolved = {
+      formattedAddress: s.formattedAddress,
+      radiusKm: s.radiusKm,
+      derived: s.derived,
+      widenedFor: s.widenedFor,
+      explanation: s.explanation,
+    };
+  }
+
+  /*
+   * Keep the city limit inside the service radius.
+   *
+   * localRadiusKm defaults to 25 in the database, and a derived radius can
+   * legitimately come back smaller than that for a small town. Letting the
+   * column default apply would then produce a city whose limits extend beyond
+   * the area cars are sent to — the exact inversion assertRadii refuses when
+   * an admin types it by hand, arriving silently through a default instead.
+   */
+  if (localRadiusKm == null && radiusKm != null) {
+    localRadiusKm = Math.min(25, radiusKm);
+  }
+
+  return { centreLat, centreLng, radiusKm, localRadiusKm, resolved };
+}
+
+/** The same lookup, without writing anything — for a form preview. */
+async function suggest({ name, state }) {
+  return areaRadius.suggest({ name, state });
+}
+
+/* ------------------------------------------------------------------ *
  * Reads
  * ------------------------------------------------------------------ */
 
@@ -294,9 +351,23 @@ async function create(input, actor, meta = {}) {
   const name = String(fields.name).trim();
   const state = String(fields.state).trim();
 
-  assertPlausibleCoordinates(fields);
-  assertRadii(fields.radiusKm, fields.localRadiusKm);
+  // Name uniqueness FIRST. Geocoding costs a provider call, and there is no
+  // point spending one to locate a city that already exists.
   await assertNameFree(name, state);
+
+  const { centreLat, centreLng, radiusKm, localRadiusKm, resolved } = await resolveCentre({
+    name,
+    state,
+    centreLat: fields.centreLat,
+    centreLng: fields.centreLng,
+    radiusKm: fields.radiusKm,
+    localRadiusKm: fields.localRadiusKm,
+  });
+
+  // Checked against the RESOLVED values, so a bad geocode is caught by the
+  // same guard that catches a typed-in swap.
+  assertPlausibleCoordinates({ centreLat, centreLng, country: fields.country });
+  assertRadii(radiusKm, localRadiusKm);
 
   const row = await prisma.city.create({
     data: {
@@ -304,10 +375,10 @@ async function create(input, actor, meta = {}) {
       state,
       district: fields.district || null,
       ...(fields.country !== undefined ? { country: fields.country } : {}),
-      centreLat: fields.centreLat,
-      centreLng: fields.centreLng,
-      ...(fields.radiusKm !== undefined ? { radiusKm: fields.radiusKm } : {}),
-      ...(fields.localRadiusKm !== undefined ? { localRadiusKm: fields.localRadiusKm } : {}),
+      centreLat,
+      centreLng,
+      ...(radiusKm !== undefined && radiusKm !== null ? { radiusKm } : {}),
+      ...(localRadiusKm !== undefined && localRadiusKm !== null ? { localRadiusKm } : {}),
       ...(fields.timezone !== undefined ? { timezone: fields.timezone } : {}),
       ...(fields.languages !== undefined ? { languages: fields.languages } : {}),
       ...(fields.welfareFeePct !== undefined ? { welfareFeePct: fields.welfareFeePct } : {}),
@@ -335,6 +406,10 @@ async function create(input, actor, meta = {}) {
   return {
     city: serialise(row),
     copied,
+    // Non-null only when the centre was derived rather than supplied. Carries
+    // the explanation verbatim so the form can show WHY the radius is what it
+    // is — a number an admin can argue with beats one they trust blindly.
+    resolved,
     warning: await stateWarning(state),
   };
 }
@@ -463,4 +538,4 @@ async function activate(id, actor, meta = {}) {
   };
 }
 
-module.exports = { list, getById, create, update, deactivate, activate };
+module.exports = { list, getById, create, update, deactivate, activate, suggest };

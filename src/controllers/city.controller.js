@@ -28,10 +28,26 @@ exports.getOne = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { city } });
 });
 
+/**
+ * GET /admin/cities/suggest?name=Surat&state=Gujarat
+ *
+ * A dry run of the lookup create would do: where the map puts the place, and
+ * how wide the radius needs to be to cover the airports and service areas
+ * already committed to. Writes nothing, so the form can call it as the admin
+ * types and show the number before they commit to it.
+ */
+exports.suggest = asyncHandler(async (req, res) => {
+  const data = await service.suggest(q(req));
+  res.json({ success: true, data });
+});
+
 exports.create = asyncHandler(async (req, res) => {
-  const { city, copied, warning } = await service.create(req.body, req.user, auditMeta(req));
+  const { city, copied, resolved, warning } = await service.create(req.body, req.user, auditMeta(req));
 
   const parts = [`${city.name}, ${city.state} added`];
+  // Where the centre came from. An admin who did not type coordinates should
+  // be told what was chosen on their behalf, and why the radius is that size.
+  if (resolved) parts.push(resolved.explanation);
   if (copied) {
     parts.push(
       `${copied.rateCards} rate card(s) and ${copied.rentalPackages} rental package(s) copied from ${copied.from.name}`,
@@ -46,7 +62,7 @@ exports.create = asyncHandler(async (req, res) => {
   res.status(201).json({
     success: true,
     message: parts.join('. '),
-    data: { city, copied, warning },
+    data: { city, copied, resolved, warning },
   });
 });
 

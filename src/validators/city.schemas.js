@@ -72,16 +72,29 @@ const timezone = z.string().trim().min(3).max(48);
 /** ISO 3166-1 alpha-2. Char(2) in the schema. */
 const country = z.string().trim().length(2).toUpperCase();
 
-const createSchema = z.object({
-  name,
-  state: name,
-  district: z.string().trim().min(2).max(80).optional(),
-  country: country.optional(),
+const createSchema = z
+  .object({
+    name,
+    state: name,
+    district: z.string().trim().min(2).max(80).optional(),
+    country: country.optional(),
 
-  centreLat: latitude,
-  centreLng: longitude,
-  radiusKm: radiusKm.optional(),
-  localRadiusKm: localRadiusKm.optional(),
+    /**
+     * OPTIONAL, and that is the point.
+     *
+     * The admin form asks for a city name and a state, which is what a person
+     * knows. Nobody opening Surat has its centroid to hand, and a required
+     * coordinate pair turns "add a city" into a trip to Google Maps and a
+     * copy-paste that is wrong as often as not.
+     *
+     * Omit both and the service geocodes the name and derives a radius (see
+     * city.service.resolveCentre). Supply both to override. Supplying exactly
+     * one is refused below — a half-specified centre is a typo, not an intent.
+     */
+    centreLat: latitude.optional(),
+    centreLng: longitude.optional(),
+    radiusKm: radiusKm.optional(),
+    localRadiusKm: localRadiusKm.optional(),
 
   timezone: timezone.optional(),
   languages: languages.optional(),
@@ -96,7 +109,17 @@ const createSchema = z.object({
    * cannot quote anything, and building four trip types across every vehicle
    * class by hand is roughly twenty forms per city. See city.service.create.
    */
-  copyFromCityId: z.coerce.number().int().positive().optional(),
+    copyFromCityId: z.coerce.number().int().positive().optional(),
+  })
+  .refine((v) => (v.centreLat === undefined) === (v.centreLng === undefined), {
+    path: ['centreLng'],
+    message: 'Give both centreLat and centreLng, or neither to locate the city from its name',
+  });
+
+/** GET /admin/cities/suggest?name=Surat&state=Gujarat */
+const suggestQuerySchema = z.object({
+  name,
+  state: name.optional(),
 });
 
 const updateSchema = z
@@ -131,4 +154,4 @@ const listQuerySchema = z.object({
 
 const idParamSchema = z.object({ id: z.coerce.number().int().positive() });
 
-module.exports = { createSchema, updateSchema, listQuerySchema, idParamSchema };
+module.exports = { createSchema, updateSchema, listQuerySchema, idParamSchema, suggestQuerySchema };

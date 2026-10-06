@@ -44,6 +44,12 @@ router.get('/', requirePermission(READ),
 router.post('/', requirePermission(WRITE),
   validate({ body: s.createSchema }), ctrl.create);
 
+/* Declared BEFORE /:id. Express matches in order, so a /:id route above this
+   would swallow /suggest and hand the string "suggest" to a numeric validator
+   — a 400 that reads like a client bug. */
+router.get('/suggest', requirePermission(READ),
+  validate({ query: s.suggestQuerySchema }), ctrl.suggest);
+
 router.get('/:id', requirePermission(READ),
   validate({ params: s.idParamSchema }), ctrl.getOne);
 
