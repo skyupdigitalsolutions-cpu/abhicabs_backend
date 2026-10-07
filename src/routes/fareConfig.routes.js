@@ -32,8 +32,15 @@ const PERM = 'FARE_EDIT';
  * validator — a 400 that reads like a client bug.
  */
 
-router.get('/cities', requirePermission(PERM), ctrl.cities);
+router.get('/cities', requirePermission(PERM),
+  validate({ query: s.listCitiesQuerySchema }), ctrl.cities);
+
+// The "All cities in <state>" dropdown, with the cities each state covers.
+router.get('/states', requirePermission(PERM),
+  validate({ query: s.listCitiesQuerySchema }), ctrl.states);
+
 router.get('/vehicle-classes', requirePermission(PERM), ctrl.vehicleClasses);
+
 router.get('/coverage/:cityId', requirePermission(PERM),
   validate({ params: s.cityIdParamSchema }), ctrl.coverage);
 
@@ -51,15 +58,32 @@ router.get('/:id', requirePermission(PERM),
 router.patch('/:id', requirePermission(PERM),
   validate({ params: s.idParamSchema, body: s.updateSchema }), ctrl.update);
 
-// Copy onto another class/city, or forward in time to stage a price change.
+// Copy onto another class, city, state, or forward in time to stage a price
+// change. Also how a statewide card becomes a single-city exception.
 router.post('/:id/clone', requirePermission(PERM),
   validate({ params: s.idParamSchema, body: s.cloneSchema }), ctrl.clone);
 
 router.patch('/:id/activate', requirePermission(PERM),
   validate({ params: s.idParamSchema }), ctrl.activate);
 
-// DELETE retires the card rather than removing it — see the service for why.
+// DELETE retires the card and keeps the row — the safe default, and what the
+// existing admin screen's delete button already calls.
 router.delete('/:id', requirePermission(PERM),
   validate({ params: s.idParamSchema }), ctrl.deactivate);
+
+/*
+ * Removes the row for good.
+ *
+ * A SECOND PATH RATHER THAN ?hard=true ON THE FIRST, deliberately. The two
+ * actions are not degrees of the same thing: one is reversible and one is not,
+ * and a query string is the easiest part of a request to leave behind in a
+ * copied cURL command or a stale frontend build. A distinct URL cannot be
+ * reached by accident.
+ *
+ * It refuses anything that would leave a live city unable to quote, naming the
+ * cities; ?force=true overrides that and is recorded in the audit row.
+ */
+router.delete('/:id/permanent', requirePermission(PERM),
+  validate({ params: s.idParamSchema, query: s.deleteQuerySchema }), ctrl.destroy);
 
 module.exports = router;

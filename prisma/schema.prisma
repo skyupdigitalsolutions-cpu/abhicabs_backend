@@ -306,9 +306,51 @@ model City {
   @@map("cities")
 }
 
+/// How wide a rate card reaches.
+///
+/// CITY  prices one city.
+/// STATE prices EVERY city in a state, including ones opened afterwards.
+///
+/// Resolution is most-specific-wins and lives in one place,
+/// fareLookup.findActiveCard: a CITY card beats a STATE card for the same
+/// (class, trip type), outright and regardless of dates. So "Rs 16/km across
+/// Karnataka, Rs 19/km in Bengaluru" is two rows, and an admin who sets a city
+/// exception can rely on it surviving the next statewide edit.
+enum FareScope {
+  CITY
+  STATE
+}
+
 model FareConfig {
   id           Int      @id @default(autoincrement())
-  cityId       Int      @map("city_id")
+
+  /// --- SCOPE: one city, or a whole state ---
+
+  scope FareScope @default(CITY)
+
+  /// Set for a CITY card, null for a STATE card.
+  cityId Int? @map("city_id")
+
+  /// Set for a STATE card. Also DENORMALISED onto city cards, so the rate-card
+  /// screen can filter by state without joining `cities` on every keystroke.
+  /// Only the STATE case is policed by the check constraint.
+  state String? @map("state") @db.VarChar(80)
+
+  /// 'city:12' or 'state:karnataka' — the scope, as one value.
+  ///
+  /// WHY THIS EXISTS WHEN scope + cityId + state ALREADY SAY IT: uniqueness.
+  /// The old guarantee was @@unique([cityId, ...]), and city_id is now
+  /// nullable — PostgreSQL treats NULLs as distinct, so ten identical
+  /// Karnataka cards would all insert and the engine would pick one at random.
+  /// A partial unique index would fix that but cannot be expressed here, so
+  /// every `prisma migrate dev` would generate a DROP for it. This column can
+  /// carry a real @@unique.
+  ///
+  /// Written only by fareLookup.buildScopeFields, lower-cased and
+  /// whitespace-collapsed, and a check constraint rejects any row where it
+  /// disagrees with scope/cityId/state — including a write from psql.
+  scopeKey String @map("scope_key") @db.VarChar(96)
+
   vehicleClass String   @map("vehicle_class") @db.VarChar(24)
   tripType     TripType @map("trip_type")
 
@@ -435,10 +477,15 @@ model FareConfig {
   isActive      Boolean  @default(true) @map("is_active")
   createdAt     DateTime @default(now()) @map("created_at")
 
-  city City @relation(fields: [cityId], references: [id])
+  /// Optional now: a STATE card belongs to no single city.
+  city City? @relation(fields: [cityId], references: [id])
 
-  @@unique([cityId, vehicleClass, tripType, effectiveFrom])
+  /// Named explicitly. Prisma's generated name for this index would be 67
+  /// characters, past PostgreSQL's 63-byte identifier limit, and a silently
+  /// truncated name is one a later DROP INDEX misses.
+  @@unique([scopeKey, vehicleClass, tripType, effectiveFrom], map: "fare_configs_scope_unique")
   @@index([cityId, isActive])
+  @@index([state, isActive])
   @@map("fare_configs")
 }
 

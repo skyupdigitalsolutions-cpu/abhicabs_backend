@@ -18,6 +18,10 @@
 
 const { prisma } = require('../config/prisma');
 const cache = require('./cache.service');
+// Owns the city-card-beats-state-card rule. Required here rather than
+// reimplemented, because a second copy of that rule would silently stop
+// finding statewide cards the day one of them changed.
+const fareLookup = require('./fareLookup.service');
 const surgeService = require('./surge.service');
 const maps = require('./maps.service');
 const fare = require('./fare.service');
@@ -336,7 +340,17 @@ async function resolveLocalSwitch(tripType, pickupPoint, dropPoint, city, chosen
  *         directions — one-way fares roughly halve — so a stale cached row
  *         would quote a rider one total and book them at another.
  */
-const FARE_CFG_CACHE_VERSION = 'v5';
+/*
+ * v6: statewide rate cards.
+ *
+ * The key is still per CITY — a card resolved for Mysuru is cached under
+ * Mysuru whether it came from Mysuru's own card or from Karnataka's — but
+ * WHICH row a given key resolves to has changed. A v5 entry written before
+ * this deploy could hold "no card" for a city that a state card now prices,
+ * and that negative is cached. Bumping the version retires every one of them
+ * at once instead of waiting out thirty seconds of FARE_CONFIG_MISSING.
+ */
+const FARE_CFG_CACHE_VERSION = 'v6';
 const fareCfgPrefix = (cityId, vehicleClass) =>
   `fare:cfg:${FARE_CFG_CACHE_VERSION}:${cityId}:${vehicleClass}:`;
 
@@ -493,19 +507,20 @@ async function getFareConfig(cityId, vehicleClass, tripType) {
 
   const config = await cache.getOrSet(
     key,
-    async () =>
-      prisma.fareConfig.findFirst({
-        where: {
-          cityId: Number(cityId),
-          vehicleClass,
-          tripType,
-          isActive: true,
-          effectiveFrom: { lte: new Date() },
-        },
-        // Most recent effective row wins, so a future-dated rate card can be
-        // staged in advance and activates by itself.
-        orderBy: { effectiveFrom: 'desc' },
-      }),
+    /*
+     * TWO LEVELS, MOST SPECIFIC FIRST.
+     *
+     * fareLookup resolves the city's own card and, failing that, the card
+     * scoped to its whole state. Within each level the most recent effective
+     * row wins, so a future-dated rate card can be staged in advance and
+     * activates by itself.
+     *
+     * The query used to live here inline. It moved because cancellation.service
+     * had three near-copies of it that had already drifted, and a fourth copy
+     * of a rule that now has a fallback step is a copy that quietly prices a
+     * statewide city at nothing.
+     */
+    async () => fareLookup.findActiveCard({ cityId: Number(cityId), vehicleClass, tripType }),
     /*
      * cacheNull LEFT ON (the default), and that is the point.
      *
@@ -584,12 +599,37 @@ async function invalidatePriceable() {
   await cache.del(PRICEABLE_KEY);
 }
 
-async function invalidateFareConfig(cityId, vehicleClass) {
+/**
+ * Clear the cached resolution for a rate card that just changed.
+ *
+ * @param {number|null} cityId        the card's city, for a CITY-scoped card
+ * @param {string}      vehicleClass
+ * @param {string}     [state]        the card's state, for a STATE-scoped card
+ *
+ * A STATEWIDE CARD HAS NO CACHE KEY OF ITS OWN. Keys are per city, because
+ * that is what a quote asks for, so editing the Karnataka card has to clear
+ * every Karnataka city individually — otherwise each of them serves the old
+ * price for up to six hours and the admin sees their change take effect in
+ * some cities and not others, which reads as a bug in the fare engine rather
+ * than a cache.
+ */
+async function invalidateFareConfig(cityId, vehicleClass, state = null) {
   // A new class is quotable only once the gate knows about it, so this has to
   // go too — otherwise a rate card created in the admin panel is refused with
   // a message saying it does not exist.
   await invalidatePriceable();
-  await cache.delByPrefix(fareCfgPrefix(cityId, vehicleClass));
+
+  if (cityId != null) {
+    await cache.delByPrefix(fareCfgPrefix(cityId, vehicleClass));
+    return;
+  }
+
+  if (!state) return;
+
+  const cities = await fareLookup.citiesInState(state, { includeInactive: true });
+  await Promise.all(
+    cities.map((c) => cache.delByPrefix(fareCfgPrefix(c.id, vehicleClass))),
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -1368,10 +1408,22 @@ async function quoteAllClasses(input) {
    * photo and a placeholder name. The catalogue is what the business sells;
    * a rate card is only how it is priced.
    */
+  /*
+   * BOTH SCOPES, because this screen must show what the rider can actually
+   * book — and in a city priced only by its state's cards, filtering on
+   * cityId alone returns nothing and the fare screen comes up empty with no
+   * error to explain it.
+   *
+   * `city` here is the OPERATING city resolved above, not input.cityId, which
+   * may be the city the rider asked for rather than the one pricing the trip.
+   */
+  const scopeKeys = [fareLookup.cityScopeKey(city.id)];
+  if (city.state) scopeKeys.push(fareLookup.stateScopeKey(city.state));
+
   const [configs, visible] = await Promise.all([
     prisma.fareConfig.findMany({
       where: {
-        cityId: Number(input.cityId),
+        scopeKey: { in: scopeKeys },
         tripType: effectiveTripType,
         isActive: true,
         effectiveFrom: { lte: new Date() },
@@ -1382,10 +1434,21 @@ async function quoteAllClasses(input) {
   ]);
   const visibleClasses = new Set(visible.map((v) => v.key));
 
-  // One row per class — the most recent effective card for each.
+  /*
+   * One row per class: its own city card if it has one, otherwise the state
+   * card. Sorted here rather than in SQL so the precedence rule is written in
+   * the same words as fareLookup's — a city card wins outright, and dates only
+   * break ties within one scope.
+   */
+  const ranked = configs
+    .filter((c) => visibleClasses.has(c.vehicleClass))
+    .sort((a, b) => {
+      if (a.scope !== b.scope) return a.scope === 'CITY' ? -1 : 1;
+      return new Date(b.effectiveFrom) - new Date(a.effectiveFrom);
+    });
+
   const seen = new Set();
-  const latest = configs.filter((c) => {
-    if (!visibleClasses.has(c.vehicleClass)) return false;
+  const latest = ranked.filter((c) => {
     if (seen.has(c.vehicleClass)) return false;
     seen.add(c.vehicleClass);
     return true;

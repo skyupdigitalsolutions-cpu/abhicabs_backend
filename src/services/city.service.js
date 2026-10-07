@@ -301,7 +301,10 @@ async function getById(id) {
  * price at all, leaving it unquotable until that date arrives.
  */
 async function copyPricing(fromCityId, toCityId) {
-  const source = await prisma.city.findUnique({ where: { id: Number(fromCityId) } });
+  const [source, target] = await Promise.all([
+    prisma.city.findUnique({ where: { id: Number(fromCityId) } }),
+    prisma.city.findUnique({ where: { id: Number(toCityId) } }),
+  ]);
   if (!source) {
     throw ApiError.badRequest(
       `Cannot copy pricing: city ${fromCityId} does not exist`,
@@ -316,9 +319,26 @@ async function copyPricing(fromCityId, toCityId) {
 
   const now = new Date();
 
-  const cardRows = cards.map(({ id, createdAt, cityId, effectiveFrom, ...rest }) => ({
+  /*
+   * scopeKey and state are RE-DERIVED for the destination, never copied.
+   *
+   * They identify the card's scope, so carrying the source's values over would
+   * produce rows whose city_id says Mysuru and whose scope_key says
+   * 'city:1' — which the fare_configs_scope_shape check constraint rejects
+   * outright, failing the whole transaction and leaving the new city unpriced
+   * with no obvious reason why.
+   *
+   * Only CITY cards are copied: the query above filters on cityId, so a
+   * statewide card is never duplicated here. It does not need to be — the new
+   * city is already covered by its state's card the moment it exists, which is
+   * the point of statewide pricing.
+   */
+  const cardRows = cards.map(({ id, createdAt, cityId, effectiveFrom, scopeKey, state, ...rest }) => ({
     ...rest,
     cityId: toCityId,
+    scope: 'CITY',
+    scopeKey: `city:${toCityId}`,
+    state: target ? target.state : null,
     effectiveFrom: now,
     isActive: true,
   }));

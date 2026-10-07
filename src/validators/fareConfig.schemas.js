@@ -32,6 +32,7 @@
 const { z } = require('zod');
 
 const TRIP_TYPES = ['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY'];
+const SCOPES = ['CITY', 'STATE'];
 
 /** Decimal(10,2) in the schema — reject anything that would not survive the round trip. */
 const money = z.coerce.number().min(0).max(9_999_999.99);
@@ -48,6 +49,12 @@ const minute = z.coerce.number().int().min(0).max(59);
 
 const vehicleClass = z.string().trim().min(2).max(24);
 const tripType = z.enum(TRIP_TYPES);
+const scope = z.enum(SCOPES);
+const stateName = z.string().trim().min(2).max(80);
+
+const boolish = z
+  .union([z.boolean(), z.enum(['true', 'false'])])
+  .transform((v) => v === true || v === 'true');
 
 /**
  * The editable body, shared by create and update.
@@ -128,6 +135,62 @@ const optionalFields = Object.fromEntries(
 );
 
 /**
+ * SCOPE: one card prices one city, or a whole state.
+ *
+ * The admin form sends either:
+ *   { scope: 'CITY',  cityId: 3, ... }
+ *   { scope: 'STATE', state: 'Karnataka', ... }    <- the "All cities" option
+ *
+ * `scope` defaults to CITY so an older admin build that only ever sent cityId
+ * keeps working untouched.
+ *
+ * The two shapes are mutually exclusive and the refinement below enforces it
+ * rather than quietly ignoring the surplus field. A body carrying BOTH is not
+ * a harmless extra key — it is an admin who thinks they are scoping to
+ * Bengaluru and a payload that prices all of Karnataka, and the difference is
+ * invisible once saved.
+ */
+function scopeIsCoherent(v, ctx) {
+  const s = v.scope || 'CITY';
+
+  if (s === 'STATE') {
+    if (!v.state) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['state'],
+        message: 'Choose a state when the card applies to all cities',
+      });
+    }
+    if (v.cityId != null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['cityId'],
+        message: 'A statewide card cannot also name a city — remove the city, or set scope to CITY',
+      });
+    }
+    return;
+  }
+
+  if (v.cityId == null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['cityId'],
+      message: 'Choose a city, or set scope to STATE to price every city in a state',
+    });
+  }
+}
+
+function surgeBandIsSane(v, ctx) {
+  if (v.minSurge != null && v.maxSurge != null && v.minSurge > v.maxSurge) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['minSurge'],
+      message: 'Minimum surge cannot be above maximum surge',
+    });
+  }
+}
+
+/**
  * perKm is the only rate a card cannot do without — it is what the distance
  * leg is priced from, and the column is NOT NULL with no default. Everything
  * else defaults to 0, which reads as "this rule is off".
@@ -149,43 +212,43 @@ const createSchema = z
      * naming the missing field belonged.
      */
     ...optionalFields,
-    cityId: z.coerce.number().int().positive(),
+    scope: scope.optional(),
+    cityId: z.coerce.number().int().positive().optional(),
+    state: stateName.optional(),
     vehicleClass,
     tripType,
     perKm: money,
   })
+  .superRefine(scopeIsCoherent)
   .superRefine(surgeBandIsSane);
 
 /**
- * cityId / vehicleClass / tripType are NOT updatable. Those three plus
- * effectiveFrom are the unique key: letting an edit move a card between cities
- * would silently retire the old city's pricing. Retire the row and create a new
- * one instead.
+ * scope / cityId / state / vehicleClass / tripType are NOT updatable. Those
+ * plus effectiveFrom are the unique key, and widening a Bengaluru card into a
+ * Karnataka one in place would reprice twenty cities from a form headed
+ * "Bengaluru". Clone to the new scope and retire the old card instead.
  */
 const updateSchema = z
   .object(optionalFields)
   .refine((v) => Object.keys(v).length > 0, { message: 'Nothing to update' })
   .superRefine(surgeBandIsSane);
 
-function surgeBandIsSane(v, ctx) {
-  if (v.minSurge != null && v.maxSurge != null && v.minSurge > v.maxSurge) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['minSurge'],
-      message: 'Minimum surge cannot be above maximum surge',
-    });
-  }
-}
-
 const listQuerySchema = z.object({
   cityId: z.coerce.number().int().positive().optional(),
+  state: stateName.optional(),
+  scope: scope.optional(),
   vehicleClass: vehicleClass.optional(),
   tripType: tripType.optional(),
   search: z.string().trim().max(64).optional(),
-  includeInactive: z
-    .union([z.boolean(), z.enum(['true', 'false'])])
-    .transform((v) => v === true || v === 'true')
-    .optional(),
+  includeInactive: boolish.optional(),
+  /**
+   * With a cityId filter, show the statewide cards that cover it as well.
+   *
+   * Defaults TRUE. The question an admin asks of a city filter is "what does
+   * this city cost?", and on a state-priced network the honest answer includes
+   * the card doing the pricing. Set false for "what does this city override?".
+   */
+  includeStatewide: boolish.optional().default(true),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(200).default(50),
   sortBy: z.enum(['effectiveFrom', 'createdAt', 'vehicleClass', 'tripType']).default('effectiveFrom'),
@@ -195,19 +258,41 @@ const listQuerySchema = z.object({
 const idParamSchema = z.object({ id: z.coerce.number().int().positive() });
 const cityIdParamSchema = z.object({ cityId: z.coerce.number().int().positive() });
 
-/** POST /:id/clone — copy a card onto another class or city, or forward in time. */
-const cloneSchema = z.object({
-  cityId: z.coerce.number().int().positive().optional(),
-  vehicleClass: vehicleClass.optional(),
-  tripType: tripType.optional(),
-  effectiveFrom: z.coerce.date().optional(),
-});
+const listCitiesQuerySchema = z.object({ includeInactive: boolish.optional() });
+
+/**
+ * DELETE /:id/permanent — `force` overrides the "this would leave cities
+ * unable to quote" refusal.
+ *
+ * Opt-in and explicit, never a default. The service names the affected cities
+ * in the 400 it throws without it, so an admin who passes force has been told
+ * precisely what they are turning off.
+ */
+const deleteQuerySchema = z.object({ force: boolish.optional() });
+
+/** POST /:id/clone — copy a card onto another class, city, state or date. */
+const cloneSchema = z
+  .object({
+    scope: scope.optional(),
+    cityId: z.coerce.number().int().positive().optional(),
+    state: stateName.optional(),
+    vehicleClass: vehicleClass.optional(),
+    tripType: tripType.optional(),
+    effectiveFrom: z.coerce.date().optional(),
+  })
+  .refine((v) => !(v.cityId != null && v.state), {
+    path: ['state'],
+    message: 'Clone to a city or to a state, not both',
+  });
 
 module.exports = {
   TRIP_TYPES,
+  SCOPES,
   createSchema,
   updateSchema,
   listQuerySchema,
+  listCitiesQuerySchema,
+  deleteQuerySchema,
   idParamSchema,
   cityIdParamSchema,
   cloneSchema,

@@ -38,6 +38,17 @@ const { ApiError } = require('../utils/helpers');
 const M = require('../lib/money');
 const audit = require('./audit.service');
 const fareService = require('./fare.service');
+/*
+ * The rate card that applies is no longer "the row with this cityId".
+ *
+ * A city may be priced by its own card or by its state's, and the three
+ * lookups in this file each used to run their own query that knew nothing
+ * about the second case — and had already drifted in a smaller way, omitting
+ * the `effectiveFrom <= now` filter, so a price rise staged for next month was
+ * quoting next month's cancellation fee today. All three now go through the
+ * one resolver.
+ */
+const fareLookup = require('./fareLookup.service');
 const corporateService = require('./corporate.service');
 const allocationService = require('./allocation.service');
 const discountService = require('./discount.service');
@@ -74,13 +85,10 @@ const FREE_MINUTES = Number(process.env.CANCEL_FREE_MINUTES || 60);
 async function quoteCancellation(bookingId, actor) {
   const booking = await loadCancellable(bookingId, actor, { allowTerminal: true });
 
-  const config = await prisma.fareConfig.findFirst({
-    where: {
-      cityId: booking.cityId,
-      vehicleClass: booking.vehicleClass,
-      tripType: booking.tripType,
-      isActive: true,
-    },
+  const config = await fareLookup.findActiveCard({
+    cityId: booking.cityId,
+    vehicleClass: booking.vehicleClass,
+    tripType: booking.tripType,
   });
 
   const assessment = assess(booking, config);
@@ -167,13 +175,10 @@ function describeSettlement(refund, outstanding) {
 async function cancel(bookingId, actor, body = {}, meta = {}) {
   const booking = await loadCancellable(bookingId, actor);
 
-  const config = await prisma.fareConfig.findFirst({
-    where: {
-      cityId: booking.cityId,
-      vehicleClass: booking.vehicleClass,
-      tripType: booking.tripType,
-      isActive: true,
-    },
+  const config = await fareLookup.findActiveCard({
+    cityId: booking.cityId,
+    vehicleClass: booking.vehicleClass,
+    tripType: booking.tripType,
   });
 
   const assessment = assess(booking, config);
@@ -362,8 +367,10 @@ function policyText(config) {
 
 /** Standalone policy for the terms screen, before any booking exists. */
 async function getPolicy({ cityId, vehicleClass, tripType }) {
-  const config = await prisma.fareConfig.findFirst({
-    where: { cityId: Number(cityId), vehicleClass, tripType, isActive: true },
+  const config = await fareLookup.findActiveCard({
+    cityId: Number(cityId),
+    vehicleClass,
+    tripType,
   });
 
   if (!config) {
