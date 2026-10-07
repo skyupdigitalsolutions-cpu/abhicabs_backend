@@ -221,7 +221,11 @@
           "High roof",
           "BSVI"
         ],
-        "images": []
+         "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791357791/urbania-16-side.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791357767/urbania-16-rear.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791357810/urbania-16-interior.webp" }
+        ]
       }
     ],
     "tempo-17": [
@@ -238,7 +242,11 @@
           "A/C",
           "BSVI"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791358322/temp-traveller-16-side.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791358282/temp-traveller-16-rear.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791358342/temp-traveller-16-interior.webp" }
+        ]
       }
     ],
     "benz-22": [
@@ -256,7 +264,11 @@
           "Luxury",
           "BSVI"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791359012/bharatbenz-22-side.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791359040/bharatbenz-22-rear.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791359105/bharatbenz-22-interior.webp" }
+        ]
       }
     ],
     "benz-28": [
@@ -274,7 +286,11 @@
           "Luxury",
           "BSVI"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791357320/bharatbenz-28-side.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791357279/bharatbenz-28-front.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791357216/bharatbenz-28-interior.webp" }
+        ]
       }
     ],
     "benz-33": [
@@ -292,7 +308,11 @@
           "Executive",
           "BSVI"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791353454/bharat-benz-side.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791353502/bharat-benz-tilt.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791353480/bharat-benz-interior.webp" }
+        ]
       }
     ],
     "fortuner": [
@@ -310,7 +330,11 @@
           "Premium SUV",
           "4 bags"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791352188/fortuner-side.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791352265/fortuner-rear.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791352297/interior.webp" }
+        ]
       }
     ],
     "mercedes-e": [
@@ -328,7 +352,11 @@
           "Executive",
           "2 bags"
         ],
-        "images": []
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791350111/benz-side.webp" },
+          { "label": "front",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791350212/benz-front.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791350266/benz-interior.webp" }
+        ]
       }
     ]
   }
