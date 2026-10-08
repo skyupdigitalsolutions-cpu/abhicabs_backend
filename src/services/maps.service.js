@@ -624,7 +624,20 @@ async function getRoute(origin, destination, opts = {}) {
     throw ApiError.badRequest('Invalid pickup or drop coordinates', 'INVALID_COORDINATES');
   }
 
-  const key = `maps:route:${geo.coordKey(origin)}:${geo.coordKey(destination)}`;
+  /*
+   * The `v2` is a cache BUSTER, and it has to stay.
+   *
+   * Route geometry is cached for the distance TTL because roads rarely change,
+   * which is right — but it means a change to the SHAPE of what we store is
+   * invisible until every entry expires. v1 entries hold the simplified
+   * overview polyline, the coarse line that cut across blocks on the trip map.
+   * Without a new key every already-quoted route would keep serving the old
+   * geometry for the rest of its TTL, and the fix would look like it had not
+   * worked on exactly the routes that get booked most.
+   *
+   * Bump this again on any future change to what getRoute returns.
+   */
+  const key = `maps:route:v2:${geo.coordKey(origin)}:${geo.coordKey(destination)}`;
 
   if (!opts.fresh) {
     const hit = await cache.get(key);

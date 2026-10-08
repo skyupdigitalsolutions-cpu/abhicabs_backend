@@ -362,11 +362,67 @@ async function getRoute(origin, destination) {
   }
 
   return {
-    points: decodePolyline(route.overview_polyline?.points || ''),
+    points: routeGeometry(route),
     distanceKm: Number((leg.distance.value / 1000).toFixed(2)),
     durationMin: Math.round(leg.duration.value / 60),
     provider: NAME,
   };
+}
+
+/**
+ * Full-resolution geometry for a Directions route.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY NOT overview_polyline
+ * ---------------------------------------------------------------------------
+ * `overview_polyline` is what this used to return, and it is the wrong field
+ * for a map the rider zooms into. Google simplifies it so an entire trip can
+ * be drawn cheaply at low zoom — it keeps the shape of the journey and throws
+ * away the bends. Across a city that is a few dozen points over several
+ * kilometres, so at the zoom a live trip map actually sits at, the line cuts
+ * across blocks, meets roads at angles and sits visibly beside the street it
+ * is meant to be on. No amount of styling on the client fixes that, because a
+ * polyline can only draw straight segments between the points it is given.
+ *
+ * Every STEP of every leg carries its own polyline at full resolution. Joined
+ * end to end they are the same route with the detail still in it — typically
+ * hundreds of points, roughly one every 10-30 metres, which is what makes the
+ * line sit on the road the way it does in Uber or Ola.
+ *
+ * ---------------------------------------------------------------------------
+ * COST
+ * ---------------------------------------------------------------------------
+ * None. The steps are already in the response this function just parsed. It
+ * is the same single Directions request, billed once, cached upstream in
+ * maps.service exactly as before — only a richer field is read out of it.
+ *
+ * Falls back to the overview if a response somehow carries no steps, so a
+ * coarse line is still better than no line.
+ */
+function routeGeometry(route) {
+  const points = [];
+
+  for (const leg of route.legs || []) {
+    for (const step of leg.steps || []) {
+      const decoded = decodePolyline(step.polyline?.points || '');
+      if (!decoded.length) continue;
+
+      // Each step REPEATS the previous step's last point as its own first.
+      // Left in, every junction gets a duplicate coordinate — harmless to
+      // draw, but it skews any "points per km" density check and wastes
+      // payload on a route with hundreds of steps.
+      const prev = points[points.length - 1];
+      const start = prev
+        && prev.lat === decoded[0].lat
+        && prev.lng === decoded[0].lng
+        ? 1
+        : 0;
+
+      for (let i = start; i < decoded.length; i++) points.push(decoded[i]);
+    }
+  }
+
+  return points.length ? points : decodePolyline(route.overview_polyline?.points || '');
 }
 
 /**
