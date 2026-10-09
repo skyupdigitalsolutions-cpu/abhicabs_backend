@@ -990,8 +990,15 @@ async function getQuote(input) {
    * supply that matters. A village-to-metro trip is hard to serve; the same
    * trip reversed is not.
    */
+  /*
+   * The DROP travels too, for the corridor rules (surge_routes): a festival
+   * premium is a property of the journey, not of the pickup. Null for HOURLY,
+   * which has no destination — matchRoute returns null for that and the tier
+   * premium is the only one that can apply.
+   */
   const surgeInfo = await surgeService.resolveSurge({
     pickupPoint,
+    dropPoint,
     pickupAt,
     requestedSurge: surge,
   });
@@ -1162,6 +1169,11 @@ async function getQuote(input) {
       /** METRO | DISTRICT | TALUKA | VILLAGE, and the named area it matched. */
       tier: surgeInfo.tier,
       area: surgeInfo.area,
+      /**
+       * The corridor rule that set the price, when one did — so the app can
+       * name the festival rather than showing an unexplained premium.
+       */
+      route: surgeInfo.route ?? null,
       /** False when no configured area contained the pickup — see FALLBACK_TIER. */
       matched: surgeInfo.matched,
       immediate: surgeInfo.immediate,
@@ -1274,6 +1286,7 @@ async function compareTripTypes(input) {
    */
   const surgeInfo = await surgeService.resolveSurge({
     pickupPoint,
+    dropPoint,
     pickupAt: input.pickupAt,
     requestedSurge: input.surge,
   });
@@ -1417,6 +1430,7 @@ async function quoteAllClasses(input) {
   // same urgency, or the surge looks like it depends on the car.
   const surgeInfo = await surgeService.resolveSurge({
     pickupPoint,
+    dropPoint,
     pickupAt: input.pickupAt,
     requestedSurge: input.surge,
   });
@@ -1663,6 +1677,11 @@ async function quoteAllClasses(input) {
       /** METRO | DISTRICT | TALUKA | VILLAGE, and the named area it matched. */
       tier: surgeInfo.tier,
       area: surgeInfo.area,
+      /**
+       * The corridor rule that set the price, when one did — so the app can
+       * name the festival rather than showing an unexplained premium.
+       */
+      route: surgeInfo.route ?? null,
       /** False when no configured area contained the pickup — see FALLBACK_TIER. */
       matched: surgeInfo.matched,
       immediate: surgeInfo.immediate,

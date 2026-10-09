@@ -53,4 +53,25 @@ router.patch('/areas/:id', requirePermission(PERM),
 router.delete('/areas/:id', requirePermission(PERM),
   validate({ params: s.idParamSchema }), ctrl.deactivateArea);
 
+/* ---- routes: a premium on one corridor, for one window ---- */
+
+// Before '/routes/:id', like classify and suggest above — "preview" must not
+// be read as an id.
+router.get('/routes/preview', requirePermission(PERM),
+  validate({ query: s.previewRouteQuerySchema }), ctrl.previewRoute);
+
+router.get('/routes', requirePermission(PERM),
+  validate({ query: s.listRoutesQuerySchema }), ctrl.listRoutes);
+
+router.post('/routes', requirePermission(PERM),
+  validate({ body: s.createRouteSchema }), ctrl.createRoute);
+
+router.patch('/routes/:id', requirePermission(PERM),
+  validate({ params: s.idParamSchema, body: s.updateRouteSchema }), ctrl.updateRoute);
+
+// Retires rather than removes — a festival rule is the one most likely to be
+// wanted again next year. See the controller.
+router.delete('/routes/:id', requirePermission(PERM),
+  validate({ params: s.idParamSchema }), ctrl.deactivateRoute);
+
 module.exports = router;

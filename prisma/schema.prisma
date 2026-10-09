@@ -1607,6 +1607,81 @@ model SurgeRule {
   @@map("surge_rules")
 }
 
+/// A premium on a specific CORRIDOR for a specific WINDOW — "Bengaluru to
+/// Mysuru, +25%, for the ten days of Dussehra".
+///
+/// ---------------------------------------------------------------------------
+/// WHY THIS IS NOT PART OF SurgeRule
+/// ---------------------------------------------------------------------------
+/// SurgeRule is keyed on AreaTier and classified from the pickup alone. It
+/// models how hard it is to get a car TO a rider, which is a property of one
+/// place, and it is structurally unable to say anything about the destination
+/// or the date. Raising METRO for a festival surcharges every trip leaving the
+/// city, including the ones that are not busy, and nothing puts it back
+/// afterwards.
+///
+/// So this is a second, independent rule, evaluated alongside the tier rules.
+/// The higher of the two applies — see surge.service.resolveSurge.
+///
+/// ---------------------------------------------------------------------------
+/// THE WINDOW IS THE TRIP DATE, NOT THE BOOKING DATE
+/// ---------------------------------------------------------------------------
+/// Compared against `pickupAt`. Booking in August for a Dussehra trip pays the
+/// Dussehra rate; booking during Dussehra for a November trip does not. The
+/// premium is for travelling when the road and the fleet are full, which is a
+/// fact about the journey rather than about the purchase.
+model SurgeRoute {
+  id   Int    @id @default(autoincrement())
+  /// Shown in the admin list and in the audit log. "Dussehra — BLR to Mysuru".
+  name String @db.VarChar(80)
+
+  /// The corridor, as two circles: pickup inside the origin, drop inside the
+  /// destination. Not a polygon and not road geometry — a corridor is "from
+  /// roughly here to roughly there", and two centres with radii is something
+  /// an admin can set on a map and still reason about a month later.
+  ///
+  /// Deliberately NOT a reference to ServiceArea. Those radii are tuned so a
+  /// small circle beats a large one during tier classification; borrowing them
+  /// here would couple two unrelated judgements, and tightening Mysuru's tier
+  /// radius would silently stop a festival surcharge from matching.
+  originLat      Decimal @map("origin_lat") @db.Decimal(10, 7)
+  originLng      Decimal @map("origin_lng") @db.Decimal(10, 7)
+  originRadiusKm Int     @default(25) @map("origin_radius_km")
+  /// What to call this end in the admin UI and the rider-facing reason line.
+  originLabel    String? @map("origin_label") @db.VarChar(80)
+
+  destLat      Decimal @map("dest_lat") @db.Decimal(10, 7)
+  destLng      Decimal @map("dest_lng") @db.Decimal(10, 7)
+  destRadiusKm Int     @default(25) @map("dest_radius_km")
+  destLabel    String? @map("dest_label") @db.VarChar(80)
+
+  /// Whether the return leg carries the same premium. False by default: a
+  /// festival rush is usually one-directional on any given day, and charging
+  /// the empty direction is the kind of thing a customer notices.
+  bidirectional Boolean @default(false)
+
+  /// Percentage added to the fare subtotal. Same units as
+  /// SurgeRule.standardPct, so the two are directly comparable — which is what
+  /// lets the resolver take the higher of them.
+  pct Decimal @default(0) @db.Decimal(5, 2)
+
+  /// The window, against the trip's pickup time. Both nullable: a null start
+  /// means "from now", a null end means "until switched off", and both null is
+  /// a standing corridor premium for a route that is simply always in demand.
+  startsAt DateTime? @map("starts_at")
+  endsAt   DateTime? @map("ends_at")
+
+  /// Free text for ops: which festival, who approved it, when to review.
+  note String? @db.VarChar(500)
+
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([isActive])
+  @@map("surge_routes")
+}
+
 /// The states the fleet operates in — the allowlist a quote is checked against.
 ///
 /// A table rather than a constant because opening a state is an OPERATIONAL

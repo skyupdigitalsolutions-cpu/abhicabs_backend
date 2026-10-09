@@ -216,3 +216,197 @@ exports.classify = asyncHandler(async (req, res) => {
   const result = await surge.classify({ lat: Number(q.lat), lng: Number(q.lng) });
   res.json({ success: true, data: result });
 });
+
+/* ------------------------------------------------------------------ *
+ * Route surge
+ * ------------------------------------------------------------------ */
+
+/** Decimals serialise as strings; the admin form needs numbers. */
+function serialiseRoute(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    origin: {
+      lat: Number(r.originLat),
+      lng: Number(r.originLng),
+      radiusKm: r.originRadiusKm,
+      label: r.originLabel,
+    },
+    destination: {
+      lat: Number(r.destLat),
+      lng: Number(r.destLng),
+      radiusKm: r.destRadiusKm,
+      label: r.destLabel,
+    },
+    bidirectional: r.bidirectional,
+    pct: Number(r.pct),
+    startsAt: r.startsAt,
+    endsAt: r.endsAt,
+    note: r.note,
+    isActive: r.isActive,
+    /*
+     * Derived, not stored. An admin looking at a list of rules needs to know
+     * which ones are actually charging RIGHT NOW — a rule can be active and
+     * still be dormant because its window has not opened or has closed, and
+     * "is_active: true" on a Dussehra rule in December is honest but
+     * misleading. Computed here rather than in the client so the admin panel
+     * and any other consumer agree on what "live" means.
+     */
+    live:
+      r.isActive &&
+      (!r.startsAt || new Date(r.startsAt) <= new Date()) &&
+      (!r.endsAt || new Date(r.endsAt) >= new Date()),
+    updatedAt: r.updatedAt,
+  };
+}
+
+/** Flat body -> the column names. Only keys actually sent are touched. */
+function routeData(body) {
+  const out = {};
+  for (const k of [
+    'name', 'originLat', 'originLng', 'originRadiusKm', 'originLabel',
+    'destLat', 'destLng', 'destRadiusKm', 'destLabel',
+    'bidirectional', 'pct', 'startsAt', 'endsAt', 'note', 'isActive',
+  ]) {
+    if (body[k] !== undefined) out[k] = body[k];
+  }
+  return out;
+}
+
+exports.listRoutes = asyncHandler(async (req, res) => {
+  const q = req.validatedQuery || req.query || {};
+  const routes = await prisma.surgeRoute.findMany({
+    where: q.includeInactive ? {} : { isActive: true },
+    orderBy: [{ isActive: 'desc' }, { startsAt: 'asc' }, { name: 'asc' }],
+  });
+  res.json({
+    success: true,
+    data: { count: routes.length, routes: routes.map(serialiseRoute) },
+  });
+});
+
+exports.createRoute = asyncHandler(async (req, res) => {
+  const route = await prisma.surgeRoute.create({ data: routeData(req.body) });
+  await surge.invalidate();
+
+  audit.recordAsync({
+    actor: req.user,
+    action: 'SURGE_ROUTE_CREATED',
+    entityType: 'surge_route',
+    entityId: route.id,
+    after: serialiseRoute(route),
+    meta: auditMeta(req),
+  });
+
+  res.status(201).json({
+    success: true,
+    message: `${route.name} added — applies to new quotes, not to bookings already made`,
+    data: { route: serialiseRoute(route) },
+  });
+});
+
+exports.updateRoute = asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  const before = await prisma.surgeRoute.findUnique({ where: { id } });
+  if (!before) throw ApiError.notFound('No such route rule', 'SURGE_ROUTE_NOT_FOUND');
+
+  /*
+   * The window order is re-checked against the MERGED row, not the body.
+   *
+   * A PATCH that sends only `endsAt` passes the validator — which can only see
+   * one edge — and would otherwise be able to set an end before the stored
+   * start. The database CHECK would catch it, but as a 500 rather than as the
+   * sentence an admin can act on.
+   */
+  const merged = { ...before, ...routeData(req.body) };
+  if (merged.startsAt && merged.endsAt && new Date(merged.endsAt) <= new Date(merged.startsAt)) {
+    throw ApiError.badRequest(
+      'The end of the window must be after its start',
+      'SURGE_ROUTE_WINDOW_INVALID',
+    );
+  }
+
+  const route = await prisma.surgeRoute.update({ where: { id }, data: routeData(req.body) });
+  await surge.invalidate();
+
+  audit.recordAsync({
+    actor: req.user,
+    action: 'SURGE_ROUTE_UPDATED',
+    entityType: 'surge_route',
+    entityId: route.id,
+    before: serialiseRoute(before),
+    after: serialiseRoute(route),
+    meta: auditMeta(req),
+  });
+
+  res.json({
+    success: true,
+    message: 'Route surge updated — applies to new quotes, not to bookings already made',
+    data: { route: serialiseRoute(route) },
+  });
+});
+
+/**
+ * Retires rather than removes, like every other rule in this system.
+ *
+ * A festival rule is the one an admin is most likely to want back next year,
+ * and deleting it throws away the corridor, the radii and the percentage that
+ * somebody tuned. Deactivated rules are still listed with includeInactive, so
+ * next Dussehra is two clicks rather than a re-survey.
+ */
+exports.deactivateRoute = asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  const before = await prisma.surgeRoute.findUnique({ where: { id } });
+  if (!before) throw ApiError.notFound('No such route rule', 'SURGE_ROUTE_NOT_FOUND');
+
+  const route = await prisma.surgeRoute.update({ where: { id }, data: { isActive: false } });
+  await surge.invalidate();
+
+  audit.recordAsync({
+    actor: req.user,
+    action: 'SURGE_ROUTE_DEACTIVATED',
+    entityType: 'surge_route',
+    entityId: route.id,
+    before: serialiseRoute(before),
+    after: serialiseRoute(route),
+    meta: auditMeta(req),
+  });
+
+  res.json({
+    success: true,
+    message: `${route.name} switched off`,
+    data: { route: serialiseRoute(route) },
+  });
+});
+
+/**
+ * Would this trip pick up a corridor premium, and which one?
+ *
+ * The admin counterpart to /areas/classify. Two circles and a date window are
+ * hard to hold in your head, and the alternative way to check a new Dussehra
+ * rule is to book a test trip — which quotes it, logs it, and still only tells
+ * you about the one route you tried.
+ */
+exports.previewRoute = asyncHandler(async (req, res) => {
+  const q = req.validatedQuery || req.query;
+  const match = await surge.matchRoute({
+    pickupPoint: { lat: Number(q.pickupLat), lng: Number(q.pickupLng) },
+    dropPoint: { lat: Number(q.dropLat), lng: Number(q.dropLng) },
+    pickupAt: q.pickupAt || new Date(),
+  });
+
+  res.json({
+    success: true,
+    data: {
+      matched: Boolean(match),
+      route: match,
+      /*
+       * Said explicitly, because "matched: false" has two very different
+       * causes and an admin debugging a rule needs to know which: the circles
+       * did not contain the trip, or they did and the date fell outside the
+       * window.
+       */
+      pickupAt: q.pickupAt || new Date(),
+    },
+  });
+});
