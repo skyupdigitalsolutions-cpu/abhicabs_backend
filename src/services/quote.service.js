@@ -648,7 +648,71 @@ async function resolveLocation(input, label) {
     if (!geo.isValidCoordinate(point)) {
       throw ApiError.badRequest(`Invalid ${label} coordinates`, 'INVALID_COORDINATES');
     }
-    return { ...point, formattedAddress: input.address || null, source: 'coordinates' };
+    /*
+     * STATE, for assertPickupWithinServiceStates.
+     *
+     * A coordinate carries no state, so without this the point reached
+     * serviceArea.checkPlace with `state` undefined and only the label to go
+     * on. checkPlace falls back to substring-matching the formatted address,
+     * which works right up until it does not: a label with no state in it
+     * ("Kempegowda International Airport"), an abbreviation ("KA"), a name in
+     * Kannada, or a point dropped on the map with no label at all. Every one
+     * of those became OUTSIDE_SERVICE_STATES with `state: null` — a rider in
+     * Koramangala told the fleet does not serve their area.
+     *
+     * THE LABEL IS TRIED FIRST, AND USUALLY ANSWERS.
+     *
+     * canonicalState is a local string match against the allowlist and costs
+     * nothing. The app sends `address: p.address ?? p.label`, which for a
+     * place picked from search normally contains the state already. Only when
+     * that fails do we spend a billed reverse-geocode. Reversing
+     * unconditionally would add a Google call to every quote for an answer we
+     * already had in hand most of the time.
+     *
+     * The call is also what produces an HONEST refusal. A genuine pickup in
+     * Tamil Nadu resolves to "Tamil Nadu" and the rider is told so by name,
+     * rather than being shown the nonsense "pickup (null)".
+     */
+    /*
+     * NOT named `label`. That is this function's own parameter ("pickup" /
+     * "drop"), used by the INVALID_COORDINATES throw a few lines above; a
+     * const of the same name in this block puts that reference in the
+     * temporal dead zone and turns a clean 400 into a ReferenceError.
+     */
+    const addressLabel = input.address || null;
+    let state = addressLabel ? await serviceArea.canonicalState(addressLabel) : null;
+    let formattedAddress = addressLabel;
+
+    if (!state) {
+      /*
+       * reverseGeocode does NOT throw on provider failure — it returns a
+       * synthetic { provider: 'fallback' } row carrying the bare coordinates
+       * as the address and NO state, and maps.service caches that for 30
+       * days. So a try/catch here would catch nothing, and trusting the
+       * result would poison this coordinate with a stateless answer for a
+       * month after one transient Google error.
+       *
+       * Hence the provider check rather than a catch: a fallback row is
+       * treated as "no answer" and leaves the label in place, which is
+       * exactly the behaviour this path had before.
+       */
+      const reverse = await maps.reverseGeocode(point.lat, point.lng).catch(() => null);
+      if (reverse && reverse.provider !== 'fallback') {
+        state = reverse.state || null;
+        // Only when it is a real address. The fallback's "12.93521, 77.62450"
+        // would REPLACE a perfectly good human label with coordinates, and
+        // checkPlace's own substring fallback would then have nothing to read.
+        formattedAddress = reverse.formattedAddress || addressLabel;
+      }
+    }
+
+    /*
+     * `country` is deliberately absent. reverseGeocode returns no country
+     * component, and assertWithinIndia already decides this path from the
+     * bounding box. Inventing a null here changes nothing; claiming a country
+     * we did not resolve would.
+     */
+    return { ...point, formattedAddress, state, source: 'coordinates' };
   }
 
   if (input.address) {
@@ -657,6 +721,17 @@ async function resolveLocation(input, label) {
       lat: g.lat,
       lng: g.lng,
       formattedAddress: g.formattedAddress,
+      /*
+       * THE STATE, which this function paid for and then threw away.
+       *
+       * google.maps.geocode already extracts administrative_area_level_1 from
+       * the components of the response — the comment on the line below says
+       * the country is carried "so the caller can decide" and the state was
+       * extracted for exactly the same reason, but only the country was ever
+       * returned. serviceArea.checkPlace was therefore left substring-matching
+       * the formatted address for a value sitting right here, parsed and free.
+       */
+      state: g.state || null,
       // The geocoder already told us the country; carrying it lets
       // assertWithinIndia decide from the component rather than falling back
       // to parsing the address string or, worse, to the bounding box.
