@@ -74,10 +74,10 @@
         ]
       }
     ],
-    "innova": [
+    "innova-crysta": [
       {
-        "id": "innova-2016",
-        "name": "Toyota Innova",
+        "id": "innova-crysta-2024",
+        "name": "Toyota Innova Crysta",
         "year": 2016,
         "colour": "Silver",
         "seats": 8,
@@ -96,10 +96,10 @@
         ]
       }
     ],
-    "innova-crysta": [
+    "innova": [
       {
-        "id": "innova-crysta-2024",
-        "name": "Toyota Innova Crysta",
+        "id": "innova-2016",
+        "name": "Toyota Innova",
         "year": 2024,
         "colour": "Grey",
         "seats": 8,
