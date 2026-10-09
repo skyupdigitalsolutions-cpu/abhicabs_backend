@@ -35,6 +35,21 @@ const fields = {
   // Decimal(3,2): 0.00–9.99. Capped at 5 because that is the scale shown.
   rating: z.coerce.number().min(0).max(5).nullable(),
   trips: z.coerce.number().int().min(0).nullable(),
+
+  /*
+   * VARIANT GROUPING. Two classes sharing a groupKey are drawn by the app as
+   * one card with a toggle between them — the sedan's Petrol and CNG rows.
+   *
+   * `groupKey` is validated with the SAME slug rule as `key` and nothing
+   * weaker, because it is compared against keys. A groupKey of 'Swift-Dzire'
+   * matches no key, so the variant silently becomes its own card and the
+   * toggle the admin was trying to create never appears.
+   *
+   * Free text, not an enum of known cars: the grouping is a property of the
+   * fleet, which changes without a deploy.
+   */
+  groupKey: key.nullable(),
+  variantLabel: z.string().trim().min(1).max(24).nullable(),
   sortOrder: z.coerce.number().int().min(0).max(9999),
   isActive: z.boolean(),
 };

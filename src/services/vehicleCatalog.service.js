@@ -21,7 +21,7 @@ const MODELS_FINGERPRINT = crypto
   .digest('hex')
   .slice(0, 8);
 
-const LIST_KEY = `catalog:vehicles:v3:${MODELS_FINGERPRINT}`;
+const LIST_KEY = `catalog:vehicles:v4:${MODELS_FINGERPRINT}`;
 const TTL = 6 * 60 * 60; // 6h; writes invalidate, so this is only a backstop
 
 const FOLDER = 'vehicle-catalog';
@@ -62,6 +62,23 @@ function serialise(row) {
     glyph: row.glyph,
     transmission: row.transmission,
     fuel: row.fuel,
+    /*
+     * VARIANT GROUPING — two rows the app should draw as ONE card with a fuel
+     * toggle (Swift Dzire Petrol / Swift Dzire CNG).
+     *
+     * `groupKey` falls back to the row's own key rather than staying null, so
+     * the client can group unconditionally: every class belongs to exactly one
+     * group, and a class with no variants is a group of one. The alternative —
+     * null meaning "ungrouped" — makes every consumer write the same
+     * `groupKey ?? key` branch, and the first one to forget it renders a card
+     * with no title.
+     *
+     * `variantLabel` stays null when there is nothing to choose between. Null
+     * is the signal to draw no toggle at all, which is not the same as drawing
+     * a toggle with one button on it.
+     */
+    groupKey: row.groupKey || row.key,
+    variantLabel: row.variantLabel || null,
     rating: row.rating == null ? null : Number(row.rating),
     trips: row.trips,
     heroUrl: imagery.heroUrl,

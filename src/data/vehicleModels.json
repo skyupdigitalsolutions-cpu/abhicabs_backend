@@ -52,6 +52,29 @@
         ]
       }
     ],
+    "swift-dzire-cng": [
+      {
+        "id": "swift-dzire-cng-2024",
+        "name": "Maruti Swift Dzire CNG",
+        "year": 2024,
+        "colour": "White",
+        "seats": 4,
+        "transmission": "Manual",
+        "fuel": "CNG",
+        "description": "The same air-conditioned Swift Dzire, running on CNG. Comfortable for up to four passengers; the cylinder takes most of the boot, so it suits city runs and airport drops with hand luggage.",
+        "specs": [
+          "A/C",
+          "BSVI",
+          "CNG",
+          "1 bag"
+        ],
+        "images": [
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790312398/image_608.webp" },
+          { "label": "Rear",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790312515/image_609.webp" },
+          { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1790312307/dziremarutisuzukidziredashboard_1.webp" }
+        ]
+      }
+    ],
     "ertiga": [
       {
         "id": "ertiga-2025",
@@ -78,7 +101,7 @@
       {
         "id": "innova-crysta-2024",
         "name": "Toyota Innova Crysta",
-        "year": 2016,
+        "year": 2024,
         "colour": "Silver",
         "seats": 8,
         "transmission": "Manual",
@@ -100,7 +123,7 @@
       {
         "id": "innova-2016",
         "name": "Toyota Innova",
-        "year": 2024,
+        "year": 2016,
         "colour": "Grey",
         "seats": 8,
         "transmission": "Manual",

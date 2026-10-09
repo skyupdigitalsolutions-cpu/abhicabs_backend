@@ -1366,6 +1366,39 @@ model VehicleCatalog {
   heroPublicId String? @map("hero_public_id") @db.VarChar(200)
   images       Json    @default("[]")
 
+  /// FUEL / TRIM VARIANTS OF ONE CAR — e.g. Swift Dzire Petrol and Swift
+  /// Dzire CNG.
+  ///
+  /// Both are still SEPARATE vehicleClass keys, because that is what
+  /// fare_configs, rental_packages, vehicles and bookings are all keyed on,
+  /// and because the whole point is that the two are priced and dispatched
+  /// differently: a CNG car is a different car with a different rate and a
+  /// smaller boot. Folding them into one class with a `fuel` flag would mean
+  /// one rate card for two prices, and a booking that cannot say which car
+  /// the rider actually agreed to.
+  ///
+  /// What these two columns add is only PRESENTATION: they tell the app that
+  /// two rows belong on ONE card with a fuel toggle, instead of sitting side
+  /// by side as two unrelated cars the rider has to tell apart by name.
+  ///
+  ///   groupKey      shared by every variant of the same car. NULL means the
+  ///                 class stands alone — which is every class but the sedan
+  ///                 today. The API serialises NULL as the row's own `key`,
+  ///                 so the app can group unconditionally and a class with no
+  ///                 variants is simply a group of one.
+  ///   variantLabel  what the toggle button says: "Petrol", "CNG". NULL on a
+  ///                 standalone class, where there is nothing to toggle.
+  ///
+  /// The group's title and default selection come from the member with the
+  /// lowest `sortOrder`, so ordering decides which fuel is preselected.
+  ///
+  /// NOT an enum, and not restricted to the sedan in the schema. "CNG is
+  /// sedan-only" is a fact about the fleet, not about the data model — the
+  /// day a CNG Ertiga is bought, that must be a row an admin can add, not a
+  /// migration.
+  groupKey     String? @map("group_key") @db.VarChar(24)
+  variantLabel String? @map("variant_label") @db.VarChar(24)
+
   /// Display order. Riders should see Hatchback before Bus regardless of when
   /// each row was inserted.
   sortOrder Int     @default(0) @map("sort_order")
@@ -1375,6 +1408,7 @@ model VehicleCatalog {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([isActive, sortOrder])
+  @@index([groupKey, sortOrder])
   @@map("vehicle_catalog")
 }
 
