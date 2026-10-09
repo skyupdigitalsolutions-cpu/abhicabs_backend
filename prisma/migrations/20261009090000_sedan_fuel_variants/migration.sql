@@ -31,6 +31,20 @@
 -- two sedan cards with nearly identical names and has to read the fine print
 -- to tell them apart; with them the app draws ONE sedan card carrying a
 -- Petrol/CNG toggle. Nothing in pricing, dispatch or billing reads them.
+--
+-- ---------------------------------------------------------------------------
+-- A NOTE ON DOLLAR SIGNS IN THIS FILE
+-- ---------------------------------------------------------------------------
+-- Prisma splits a migration into statements by scanning for the doubled-dollar
+-- delimiter, and it does NOT skip over comments while doing so. A doubled
+-- dollar written inside a comment within a plpgsql block therefore closes that
+-- block early, and Postgres tries to parse the rest of the comment as SQL.
+-- That is exactly how the first version of this migration failed, with
+-- "syntax error at or near" pointing at an English word in a comment.
+--
+-- RULE: the only dollar signs anywhere in this file are the four that open and
+-- close the two plpgsql blocks below. Do not write one in a comment, not even
+-- to describe this problem.
 -- ---------------------------------------------------------------------------
 
 
@@ -90,6 +104,9 @@ ON CONFLICT ("key") DO NOTHING;
 -- (scope_key and minimum_km are both recent); a hardcoded list would clone a
 -- sedan that quietly loses whichever column was added last, and the resulting
 -- mispricing would look like a fare-engine bug rather than a bad INSERT.
+--
+-- The statement is assembled by string concatenation and run with EXECUTE,
+-- because the column list is not known until the query above has run.
 DO $$
 DECLARE
   insert_cols text;
@@ -110,10 +127,6 @@ BEGIN
     AND table_name   = 'fare_configs'
     AND column_name <> 'id';
 
-  -- Assembled by concatenation rather than a nested dollar-quoted literal. A
-  -- $f$...$f$ block inside this $$ block is legal PostgreSQL, but tooling that
-  -- splits a migration file into statements by scanning for $$ has been known
-  -- to cut it in half, and the deploy box is the worst place to discover that.
   EXECUTE 'INSERT INTO "fare_configs" (' || insert_cols || ') '
        || 'SELECT ' || select_cols || ' FROM "fare_configs" src '
        || 'WHERE src."vehicle_class" = ''swift-dzire'' '
