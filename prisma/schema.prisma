@@ -998,6 +998,24 @@ model Payment {
   // booking; the unique constraint is on (provider, providerOrderId).
   purpose String @db.VarChar(20)
 
+  /// How the customer was asked: CHECKOUT (in-app order), LINK (hosted page),
+  /// QR (fixed-amount UPI code). Null on every row written before collection
+  /// links existed, and on cash — read null as CHECKOUT, never backfill it.
+  collectionType String? @map("collection_type") @db.VarChar(12)
+
+  /// What the admin sends the customer: the Payment Link's short_url, or the
+  /// QR's image_url.
+  ///
+  /// Stored in its own column rather than left in rawResponse because
+  /// applyGatewayEvent OVERWRITES rawResponse with the webhook payload on
+  /// capture — the share URL would vanish exactly when someone goes looking
+  /// for "what did we send them?" during a payment dispute.
+  shareUrl String? @map("share_url") @db.VarChar(512)
+
+  /// When the link or QR stops being payable, as the gateway recorded it.
+  /// Null for a checkout order, which has no expiry of its own.
+  expiresAt DateTime? @map("expires_at")
+
   rawResponse   Json    @default("{}") @map("raw_response")
   failureReason String? @map("failure_reason") @db.VarChar(255)
 
@@ -1010,6 +1028,8 @@ model Payment {
   @@unique([provider, providerOrderId])
   @@index([bookingId])
   @@index([status, createdAt])
+  // Finding a booking's live link/QR without scanning every payment it has.
+  @@index([bookingId, collectionType, status])
   @@map("payments")
 }
 

@@ -51,6 +51,34 @@ const env = require('../../config/env');
 /** Every adapter must implement these three. */
 const REQUIRED_METHODS = ['createOrder', 'verifyWebhookSignature', 'parseWebhook'];
 
+/*
+ * OPTIONAL capabilities — collecting money without the app.
+ *
+ * Deliberately not in REQUIRED_METHODS. A gateway that cannot host a payment
+ * page, or an account that has not had Payment Links switched on, must still
+ * be a valid provider for everything else; promoting these to required would
+ * mean a missing feature stops the server booting and takes bookings down with
+ * it. Callers ask supports() and get a clean 501 instead.
+ */
+const OPTIONAL_METHODS = Object.freeze([
+  'createPaymentLink',
+  'cancelPaymentLink',
+  'resendPaymentLink',
+  'createQrCode',
+  'closeQrCode',
+]);
+
+/**
+ * Does the active provider implement this capability?
+ *
+ * Checked at REQUEST time rather than boot, because the answer can change
+ * without a deploy: Razorpay enables Payment Links per account, so the same
+ * code and the same keys can go from unsupported to supported overnight.
+ */
+function supports(method) {
+  return typeof getProvider()[method] === 'function';
+}
+
 function assertImplements(adapter, name) {
   const missing = REQUIRED_METHODS.filter((m) => typeof adapter[m] !== 'function');
   if (missing.length) {
@@ -117,4 +145,4 @@ function setProvider(adapter) {
   cached = adapter ? assertImplements(adapter, 'injected') : null;
 }
 
-module.exports = { getProvider, setProvider, REQUIRED_METHODS };
+module.exports = { getProvider, setProvider, supports, REQUIRED_METHODS, OPTIONAL_METHODS };

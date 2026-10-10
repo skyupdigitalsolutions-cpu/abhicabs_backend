@@ -103,6 +103,23 @@ const PAYMENT_PURPOSE = Object.freeze({
   REFUND: 'REFUND',
 });
 
+/**
+ * How the customer was asked for the money.
+ *
+ *   CHECKOUT  the rider paid in the app, against a gateway order
+ *   LINK      a hosted payment page, sent by SMS/email
+ *   QR        a fixed-amount single-use UPI QR the admin shared
+ *
+ * Null on every payment taken before this existed, and on cash. Treat null as
+ * CHECKOUT when displaying; do NOT backfill it, because a guess written into
+ * a money record is indistinguishable from a fact later.
+ */
+const COLLECTION_TYPE = Object.freeze({
+  CHECKOUT: 'CHECKOUT',
+  LINK: 'LINK',
+  QR: 'QR',
+});
+
 const PAYMENT_SELECT = {
   id: true,
   bookingId: true,
@@ -114,6 +131,9 @@ const PAYMENT_SELECT = {
   method: true,
   status: true,
   purpose: true,
+  collectionType: true,
+  shareUrl: true,
+  expiresAt: true,
   failureReason: true,
   paidAt: true,
   createdAt: true,
@@ -125,6 +145,7 @@ module.exports = {
   STATUS_RANK,
   TERMINAL,
   PAYMENT_PURPOSE,
+  COLLECTION_TYPE,
   PAYMENT_SELECT,
   mapGatewayStatus,
   canAdvance,

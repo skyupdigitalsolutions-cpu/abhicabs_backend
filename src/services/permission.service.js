@@ -41,6 +41,17 @@ const PERMISSIONS = Object.freeze({
   VEHICLE_MANAGE: 'VEHICLE_MANAGE',
   DRIVER_APPROVE: 'DRIVER_APPROVE',
   PAYMENT_VIEW: 'PAYMENT_VIEW',
+  /**
+   * Asking a customer for money: creating and cancelling payment links and
+   * UPI QR codes, and resending a link.
+   *
+   * Separate from PAYMENT_VIEW because the two are different acts. Viewing is
+   * reading a ledger; this sends a real person an SMS asking them to pay a
+   * real amount, and a read-only role must not acquire that by accident.
+   * Granted alongside PAYMENT_REFUND — anyone trusted to move money out should
+   * be trusted to ask for it in.
+   */
+  PAYMENT_MANAGE: 'PAYMENT_MANAGE',
   PAYMENT_REFUND: 'PAYMENT_REFUND',
   INVOICE_MANAGE: 'INVOICE_MANAGE',
   REPORT_VIEW: 'REPORT_VIEW',

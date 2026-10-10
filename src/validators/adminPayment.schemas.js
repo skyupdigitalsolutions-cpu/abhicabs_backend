@@ -32,8 +32,64 @@ const listPaymentsQuerySchema = z
     path: ['from'],
   });
 
+/* ------------------------------------------------------------------ *
+ * Collection instruments
+ *
+ * NOTE WHAT `amount` IS FOR. It is optional, and omitting it is the normal
+ * case: the service derives the figure from the booking's own balanceDue, so
+ * an admin cannot mistype a fare. It is accepted at all because ops genuinely
+ * need a part payment sometimes — and it is CAPPED at what is outstanding in
+ * the service, since an overpayment has no automatic refund path to undo it.
+ * ------------------------------------------------------------------ */
+
+/** Rupees, as a string or number, max two decimal places. */
+const money = z
+  .union([z.string(), z.number()])
+  .refine((v) => /^\d+(\.\d{1,2})?$/.test(String(v)), {
+    message: 'Amount must be a positive number with at most 2 decimal places',
+  });
+
+const collectionPurpose = z.enum(['ADVANCE', 'BALANCE', 'FULL']).default('BALANCE');
+
+const expiryFields = {
+  /** Hours from now. Ignored when `expiresAt` is given. */
+  expiresInHours: z.coerce.number().int().min(1).max(24 * 30).optional(),
+  /** An explicit instant, when ops wants the link dead at a known time. */
+  expiresAt: z.coerce.date().optional(),
+};
+
+const createLinkSchema = z.object({
+  purpose: collectionPurpose,
+  amount: money.optional(),
+  description: z.string().trim().max(500).optional(),
+  // Default true in the service, not here: an absent field must mean "send it",
+  // and a zod default of true would be indistinguishable from an explicit one.
+  notifyBySms: z.boolean().optional(),
+  notifyByEmail: z.boolean().optional(),
+  ...expiryFields,
+});
+
+const createQrSchema = z.object({
+  purpose: collectionPurpose,
+  amount: money.optional(),
+  description: z.string().trim().max(500).optional(),
+  ...expiryFields,
+});
+
+const resendSchema = z.object({
+  medium: z.enum(['sms', 'email']).default('sms'),
+});
+
+const bookingIdParamSchema = z.object({ bookingId: uuid });
+const paymentIdParamSchema = z.object({ id: uuid });
+
 module.exports = {
   PAYMENT_STATUSES,
   PAYMENT_METHODS,
   listPaymentsQuerySchema,
+  createLinkSchema,
+  createQrSchema,
+  resendSchema,
+  bookingIdParamSchema,
+  paymentIdParamSchema,
 };

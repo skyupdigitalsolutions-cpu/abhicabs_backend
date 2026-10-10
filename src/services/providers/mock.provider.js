@@ -109,10 +109,27 @@ function parseWebhook(payload) {
   const p = typeof payload === 'string' ? JSON.parse(payload) : payload;
   const entity = p.payload?.payment?.entity || {};
 
+  /*
+   * Mirrors the Razorpay adapter's three-entity resolution, and must keep
+   * mirroring it. The mock exists to prove the surrounding logic, so a link or
+   * QR capture that cannot be matched here would pass the test suite and then
+   * fail against the real gateway — the exact failure the mock is supposed to
+   * prevent.
+   */
+  const link = p.payload?.payment_link?.entity || null;
+  const qr = p.payload?.qr_code?.entity || null;
+  const event = String(p.event || '');
+
+  const matchId =
+    (event.startsWith('payment_link.') && link?.id) ||
+    (event.startsWith('qr_code.') && qr?.id) ||
+    entity.order_id ||
+    null;
+
   return {
     eventId: p.id,
     eventType: p.event,
-    providerOrderId: entity.order_id || null,
+    providerOrderId: matchId,
     providerPaymentId: entity.id || null,
     amountPaise: entity.amount != null ? Number(entity.amount) : null,
     amount: entity.amount != null ? toRupees(entity.amount) : null,
@@ -120,6 +137,76 @@ function parseWebhook(payload) {
     method: (entity.method || '').toUpperCase() || null,
     raw: p,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Payment Links and UPI QR codes, offline
+ *
+ * The same contract as the Razorpay adapter, with no network. These exist so
+ * the admin flow — create a link, show it, share it, cancel it, watch the
+ * webhook settle the booking — is buildable and testable before the Razorpay
+ * account has Payment Links enabled on it, which is a support request with a
+ * turnaround measured in days.
+ *
+ * The share URL points at a page that does not exist. That is deliberate and
+ * not a gap: the mock's job is to prove the id round-trips through the webhook
+ * and settles the booking, and a fake URL that loads nothing fails loudly
+ * while a fake URL that looked real would invite someone to send it to a
+ * customer.
+ * ------------------------------------------------------------------ */
+
+async function createPaymentLink({ amount, currency = 'INR', bookingId, purpose, referenceId, expireBy }) {
+  const id = `plink_mock_${crypto.randomBytes(8).toString('hex')}`;
+  return {
+    id,
+    shareUrl: `https://mock.invalid/pay/${id}`,
+    status: 'created',
+    amount: toPaise(amount),
+    currency,
+    expiresAt: expireBy ? new Date(expireBy) : null,
+    raw: {
+      id,
+      entity: 'payment_link',
+      amount: toPaise(amount),
+      currency,
+      reference_id: referenceId || bookingId,
+      notes: { bookingId, purpose },
+      status: 'created',
+    },
+  };
+}
+
+async function cancelPaymentLink(linkId) {
+  return { id: linkId, status: 'cancelled' };
+}
+
+async function resendPaymentLink(linkId, medium = 'sms') {
+  return { id: linkId, medium, success: true };
+}
+
+async function createQrCode({ amount, bookingId, purpose, closeBy }) {
+  const id = `qr_mock_${crypto.randomBytes(8).toString('hex')}`;
+  return {
+    id,
+    shareUrl: `https://mock.invalid/qr/${id}.png`,
+    status: 'active',
+    amount: toPaise(amount),
+    currency: 'INR',
+    expiresAt: closeBy ? new Date(closeBy) : null,
+    raw: {
+      id,
+      entity: 'qr_code',
+      payment_amount: toPaise(amount),
+      usage: 'single_use',
+      fixed_amount: true,
+      notes: { bookingId, purpose },
+      status: 'active',
+    },
+  };
+}
+
+async function closeQrCode(qrId) {
+  return { id: qrId, status: 'closed' };
 }
 
 /* ------------------------------------------------------------------ *
@@ -139,21 +226,43 @@ function simulateWebhook({
   status = 'captured',
   method = 'upi',
 }) {
+  /*
+   * The envelope has to match the SHAPE of the instrument, not just carry the
+   * id, because parseWebhook reads a different entity for each. A plink_ id
+   * dropped into payment.order_id would be matched by the mock (which falls
+   * through to order_id) and ignored by Razorpay, so the simulation would
+   * prove something that is not true in production.
+   */
+  const isLink = String(providerOrderId || '').startsWith('plink_');
+  const isQr = String(providerOrderId || '').startsWith('qr_');
+
+  const resolvedEvent =
+    eventType !== 'payment.captured' ? eventType
+    : isLink ? 'payment_link.paid'
+    : isQr ? 'qr_code.credited'
+    : eventType;
+
   const body = {
     id: eventId || `evt_mock_${crypto.randomBytes(8).toString('hex')}`,
-    event: eventType,
+    event: resolvedEvent,
     created_at: Math.floor(Date.now() / 1000),
     payload: {
       payment: {
         entity: {
           id: providerPaymentId || `pay_mock_${crypto.randomBytes(8).toString('hex')}`,
-          order_id: providerOrderId,
+          // A real link/QR payment carries the order Razorpay made internally,
+          // which we have never seen. Left null here for the same reason.
+          order_id: isLink || isQr ? null : providerOrderId,
           amount: toPaise(amount),
           currency: 'INR',
           status,
           method,
         },
       },
+      ...(isLink
+        ? { payment_link: { entity: { id: providerOrderId, status: 'paid' } } }
+        : {}),
+      ...(isQr ? { qr_code: { entity: { id: providerOrderId, status: 'closed' } } } : {}),
     },
   };
 
@@ -169,6 +278,11 @@ module.exports = {
   createOrder,
   verifyWebhookSignature,
   parseWebhook,
+  createPaymentLink,
+  cancelPaymentLink,
+  resendPaymentLink,
+  createQrCode,
+  closeQrCode,
   simulateWebhook,
   toPaise,
   toRupees,
