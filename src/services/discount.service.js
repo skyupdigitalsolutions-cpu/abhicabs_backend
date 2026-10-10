@@ -216,4 +216,80 @@ async function release(tx, bookingId) {
   return redemption;
 }
 
-module.exports = { evaluate, redeem, release, normaliseCode };
+/**
+ * Recompute an ALREADY-REDEEMED code's amount against a new fare.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS NOT evaluate() CALLED AGAIN
+ * ---------------------------------------------------------------------------
+ * When an admin changes a booking's vehicle class, the fare changes — and so
+ * must the discount, because 10% off a Sedan is not 10% off an SUV. The
+ * obvious move is to re-run evaluate(). It does not work, for two reasons that
+ * are both features elsewhere:
+ *
+ *   • The per-customer limit would REJECT it. This very booking already holds
+ *     a redemption row, so `used >= maxUsesPerCustomer` counts the booking
+ *     against itself and the code comes back "You have already used this
+ *     code".
+ *
+ *   • `maxUses` would reject a campaign that has since filled up, and
+ *     `expiresAt` one that has since lapsed. Neither is the rider's doing. The
+ *     promo was earned at booking; an operational edit days later must not
+ *     take it away.
+ *
+ * So eligibility is NOT re-asked. Only the ARITHMETIC is redone, with the same
+ * caps evaluate() applies — the percentage cap, and never more than the fare.
+ * The redemption row is updated in place, which keeps the use consumed (one
+ * promo per booking, enforced by the unique index on bookingId) and keeps the
+ * stored amount agreeing with the fare the booking now carries.
+ *
+ * Returns null when the booking carries no promo — the common case, and not an
+ * error. Call OUTSIDE a transaction is acceptable: this only ever moves a
+ * number that the caller is about to re-freeze onto fareBasis anyway.
+ *
+ * @param {object} args
+ * @param {string} args.bookingId
+ * @param {string|number} args.fareTotal  the NEW gross, before this discount
+ */
+async function repriceRedemption({ bookingId, fareTotal }, tx = prisma) {
+  const redemption = await tx.discountRedemption.findUnique({
+    where: { bookingId },
+    include: { discount: true },
+  });
+  if (!redemption || !redemption.discount) return null;
+
+  const discount = redemption.discount;
+  const fare = M.dec(fareTotal ?? 0);
+
+  let amount;
+  if (discount.type === 'PERCENT') {
+    amount = M.round2(M.pct(fare, discount.value));
+    if (discount.maxDiscount != null) {
+      amount = M.min(amount, M.dec(discount.maxDiscount));
+    }
+  } else {
+    amount = M.dec(discount.value);
+  }
+
+  // The same two clamps evaluate() applies. A flat ₹500 code on a fare that
+  // has just been repriced DOWN to ₹300 must take ₹300, not leave the company
+  // owing ₹200 — every downstream reader assumes a non-negative total.
+  amount = M.min(amount, fare);
+  amount = M.max(amount, M.dec(0));
+
+  await tx.discountRedemption.update({
+    where: { bookingId },
+    data: { amount: M.toStr(amount) },
+  });
+
+  return {
+    discountId: discount.id,
+    code: discount.code,
+    description: discount.description,
+    type: discount.type,
+    amount: M.toStr(amount),
+    payable: M.toStr(M.sub(fare, amount)),
+  };
+}
+
+module.exports = { evaluate, redeem, release, repriceRedemption, normaliseCode };

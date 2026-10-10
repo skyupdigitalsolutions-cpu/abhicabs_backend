@@ -54,6 +54,38 @@ router.get('/:id/actions', requirePermission('BOOKING_MANAGE'),
   validate({ params: ls.idParamSchema }), life.actions);
 
 /* ------------------------------------------------------------------ *
+ * Changing the car
+ *
+ * NOT a lifecycle transition — the booking's status does not move (except back
+ * to CONFIRMED when an allocated car has to be released). It is an edit to the
+ * booking's own terms, which is why it lives here rather than in
+ * lifecycle.controller, and why it is PATCH /vehicle rather than another
+ * forward-transition endpoint.
+ *
+ * BOOKING_MANAGE rather than FARE_EDIT. The fare moves as a consequence, but
+ * nobody is editing a rate card: the new price comes from the same rate card
+ * the rider was quoted from. Requiring FARE_EDIT would mean dispatch staff
+ * could not fix a booking without also holding the permission that lets them
+ * rewrite pricing for the whole fleet.
+ * ------------------------------------------------------------------ */
+
+/** What each class would cost for this trip, so the admin can compare first. */
+router.get('/:id/vehicle-options', requirePermission('BOOKING_MANAGE'),
+  validate({ params: s.idParamSchema }), ctrl.vehicleOptions);
+
+/**
+ * Sedan -> SUV (or back). Re-quotes the stored trip for the new class,
+ * recomputes the promo, and reports what is still owed after whatever the
+ * rider has already paid.
+ *
+ * Idempotency-keyed: a double-tapped "Change vehicle" must not reprice twice
+ * and must not release a second allocation.
+ */
+router.patch('/:id/vehicle', requirePermission('BOOKING_MANAGE'),
+  idempotent('PATCH /admin/bookings/:id/vehicle'),
+  validate({ params: s.idParamSchema, body: s.changeVehicleSchema }), ctrl.changeVehicle);
+
+/* ------------------------------------------------------------------ *
  * Forward transitions
  *
  * Each is a separate endpoint rather than one "set status" route. That way the

@@ -137,6 +137,26 @@ const createBookingSchema = z
     path: ['drop'],
   });
 
+/**
+ * Changing the car on an existing booking.
+ *
+ * NOTE WHAT IS ABSENT, exactly as in createBookingSchema: any fare, total or
+ * amount. The new price is re-quoted server side from the booking's own stored
+ * trip. An admin chooses the CLASS; the rate card chooses the money.
+ *
+ * `releaseAllocation` is an explicit opt-in rather than a default, because the
+ * consequence is a car being taken off a trip and a driver losing a job they
+ * were already committed to. The service refuses with ALLOCATED_VEHICLE_MISMATCH
+ * until the admin says so deliberately.
+ */
+const changeVehicleSchema = z.object({
+  vehicleClass: z.string().trim().min(2).max(24),
+  releaseAllocation: z.boolean().default(false),
+  // Goes onto the audit entry. Optional, but the first thing anyone asks when
+  // they find a fare that changed after booking is "who, and why".
+  reason: z.string().trim().max(500).optional().nullable(),
+});
+
 const listBookingsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
@@ -198,6 +218,7 @@ const trackDraftSchema = z.object({
 module.exports = {
   trackDraftSchema,
   createBookingSchema,
+  changeVehicleSchema,
   listBookingsQuerySchema,
   listAttemptsQuerySchema,
   statsQuerySchema,

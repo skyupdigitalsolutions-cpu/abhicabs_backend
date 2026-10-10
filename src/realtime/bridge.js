@@ -104,6 +104,36 @@ function wire(io) {
     io.to(rooms.DISPATCH).emit('trip:status', body);
   });
 
+  /* ---- booking.vehicle_changed → the booking room + dispatch ---- */
+
+  bus.on(EVENTS.BOOKING_VEHICLE_CHANGED, (payload) => {
+    /*
+     * The rider's room gets the MONEY, not just the class. A screen that
+     * learns the car changed but not the fare shows a stale total next to a
+     * new vehicle name, which reads as a bug at the worst possible moment —
+     * the rider is looking at what they owe.
+     */
+    const body = {
+      bookingId: payload.bookingId,
+      bookingNumber: payload.bookingNumber,
+      vehicleClass: payload.to,
+      previousVehicleClass: payload.from,
+      total: payload.total,
+      previousTotal: payload.previousTotal,
+      balanceDue: payload.balanceDue,
+      refundDue: payload.refundDue,
+      at: payload.at,
+    };
+    io.to(rooms.booking(payload.bookingId)).emit('trip:vehicle_changed', body);
+
+    // The console also needs to know a car was let go, or the board keeps
+    // showing a vehicle that is now free.
+    io.to(rooms.DISPATCH).emit('trip:vehicle_changed', {
+      ...body,
+      allocationReleased: !!payload.allocationReleased,
+    });
+  });
+
   /* ---- odometer.start_recorded → the booking room only ---- */
 
   bus.on(EVENTS.ODOMETER_START_RECORDED, (payload) => {

@@ -5,6 +5,7 @@
  */
 
 const bookingService = require('../services/booking.service');
+const bookingVehicle = require('../services/bookingVehicle.service');
 const funnel = require('../services/funnel.service');
 const summaryService = require('../services/summary.service');
 const { asyncHandler, ApiError } = require('../utils/helpers');
@@ -47,6 +48,35 @@ exports.summary = asyncHandler(async (req, res) => {
 exports.getByNumber = asyncHandler(async (req, res) => {
   const booking = await bookingService.findByNumber(req.params.bookingNumber, req.user);
   res.json({ success: true, data: { booking } });
+});
+
+/**
+ * GET /admin/bookings/:id/vehicle-options
+ *
+ * What every other class would cost for THIS booking's exact trip. Exists so
+ * the admin picks from real numbers rather than changing the class and
+ * discovering the fare afterwards.
+ */
+exports.vehicleOptions = asyncHandler(async (req, res) => {
+  const data = await bookingVehicle.listOptions(req.params.id);
+  res.json({ success: true, data });
+});
+
+/**
+ * PATCH /admin/bookings/:id/vehicle
+ *
+ * Moves the booking to another vehicle class and REPRICES it. The response
+ * carries the before/after fare and the amount still due, because that is what
+ * the admin has to read out to the customer on the phone.
+ */
+exports.changeVehicle = asyncHandler(async (req, res) => {
+  const data = await bookingVehicle.changeVehicleClass(
+    req.params.id,
+    req.body,
+    req.user,
+    meta(req),
+  );
+  res.json({ success: true, message: 'Vehicle changed and fare updated', data });
 });
 
 exports.list = asyncHandler(async (req, res) => {

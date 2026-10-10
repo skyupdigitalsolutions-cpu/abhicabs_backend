@@ -50,6 +50,17 @@ const EVENTS = Object.freeze({
   BOOKING_CONFIRMED: 'booking.confirmed',
   BOOKING_CANCELLED: 'booking.cancelled',
   BOOKING_STATUS_CHANGED: 'booking.status_changed',
+  /**
+   * An admin moved the booking to a different vehicle class and the fare moved
+   * with it.
+   *
+   * Carried as its own event rather than folded into status_changed because
+   * the status usually does NOT change — the booking stays CONFIRMED, it is
+   * the price that moved. A rider's app that only listens for status would
+   * keep showing the old fare until the next full refresh, which is the one
+   * screen that must not be stale: it is the amount they are about to pay.
+   */
+  BOOKING_VEHICLE_CHANGED: 'booking.vehicle_changed',
   PAYMENT_RECEIVED: 'payment.received',
   ALLOCATION_MADE: 'allocation.made',
   /**
