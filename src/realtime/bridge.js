@@ -196,6 +196,17 @@ function wire(io) {
       paymentId: payload.paymentId,
       amount: payload.amount,
       purpose: payload.purpose,
+      /*
+       * What is STILL owed after this payment.
+       *
+       * The event used to say only how much arrived, which is the one thing
+       * the rider already knows — they just paid it. Without the remaining
+       * balance every listener had to go and refetch to answer the actual
+       * question, and a payment link or QR paid outside the app made that
+       * worse: the rider returns to a screen whose only honest move is a
+       * spinner.
+       */
+      balanceDue: payload.balanceDue,
       at: payload.at,
     });
   });

@@ -166,6 +166,27 @@ async function process(eventRowId, parsed) {
       return applied;
     });
 
+    /*
+     * PUBLISHED HERE, AFTER THE COMMIT — never from inside the transaction.
+     *
+     * applyGatewayEvent now hands back the capture payload instead of emitting
+     * it, because the rider gets a PUSH for a received payment and a push
+     * cannot be taken back. Announcing from inside the transaction meant any
+     * rollback after the emit left a notification on someone's phone for money
+     * that was never recorded.
+     *
+     * It is also the right place for a different reason: the FCM call is a
+     * network round trip, and holding a Postgres transaction open across one
+     * is how a slow gateway turns into connection-pool exhaustion.
+     *
+     * Deliberately NOT awaited and NOT inside the try. The money is committed;
+     * if the webhook responded with an error because a notification failed,
+     * Razorpay would retry the delivery and the dedup check would correctly
+     * refuse to reprocess it — so the retry could never fix anything, and the
+     * event would just be marked failed forever.
+     */
+    paymentService.publishCaptureEvents(result.events);
+
     return { duplicate: false, changed: result.changed, status: result.status, reason: result.reason };
   } catch (err) {
     // Leave processedAt null so a retry reprocesses; record why it failed.

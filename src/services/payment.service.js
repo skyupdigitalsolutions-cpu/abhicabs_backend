@@ -25,6 +25,7 @@ const { ApiError } = require('../utils/helpers');
 const M = require('../lib/money');
 const { emit, EVENTS } = require('../lib/events');
 const audit = require('./audit.service');
+const push = require('./push.service');
 const paymentProvider = require('./providers/payment.provider');
 const {
   PAYMENT_STATUS,
@@ -257,11 +258,22 @@ async function applyGatewayEvent(tx, parsed) {
   });
 
   // Money only actually moves on capture.
+  let captured = null;
   if (nextStatus === PAYMENT_STATUS.CAPTURED) {
-    await applyCapture(tx, payment, parsed);
+    captured = await applyCapture(tx, payment, parsed);
   }
 
-  return { changed: true, status: nextStatus, paymentId: payment.id };
+  /*
+   * `events` travels back to the caller to be published AFTER COMMIT. Empty on
+   * every path that moved no money — including a duplicate capture, which
+   * returns null above so a replayed webhook cannot produce a second receipt.
+   */
+  return {
+    changed: true,
+    status: nextStatus,
+    paymentId: payment.id,
+    events: captured ? [captured] : [],
+  };
 }
 
 /**
@@ -292,7 +304,9 @@ async function applyCapture(tx, payment, parsed) {
     // is the source of truth for money, so if the entry exists the capture is
     // already accounted for — stop here without touching the booking again.
     if (isUniqueViolation(err)) {
-      return;
+      // Already accounted for. No event, and so no second push for money that
+      // was only ever received once.
+      return null;
     }
     throw err;
   }
@@ -307,6 +321,11 @@ async function applyCapture(tx, payment, parsed) {
       estimatedFare: true, finalFare: true,
       status: true, paymentMode: true, bookingNumber: true,
       customerId: true, pickupAt: true,
+      // Needed to work out what is STILL owed after this capture. The UPDATE
+      // below computes the same figure in SQL, but the receipt has to carry it
+      // out of the transaction and a SELECT after the write would be invisible
+      // to anything reading outside it.
+      advancePaid: true,
     },
   });
   const total = M.round2(booking.finalFare != null ? booking.finalFare : booking.estimatedFare);
@@ -329,15 +348,111 @@ async function applyCapture(tx, payment, parsed) {
   //    payment recorded, and the admin sees it as paid-and-awaiting in the
   //    panel. If the admin declines, cancelling it runs the normal refund.
 
-  // Fire-and-forget: Day 10 turns this into a customer receipt + admin alert.
-  // Emitted AFTER the row change so a listener that reads the booking sees the
-  // new balance. Never emitted for a duplicate (we returned above).
-  emit(EVENTS.PAYMENT_RECEIVED, {
+  /*
+   * RETURNED, NOT EMITTED — and this is the fix that makes a payment push safe
+   * to add at all.
+   *
+   * This function runs inside the caller's transaction. Emitting here fires
+   * before COMMIT, so a transaction that then rolls back has already told the
+   * world the money landed. With only a socket event that was survivable: the
+   * client refetches, sees the truth and corrects itself within seconds.
+   *
+   * A PUSH CANNOT BE RETRACTED. "₹4,737 received" sitting in a rider's
+   * notification tray for a payment that was rolled back is a support call and
+   * a trust problem, and no later refetch undoes it.
+   *
+   * So the payload is handed back to the caller, which publishes it only once
+   * the transaction has committed. See publishCaptureEvents and
+   * webhook.service.process.
+   */
+  const balanceDue = M.max(M.sub(total, M.add(M.dec(booking.advancePaid), amount)), M.dec(0));
+
+  return {
     bookingId: payment.bookingId,
+    bookingNumber: booking.bookingNumber,
+    customerId: booking.customerId,
     paymentId: payment.id,
     purpose: payment.purpose,
     amount: amount.toFixed(2),
-  });
+    /*
+     * Recomputed here with the same arithmetic as the UPDATE above rather than
+     * re-read, because a SELECT inside this transaction would see the new row
+     * but any reader outside it would not — and the value is wanted by things
+     * that run after the commit.
+     */
+    balanceDue: M.toStr(balanceDue),
+    /** How the money was asked for: CHECKOUT, LINK or QR. Null on older rows. */
+    collectionType: payment.collectionType || null,
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Publishing a capture — AFTER the transaction has committed
+ * ------------------------------------------------------------------ */
+
+/**
+ * Tell the rider, and the rest of the system, that money landed.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A SEPARATE STEP
+ * ---------------------------------------------------------------------------
+ * Everything here is OUTSIDE the database transaction, on purpose:
+ *
+ *   - a socket emit before COMMIT can announce a payment a rollback then
+ *     erases;
+ *   - a PUSH before COMMIT does the same thing permanently, since a
+ *     notification cannot be withdrawn from a phone;
+ *   - and the FCM call is a network round trip, which has no business holding
+ *     a Postgres transaction open.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE PUSH MATTERS MORE THAN IT USED TO
+ * ---------------------------------------------------------------------------
+ * When the only way to pay was the in-app checkout, the rider was already
+ * looking at the app when their money moved; the socket event was enough and a
+ * push would have been noise.
+ *
+ * Payment links and UPI QR codes broke that assumption. The rider pays in a
+ * browser or their UPI app — somewhere else, by definition — and may not open
+ * this app again for hours. Without a push, the only confirmation they get
+ * that an AbhiCabs payment succeeded comes from their bank.
+ *
+ * Fire-and-forget throughout: the money is already committed and recorded, and
+ * no notification failure may be allowed to look like a payment failure.
+ */
+function publishCaptureEvents(events) {
+  for (const e of events || []) {
+    emit(EVENTS.PAYMENT_RECEIVED, {
+      bookingId: e.bookingId,
+      paymentId: e.paymentId,
+      purpose: e.purpose,
+      amount: e.amount,
+      // Carried so a client can show the new figure without a second read.
+      // The rider app still refetches — the server stays the source of truth
+      // for what is owed — but a socket payload that omits the balance forces
+      // every listener to go and ask.
+      balanceDue: e.balanceDue,
+      at: new Date().toISOString(),
+    });
+
+    if (!e.customerId) continue;
+
+    const settled = Number(e.balanceDue) <= 0;
+    push
+      .pushToUser(e.customerId, {
+        title: 'Payment received',
+        body:
+          `₹${e.amount} received for ${e.bookingNumber}. ` +
+          (settled ? 'Nothing further is due.' : `₹${e.balanceDue} still due.`),
+        data: {
+          type: 'PAYMENT_RECEIVED',
+          bookingId: e.bookingId,
+          paymentId: e.paymentId,
+          balanceDue: e.balanceDue,
+        },
+      })
+      .catch((err) => console.error(`[payment] receipt push failed: ${err.message}`));
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -420,7 +535,12 @@ async function collectCash(bookingId, actor, meta = {}) {
     throw ApiError.conflict('Nothing is due on this trip', 'NOTHING_DUE');
   }
 
-  return prisma.$transaction(async (tx) => {
+  /*
+   * AWAITED into a variable rather than returned directly: the capture event
+   * must be published only once this transaction has committed, so there has
+   * to be a statement after it.
+   */
+  const result = await prisma.$transaction(async (tx) => {
     /*
      * AN OPEN BALANCE ORDER MAY ALREADY EXIST — SETTLE IT, DO NOT ADD A SECOND.
      *
@@ -518,12 +638,13 @@ async function collectCash(bookingId, actor, meta = {}) {
       meta,
     });
 
-    emit(EVENTS.PAYMENT_RECEIVED, {
-      bookingId,
-      paymentId: payment.id,
-      purpose: PAYMENT_PURPOSE.BALANCE,
-      amount: balance.toFixed(2),
-    });
+    /*
+     * Deliberately NOT emitted here. Cash has the same pre-commit hazard as a
+     * gateway capture: announcing it from inside the transaction means a
+     * rollback leaves the rider holding a receipt for a settlement that never
+     * happened. The payload rides out on the transaction's return value and is
+     * published below, once it has committed.
+     */
 
     /*
      * IS THE TRIP NOW FINISHABLE?
@@ -564,13 +685,30 @@ async function collectCash(bookingId, actor, meta = {}) {
       tripStatus: endReading?.status ?? booking.status,
       readyToComplete: endReading?.status === 'ARRIVED' && hasOdometer,
       needsOdometer: endReading?.status === 'ARRIVED' && !hasOdometer,
+
+      /** Published after commit, then stripped from the HTTP response below. */
+      __captureEvent: {
+        bookingId,
+        bookingNumber: booking.bookingNumber,
+        customerId: booking.customerId,
+        paymentId: payment.id,
+        purpose: PAYMENT_PURPOSE.BALANCE,
+        amount: balance.toFixed(2),
+        balanceDue: '0.00',
+        collectionType: null,
+      },
     };
   });
+
+  const { __captureEvent, ...response } = result;
+  publishCaptureEvents([__captureEvent]);
+  return response;
 }
 
 module.exports = {
   createOrder,
   applyGatewayEvent,
+  publishCaptureEvents,
   getById,
   listForBooking,
   amountForPurpose,
