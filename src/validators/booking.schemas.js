@@ -63,6 +63,26 @@ const createBookingSchema = z
      * timestamp is validated as one, with the date form as the fallback. A
      * loose `z.string().min(10)` on its own would accept "not a date!".
      */
+    /**
+     * When a NON-ROUND trip reaches its destination — the counterpart to
+     * returnAt, which only a round trip has. A calendar day, never a
+     * timestamp.
+     *
+     * REQUIRED ONLY WHEN THE TRIP HAS STOPS (enforced in the refine below).
+     * A direct A-to-B one-way arrives the day it leaves, so asking would be a
+     * field with one possible answer. Add a stop and that stops being true —
+     * an itinerary halting in Bidar on the 12th may reach Hyderabad on the
+     * 13th, and nothing else in the booking can tell the two apart.
+     *
+     * Scheduling only. fare.service counts chargeable days from the trip type
+     * and the rate card, so this cannot move the fare.
+     */
+    dropAt: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'dropAt must be a date (YYYY-MM-DD)')
+      .optional()
+      .nullable(),
+
     returnAt: z
       .string()
       .datetime()
@@ -123,6 +143,37 @@ const createBookingSchema = z
       .optional()
       .nullable()
       .transform((v) => (v ? v : null)),
+  })
+  /*
+   * A multi-stop non-round trip must say when it lands.
+   *
+   * Mirrors the ROUND_TRIP/returnAt rule directly below, and is scoped the
+   * same way the rider app scopes its picker: only where the answer is not
+   * already obvious. A direct one-way is never asked here, so nothing that
+   * books a simple A-to-B trip is affected.
+   *
+   * HOURLY is excluded because a rental has no destination to arrive at.
+   *
+   * NOTE FOR OTHER CLIENTS: this schema also backs POST /admin/bookings, so an
+   * admin creating a multi-stop one-way must send dropAt too. That is
+   * deliberate — an ops-created itinerary needs an end date for exactly the
+   * same reason a rider-created one does — but it is a breaking change for any
+   * caller that was posting multi-stop trips without it.
+   */
+  .refine(
+    (d) =>
+      d.tripType === 'ROUND_TRIP' ||
+      d.tripType === 'HOURLY' ||
+      !d.stops?.length ||
+      !!d.dropAt,
+    {
+      message: 'A trip with stops needs a drop date',
+      path: ['dropAt'],
+    },
+  )
+  .refine((d) => d.tripType !== 'ROUND_TRIP' || !d.dropAt, {
+    message: 'A round trip states its end with returnAt, not dropAt',
+    path: ['dropAt'],
   })
   .refine((d) => d.tripType !== 'ROUND_TRIP' || !!d.returnAt, {
     message: 'A round trip needs a return date',

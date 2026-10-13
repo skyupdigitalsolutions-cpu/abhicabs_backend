@@ -759,6 +759,20 @@ model Booking {
   pickupAt DateTime  @map("pickup_at")
   returnAt DateTime? @map("return_at") // required for ROUND_TRIP
 
+  /// When a NON-ROUND trip reaches its destination — the counterpart to
+  /// returnAt, which only a round trip has.
+  ///
+  /// A TIMESTAMP holding a DATE, normalised exactly as returnAt is (see
+  /// lib/returnDate): the rider picks a calendar day and the server pins it to
+  /// 21:00 in the city's timezone. Same column type, same normaliser, same
+  /// CHECK constraint shape — a second convention for "a date that is stored
+  /// as an instant" is how the two drift apart.
+  ///
+  /// SCHEDULING ONLY. fare.service counts chargeable days from the trip type
+  /// and the rate card, not from this, so a drop date two days out does not
+  /// change the fare by a rupee. It records when the car is expected to finish.
+  dropAt DateTime? @map("drop_at")
+
   // --- HOURLY rental ---
   // The chosen package (null for the flexible "any hours" option). rentalHours /
   // rentalKm capture what the rider committed to, so the frozen fare is auditable.

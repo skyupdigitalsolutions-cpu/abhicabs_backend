@@ -34,7 +34,7 @@ const discountService = require('./discount.service');
 const M = require('../lib/money');
 const env = require('../config/env');
 const { emit, EVENTS } = require('../lib/events');
-const { returnDateIsValid } = require('../lib/returnDate');
+const { returnDateIsValid, normaliseReturnDate } = require('../lib/returnDate');
 const { BOOKING_SELECT, BOOKING_LIST_SELECT } = require('../models/booking.model');
 
 /* ------------------------------------------------------------------ *
@@ -183,7 +183,7 @@ function splitPayment(total, paymentMode) {
 const MIN_LEAD_MINUTES = Number(process.env.BOOKING_MIN_LEAD_MINUTES || 15);
 const MAX_ADVANCE_DAYS = Number(process.env.BOOKING_MAX_ADVANCE_DAYS || 90);
 
-function validateTiming({ pickupAt, returnAt, tripType, scheduled }) {
+function validateTiming({ pickupAt, returnAt, dropAt, tripType, stops, scheduled }) {
   const now = Date.now();
   const pickup = new Date(pickupAt).getTime();
 
@@ -251,6 +251,51 @@ function validateTiming({ pickupAt, returnAt, tripType, scheduled }) {
     // The database CHECK constraint enforces this too; rejecting here gives a
     // clearer message than a constraint violation would.
     throw ApiError.badRequest('A one-way trip cannot have a return date', 'UNEXPECTED_RETURN_DATE');
+  }
+
+  /*
+   * THE DROP DATE — the non-round counterpart to the return date above.
+   *
+   * Validated with the SAME helper, not a second implementation. The rule is
+   * identical ("the end cannot fall on an earlier DAY than the pickup") and so
+   * is the trap: dropAt carries only a date, the caller pins it to a fixed
+   * hour, and comparing instants would reject an ordinary same-day arrival
+   * whose pickup happens to fall after that hour — telling the rider their
+   * drop time is wrong about a time they were never asked for.
+   *
+   * Required only where the answer is not already obvious: a trip with stops.
+   * The Zod refine says the same thing, but this is the layer the WhatsApp
+   * bot and any future internal caller go through, and a rule that only
+   * exists in the HTTP schema is a rule that holds until the first service
+   * that skips it.
+   */
+  if (tripType === 'ROUND_TRIP') {
+    if (dropAt) {
+      throw ApiError.badRequest(
+        'A round trip states its end with a return date, not a drop date',
+        'UNEXPECTED_DROP_DATE',
+      );
+    }
+  } else if (tripType !== 'HOURLY') {
+    // A rental has no destination, so it is excluded above rather than relying
+    // on `stops` happening to be empty for it.
+    if (!dropAt && stops && stops.length > 0) {
+      throw ApiError.badRequest(
+        'A trip with stops needs a drop date',
+        'DROP_DATE_REQUIRED',
+      );
+    }
+    if (dropAt && !returnDateIsValid(dropAt, pickupAt)) {
+      throw ApiError.badRequest(
+        'The drop date cannot be before the pickup date',
+        'INVALID_DROP_DATE',
+      );
+    }
+  } else if (dropAt) {
+    throw ApiError.badRequest(
+      'A rental has no drop date',
+      'UNEXPECTED_DROP_DATE',
+    );
   }
 }
 
@@ -369,7 +414,9 @@ async function create(input, actor, meta = {}) {
     validateTiming({
       pickupAt: input.pickupAt,
       returnAt: input.returnAt,
+      dropAt: input.dropAt,
       tripType: input.tripType,
+      stops: input.stops,
       scheduled: input.scheduled !== false,
     });
 
@@ -516,6 +563,27 @@ async function create(input, actor, meta = {}) {
             : input.returnAt
               ? new Date(input.returnAt)
               : null,
+
+          /*
+           * Normalised through the SAME function as returnAt, for the same
+           * reasons set out in lib/returnDate: a date has to be stored as some
+           * instant on that date, 21:00 local keeps it clear of the night
+           * window, and the late-pickup clamp keeps it strictly after the
+           * pickup so the CHECK constraint holds for a same-day arrival.
+           *
+           * Default timezone, matching bookingRequest.service — every city in
+           * the table is Asia/Kolkata today. If a market outside IST is ever
+           * added, this and that call site both need the city's own zone, the
+           * way quote.service already passes `city.timezone`.
+           *
+           * NOT taken from the quote — unlike returnAt, the quote never sees
+           * dropAt. The fare does not depend on it (chargeable days come from
+           * the trip type and rate card), so routing it through the pricing
+           * path would imply an influence it does not have.
+           */
+          dropAt: input.dropAt
+            ? new Date(normaliseReturnDate(input.dropAt, undefined, input.pickupAt))
+            : null,
 
           // Trip-type extras. For HOURLY we store the package the quote actually
           // applied (resolved to this class), not the raw id the app sent.
