@@ -376,8 +376,8 @@
           "2 bags"
         ],
         "images": [
-          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791350111/benz-side.webp" },
-          { "label": "front",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791350212/benz-front.webp" },
+          { "label": "Side",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1792066556/side-benz.webp" },
+          { "label": "front",     "url": "https://res.cloudinary.com/er18lysb/image/upload/v1792066601/front-benz.webp" },
           { "label": "Interior", "url": "https://res.cloudinary.com/er18lysb/image/upload/v1791350266/benz-interior.webp" }
         ]
       }
