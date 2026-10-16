@@ -37,6 +37,73 @@ function maskEmail(email) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Deliverability
+ * ------------------------------------------------------------------ */
+
+/**
+ * Phone-first signup generates `phone_<number>@placeholder.local` to satisfy
+ * UNIQUE(email). It is a database artefact, not an inbox — mailing it produces
+ * a hard bounce, and enough hard bounces get the sending domain throttled or
+ * suspended by the provider. Every outbound template must filter it out, so the
+ * check lives here rather than being re-implemented at each call site.
+ */
+function isDeliverableEmail(email) {
+  const value = String(email || '').trim().toLowerCase();
+  if (!value) return false;
+  if (value.endsWith('@placeholder.local')) return false;
+  // Cheap sanity check; the provider rejects the rest.
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+/* ------------------------------------------------------------------ *
+ * Formatting
+ * ------------------------------------------------------------------ */
+
+/**
+ * "₹12,340.00" — Indian digit grouping (lakh/crore), two decimals.
+ *
+ * Prisma serialises Decimal columns as strings, so everything arriving here is
+ * a string far more often than a number. Number() handles both; a value that
+ * cannot be parsed returns null so the caller can omit the row entirely rather
+ * than print "₹NaN" on a confirmation.
+ */
+function formatAmount(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** "12 Oct 2026, 5:04 pm" in India time. Workers run in UTC on Railway. */
+function formatIst(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+const TRIP_TYPE_LABEL = {
+  ONE_WAY: 'One way',
+  ROUND_TRIP: 'Round trip',
+  HOURLY: 'Local rental',
+  AIRPORT: 'Airport transfer',
+};
+
+/* ------------------------------------------------------------------ *
  * OTP template
  * ------------------------------------------------------------------ */
 
@@ -86,12 +153,6 @@ function otpTemplate({ name, code, ttlSeconds }) {
     text,
     html,
   };
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-  ));
 }
 
 /* ------------------------------------------------------------------ *
@@ -176,6 +237,176 @@ async function sendTripStartOtpEmail({ to, name, code, bookingNumber, pickupAt }
 }
 
 /* ------------------------------------------------------------------ *
+ * Booking confirmation
+ * ------------------------------------------------------------------ */
+
+/**
+ * "Your booking is confirmed, and here is what it costs."
+ *
+ * WHY THE AMOUNT IS THE POINT OF THIS EMAIL
+ * -----------------------------------------
+ * The push notification can only carry a line of text, and the rider dismisses
+ * it. The fare was last seen on a quote screen before an admin had confirmed
+ * anything, so after confirmation there is no durable record of the number the
+ * rider agreed to until the invoice arrives at the END of the trip. This email
+ * is that record: total, what has already been paid, and what is still owed.
+ *
+ * WHY "estimated"
+ * ---------------
+ * At CONFIRMED there is no finalFare — the trip has not run, so distance-based
+ * and allowance components are not settled. Printing the quoted total as if it
+ * were final sets up a dispute at the end of an outstation run. The copy says
+ * estimated, names the extras that can move it, and the invoice email at
+ * COMPLETED carries the real figure.
+ *
+ * Never throws. A mail provider being down must not fail a notification job,
+ * which would have BullMQ retry a push the rider already received.
+ */
+async function sendBookingConfirmedEmail({ to, name, booking = {} }) {
+  if (!isDeliverableEmail(to)) {
+    // Phone-first account with a placeholder address. Normal, not an error.
+    return { skipped: true, reason: 'NO_EMAIL' };
+  }
+
+  try {
+    const greeting = name ? `Hi ${name},` : 'Hi,';
+
+    const bookingNumber = booking.bookingNumber ?? '';
+    const tripType = TRIP_TYPE_LABEL[booking.tripType] || booking.tripType || null;
+    const pickupAt = formatIst(booking.pickupAt);
+    const returnAt = formatIst(booking.returnAt);
+
+    // finalFare only exists once the trip is settled; at confirmation it is the
+    // frozen quote on estimatedFare that the rider agreed to.
+    const isFinal = booking.finalFare != null;
+    const total = formatAmount(booking.finalFare ?? booking.estimatedFare);
+    const advance = formatAmount(booking.advancePaid);
+    const balance = formatAmount(booking.balanceDue);
+
+    // `advancePaid` is 0 on a pay-later booking; a "₹0.00 paid" row is noise.
+    const showAdvance = Number(booking.advancePaid ?? 0) > 0;
+    const payLater = booking.paymentMode === 'ZERO';
+
+    // fareBasis.discount is written at create time and is NET of the total
+    // above — see booking.service. Showing it answers "why is this less than
+    // the quote I screenshotted".
+    const discount = booking.fareBasis?.discount || null;
+    const discountAmount = discount ? formatAmount(discount.amount) : null;
+
+    /* ---------------- plain text ---------------- */
+
+    const rows = [
+      ['Booking', bookingNumber],
+      tripType ? ['Trip type', tripType] : null,
+      pickupAt ? ['Pickup', pickupAt] : null,
+      booking.pickupAddress ? ['From', booking.pickupAddress] : null,
+      booking.dropAddress ? ['To', booking.dropAddress] : null,
+      returnAt ? ['Return', returnAt] : null,
+      booking.distanceKm != null ? ['Distance', `${booking.distanceKm} km`] : null,
+    ].filter(Boolean);
+
+    const moneyRows = [
+      discountAmount ? [`Discount${discount.code ? ` (${discount.code})` : ''}`, `− ${discountAmount}`] : null,
+      total ? [isFinal ? 'Total fare' : 'Estimated fare', total] : null,
+      showAdvance && advance ? ['Paid in advance', advance] : null,
+      balance ? [payLater ? 'Payable to the driver' : 'Balance due', balance] : null,
+    ].filter(Boolean);
+
+    const text = [
+      greeting,
+      '',
+      `Your booking ${bookingNumber} is confirmed.`,
+      '',
+      ...rows.map(([k, v]) => `${k}: ${v}`),
+      '',
+      ...moneyRows.map(([k, v]) => `${k}: ${v}`),
+      '',
+      isFinal
+        ? ''
+        : 'This is the fare quoted at booking. Tolls, parking, state permits and any\nextra distance or hours beyond the booked package are billed at the end of\nthe trip, and your invoice will show the final amount.',
+      '',
+      'You can see this booking any time in the app.',
+      '',
+      `— ${BRAND}`,
+    ].filter((line) => line !== undefined).join('\n');
+
+    /* ---------------- html ---------------- */
+
+    const detailHtml = rows
+      .map(
+        ([k, v]) => `<tr>
+          <td style="padding:6px 0;font-size:14px;color:#777;vertical-align:top;width:40%;">${escapeHtml(k)}</td>
+          <td style="padding:6px 0;font-size:14px;color:#1a1a1a;vertical-align:top;">${escapeHtml(v)}</td>
+        </tr>`,
+      )
+      .join('');
+
+    const moneyHtml = moneyRows
+      .map(([k, v], i) => {
+        const strong = i === moneyRows.length - 1;
+        return `<tr>
+          <td style="padding:8px 0;font-size:${strong ? '15' : '14'}px;color:${strong ? '#1a1a1a' : '#777'};font-weight:${strong ? '600' : '400'};">${escapeHtml(k)}</td>
+          <td style="padding:8px 0;font-size:${strong ? '16' : '14'}px;color:#1a1a1a;font-weight:${strong ? '700' : '500'};text-align:right;white-space:nowrap;">${escapeHtml(v)}</td>
+        </tr>`;
+      })
+      .join('');
+
+    const html = `<!doctype html>
+<html>
+  <body style="margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;">
+      <tr><td style="padding:32px;">
+        <p style="margin:0 0 8px;font-size:15px;">${escapeHtml(greeting)}</p>
+        <p style="margin:0 0 24px;font-size:20px;font-weight:700;">Your booking is confirmed</p>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${detailHtml}</table>
+
+        <div style="height:1px;background:#e9eaee;margin:20px 0;"></div>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${moneyHtml}</table>
+
+        ${
+          isFinal
+            ? ''
+            : `<p style="margin:20px 0 0;font-size:13px;color:#777;line-height:1.5;">
+                 This is the fare quoted at booking. Tolls, parking, state permits and any extra
+                 distance or hours beyond the booked package are billed at the end of the trip —
+                 your invoice will show the final amount.
+               </p>`
+        }
+        ${
+          payLater
+            ? `<p style="margin:12px 0 0;font-size:13px;color:#777;">Please pay the driver at the end of your trip.</p>`
+            : ''
+        }
+
+        <p style="margin:24px 0 0;font-size:13px;color:#777;">
+          You can see this booking any time in the ${escapeHtml(BRAND)} app.
+        </p>
+      </td></tr>
+    </table>
+    <p style="max-width:520px;margin:16px auto 0;font-size:12px;color:#999;text-align:center;">${escapeHtml(BRAND)}</p>
+  </body>
+</html>`;
+
+    const result = await getProvider().send({
+      to,
+      subject: total
+        ? `Booking ${bookingNumber} confirmed — ${total}`
+        : `Booking ${bookingNumber} confirmed`,
+      text,
+      html,
+    });
+
+    console.log(`[mail] booking ${bookingNumber} confirmation sent to ${maskEmail(to)} (${result.messageId})`);
+    return { ...result, to: maskEmail(to) };
+  } catch (err) {
+    console.error('[mail] booking confirmation send failed:', err.message);
+    return { failed: true, error: err.message };
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Invoice
  * ------------------------------------------------------------------ */
 
@@ -197,9 +428,10 @@ async function sendTripStartOtpEmail({ to, name, code, bookingNumber, pickupAt }
  * invoice in the app.
  */
 async function sendInvoiceEmail({ to, name, invoice, booking, customer, seller }) {
-  if (!to) {
-    // A phone-first signup has a placeholder address. Nothing to do, and not
-    // an error — it is the normal state for a large share of riders.
+  // Was `if (!to)`. A phone-first account does have an address — a generated
+  // @placeholder.local one — so the old check passed it straight to the
+  // provider and every such invoice hard-bounced.
+  if (!isDeliverableEmail(to)) {
     return { skipped: true, reason: 'NO_EMAIL' };
   }
 
@@ -225,7 +457,10 @@ async function sendInvoiceEmail({ to, name, invoice, booking, customer, seller }
 module.exports = {
   sendOtpEmail,
   sendTripStartOtpEmail,
+  sendBookingConfirmedEmail,
   sendInvoiceEmail,
   maskEmail,
+  isDeliverableEmail,
+  formatAmount,
   isConfigured,
 };

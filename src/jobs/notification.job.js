@@ -4,7 +4,8 @@
  * src/jobs/notification.job.js   — Day 12
  *
  * Handles the notifications queue: WhatsApp/SMS for booking confirmed, driver
- * assigned, and cancellation.
+ * assigned, and cancellation, the FCM push, and — for BOOKING_CONFIRMED — the
+ * confirmation email carrying the fare.
  *
  * Idempotent via runOnce: the DURABLE record ("this notification was issued")
  * is written exactly once, keyed by (type, bookingId). The actual send is fired
@@ -18,6 +19,7 @@ const { prisma } = require('../config/prisma');
 const { runOnce } = require('./runOnce');
 const notifyProvider = require('../services/providers/notify.provider');
 const pushService = require('../services/push.service');
+const emailService = require('../services/email.service');
 
 /** Message templates by notification type. Params fill the template. */
 /* ---------------- formatting for reminder copy ---------------- */
@@ -66,7 +68,13 @@ const TEMPLATES = {
   BOOKING_CONFIRMED: {
     channel: 'whatsapp',
     template: 'booking_confirmed',
-    render: (b) => ({ bookingNumber: b.bookingNumber, pickup: b.pickupAddress }),
+    // `amount` is pre-formatted here rather than in the push/WhatsApp copy so
+    // the two channels can never quote the rider different numbers.
+    render: (b) => ({
+      bookingNumber: b.bookingNumber,
+      pickup: b.pickupAddress,
+      amount: emailService.formatAmount(b.finalFare ?? b.estimatedFare),
+    }),
   },
   DRIVER_ASSIGNED: {
     channel: 'whatsapp',
@@ -99,10 +107,18 @@ const PUSH = {
     title: 'Booking received',
     body: `We've received your booking ${b.bookingNumber}. We'll notify you as soon as it's confirmed.`,
   }),
-  BOOKING_CONFIRMED: (b) => ({
-    title: 'Booking confirmed',
-    body: `Your booking ${b.bookingNumber} is confirmed.`,
-  }),
+  BOOKING_CONFIRMED: (b) => {
+    const amount = b.params?.amount || null;
+    return {
+      title: 'Booking confirmed',
+      // The fare in the tray, so the rider sees the number without opening
+      // anything. A booking with no readable fare still gets the old copy
+      // rather than a push that trails off.
+      body: amount
+        ? `Your booking ${b.bookingNumber} is confirmed. Estimated fare ${amount}. Details sent to your email.`
+        : `Your booking ${b.bookingNumber} is confirmed.`,
+    };
+  },
   DRIVER_ASSIGNED: (b) => ({
     title: 'Driver assigned',
     body: `A driver has been assigned to booking ${b.bookingNumber}.`,
@@ -112,6 +128,59 @@ const PUSH = {
     body: `Booking ${b.bookingNumber} was cancelled.`,
   }),
 };
+
+/** Types that also get an email. Keyed so adding one is a line, not a branch. */
+const EMAIL_TYPES = new Set(['BOOKING_CONFIRMED']);
+
+/**
+ * The confirmation email.
+ *
+ * A SECOND QUERY, DELIBERATELY. The runOnce transaction selects only what the
+ * SMS/push templates need, and widening it would make every notification type
+ * pay for columns one of them uses. This runs outside the transaction — a mail
+ * round trip must not hold a database lock, exactly as the invoice email at
+ * COMPLETED does not.
+ *
+ * Never throws: sendBookingConfirmedEmail swallows provider errors, and the
+ * catch here covers the query. A failed email must not fail the job, because a
+ * BullMQ retry would find the runOnce record already written, skip to this
+ * point, and re-send a push the rider has already seen.
+ */
+async function sendConfirmationEmail(bookingId) {
+  try {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        bookingNumber: true,
+        tripType: true,
+        vehicleClass: true,
+        pickupAddress: true,
+        dropAddress: true,
+        pickupAt: true,
+        returnAt: true,
+        distanceKm: true,
+        estimatedFare: true,
+        finalFare: true,
+        advancePaid: true,
+        balanceDue: true,
+        paymentMode: true,
+        fareBasis: true,
+        guestName: true,
+        customer: { select: { user: { select: { name: true, email: true } } } },
+      },
+    });
+    if (!booking) return null;
+
+    return await emailService.sendBookingConfirmedEmail({
+      to: booking.customer?.user?.email ?? null,
+      name: booking.customer?.user?.name ?? null,
+      booking,
+    });
+  } catch (err) {
+    console.error(`[notification] confirmation email failed for ${bookingId}: ${err.message}`);
+    return { failed: true, error: err.message };
+  }
+}
 
 /**
  * @param {import('bullmq').Job} job  data: { type, bookingId, to, extra }
@@ -136,12 +205,16 @@ async function handle(job) {
         where: { id: bookingId },
         // dropAddress / pickupAt / tripType: the trip reminder names the
         // route and the pickup time.
+        // estimatedFare / finalFare: BOOKING_CONFIRMED quotes the amount in
+        // the push and the WhatsApp params.
         select: {
           bookingNumber: true,
           pickupAddress: true,
           dropAddress: true,
           pickupAt: true,
           tripType: true,
+          estimatedFare: true,
+          finalFare: true,
           customerId: true,
         },
       });
@@ -214,15 +287,31 @@ async function handle(job) {
     }
   }
 
+  // 3) Email, for the types that have one. Same best-effort contract as the
+  //    push: it sits inside the runOnce'd branch, so it goes out once per
+  //    booking, and it cannot fail the job.
+  let emailResult = null;
+  if (EMAIL_TYPES.has(type)) {
+    emailResult = await sendConfirmationEmail(bookingId);
+  }
+
   // One line per notification, in production too. Completed jobs are not
   // logged there (workers/index.js), so without this a notification that ran
   // and one that never ran looked identical in the worker log.
   console.log(
     `[notification] ${type} ${rec.bookingNumber} -> ` +
-      (pushResult ? `push ${JSON.stringify(pushResult)}` : 'no push for this type'),
+      (pushResult ? `push ${JSON.stringify(pushResult)}` : 'no push for this type') +
+      (emailResult
+        ? ` | email ${emailResult.skipped ? emailResult.reason : emailResult.failed ? 'FAILED' : 'sent'}`
+        : ''),
   );
 
-  return { sent: !!rec.to, pushed: !!(rec.customerId && pushTpl), bookingNumber: rec.bookingNumber };
+  return {
+    sent: !!rec.to,
+    pushed: !!(rec.customerId && pushTpl),
+    emailed: !!(emailResult && !emailResult.skipped && !emailResult.failed),
+    bookingNumber: rec.bookingNumber,
+  };
 }
 
 module.exports = { handle };
