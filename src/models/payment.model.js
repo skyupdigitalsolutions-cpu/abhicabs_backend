@@ -134,6 +134,18 @@ const PAYMENT_SELECT = {
   collectionType: true,
   shareUrl: true,
   expiresAt: true,
+  /*
+   * Selected everywhere a payment is read, not only on the standalone screens.
+   *
+   * applyCapture needs payerName/payerPhone to build the capture event for a
+   * collection that has no booking to describe it, and it receives whatever
+   * this select returns. Leaving them out here would make a standalone capture
+   * announce itself as an anonymous amount.
+   */
+  payerName: true,
+  payerPhone: true,
+  payerEmail: true,
+  description: true,
   failureReason: true,
   paidAt: true,
   createdAt: true,

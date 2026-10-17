@@ -311,6 +311,41 @@ async function applyCapture(tx, payment, parsed) {
     throw err;
   }
 
+  /*
+   * 1b. STANDALONE COLLECTION — stop here, deliberately.
+   *
+   * A link or QR raised without a booking (an advance taken over the phone
+   * before the trip exists, a cancellation fee, anything that is not a trip)
+   * has no counters to move: there is no estimated fare to subtract from and
+   * no balance to recompute. The ledger entry above is the whole record, which
+   * is why it was written BEFORE this branch rather than after — the money is
+   * accounted for identically whether or not a booking exists.
+   *
+   * The payload below keeps the same shape as the booking path so nothing
+   * downstream has to learn about a second kind of capture. publishCaptureEvents
+   * already skips the push when customerId is null, which is right: there is
+   * no app account to notify, and the admin learns about it from the payments
+   * screen.
+   */
+  if (!payment.bookingId) {
+    return {
+      bookingId: null,
+      bookingNumber: null,
+      customerId: null,
+      paymentId: payment.id,
+      purpose: payment.purpose,
+      amount: amount.toFixed(2),
+      // Nothing is "still due" on an instrument that was the entire ask.
+      balanceDue: '0.00',
+      collectionType: payment.collectionType || null,
+      /** Tells a listener this capture has no booking without it inferring from nulls. */
+      standalone: true,
+      payerName: payment.payerName || null,
+      payerPhone: payment.payerPhone || null,
+      description: payment.description || null,
+    };
+  }
+
   // 2. Booking counters. advance_paid accumulates everything paid so far;
   //    balance_due is recomputed as total - paid, floored at zero so it can
   //    never violate chk_booking_amounts_non_negative or drive a paid-in-full
@@ -469,6 +504,13 @@ async function getById(id, actor = null) {
   // We return 404 (not 403) on a mismatch so the response does not confirm that
   // a payment with this id exists — same posture as booking.findById.
   if (actor && actor.role === 'USER') {
+    /*
+     * A standalone collection belongs to no booking, so there is no ownership
+     * to check and nothing a customer may read. 404 rather than 403, same as
+     * below: the response must not confirm the id exists.
+     */
+    if (!payment.bookingId) throw ApiError.notFound('Payment not found');
+
     const booking = await prisma.booking.findUnique({
       where: { id: payment.bookingId },
       select: { customerId: true },

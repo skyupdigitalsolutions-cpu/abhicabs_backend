@@ -381,6 +381,33 @@ const env = {
     provider: (process.env.NOTIFY_PROVIDER || 'mock').toLowerCase(),
   },
 
+  /* ---------------- Outbound WhatsApp (payment links) ---------------- */
+  /*
+   * TWO MODES, AND THE FALLBACK IS THE DEFAULT ON PURPOSE.
+   *
+   *   botUrl SET    the backend POSTs the message to our own WhatsApp bot and
+   *                 the customer receives it without the admin doing anything.
+   *   botUrl UNSET  the API returns a wa.me deep link instead. The admin taps
+   *                 it and WhatsApp opens with the message already typed.
+   *
+   * The deep link is not a degraded mode — it is the one that works today.
+   * Sending a templated WhatsApp message programmatically needs a Business API
+   * number with an approved template, and until that exists an admin tapping a
+   * prefilled link sends exactly the same text from a number the customer
+   * already recognises. Both paths return the same `whatsappUrl`, so the admin
+   * UI never has to branch.
+   */
+  whatsapp: {
+    /** Base URL of our own bot, e.g. https://bot.abhicabs.in. Empty disables sending. */
+    botUrl: (process.env.WHATSAPP_BOT_URL || '').replace(/\/+$/, ''),
+    sendPath: process.env.WHATSAPP_BOT_SEND_PATH || '/api/send',
+    timeoutMs: Number(process.env.WHATSAPP_BOT_TIMEOUT_MS || 8000),
+    /** Prefixed to a 10-digit Indian mobile when building the wa.me target. */
+    countryCode: process.env.WHATSAPP_COUNTRY_CODE || '91',
+    /** How the business names itself in the message body. */
+    businessName: process.env.BUSINESS_NAME || 'AbhiCabs',
+  },
+
   /* ---------------- Push notifications (FCM / Firebase) ---------------- */
   push: {
     // 'mock' (default, offline no-op) or 'fcm'. Falls back to mock automatically

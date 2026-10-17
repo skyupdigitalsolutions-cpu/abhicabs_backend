@@ -12,8 +12,8 @@
  * something that can open a checkout — the rider app. That leaves out most of
  * the ways this business actually takes money: a trip booked over the phone, a
  * walk-in, a corporate coordinator paying for someone else's ride, a rider
- * whose app will not open the payment sheet. Today the answer to all of those
- * is cash, which is the answer that leaves no gateway record.
+ * whose app will not open the payment sheet. Without this the answer to all of
+ * those is cash, which is the answer that leaves no gateway record.
  *
  * Two instruments close that gap, and the choice between them is about TIME,
  * not preference:
@@ -23,8 +23,30 @@
  *         now and read later.
  *
  *   QR    A fixed-amount, single-use UPI code. Right for someone in front of
- *         you, or on WhatsApp right now. Nothing is delivered — the admin
- *         shares the image. UPI only, so no cards.
+ *         you, or on WhatsApp right now. Nothing is delivered by the gateway —
+ *         the admin shares the image. UPI only, so no cards.
+ *
+ * ---------------------------------------------------------------------------
+ * WITH A BOOKING, OR WITHOUT ONE
+ * ---------------------------------------------------------------------------
+ * Both instruments come in two flavours, and the difference is one question:
+ * does a booking already exist?
+ *
+ *   BOOKING-SCOPED   the amount is DERIVED from the booking's balanceDue and
+ *                    capped at it, the payer is derived from the booking, and
+ *                    a capture moves advancePaid / balanceDue.
+ *
+ *   STANDALONE       there is no booking yet. The admin is taking an advance
+ *                    over the phone before entering the trip, settling a
+ *                    cancellation fee, or collecting for something that is not
+ *                    a trip at all. The amount and the payer are both stated
+ *                    explicitly, because there is nothing to derive them from,
+ *                    and a capture writes a ledger entry with a null bookingId
+ *                    and moves no counters.
+ *
+ * They share one code path below rather than being two features, because the
+ * part that is easy to get wrong — reuse before create, orphan rollback,
+ * cancel-at-the-gateway-first — is identical and must stay identical.
  *
  * ---------------------------------------------------------------------------
  * NEITHER GETS ITS OWN CAPTURE PATH
@@ -33,8 +55,8 @@
  * more ways to reach the SAME money, so each one is stored as an ordinary
  * `payments` row with the instrument's id in providerOrderId. When the webhook
  * lands, applyGatewayEvent matches that id, moves the row to CAPTURED, writes
- * the ledger entry and moves the booking's advancePaid/balanceDue — all code
- * that already exists and is already tested.
+ * the ledger entry and (when there is a booking) moves its advancePaid /
+ * balanceDue — all code that already exists and is already tested.
  *
  * The alternative — a separate table and a separate settlement path — would
  * mean two implementations of "money arrived", which is precisely the kind of
@@ -48,9 +70,10 @@
  */
 
 const { prisma } = require('../config/prisma');
-const { ApiError } = require('../utils/helpers');
+const { ApiError, paginated } = require('../utils/helpers');
 const paymentProvider = require('./providers/payment.provider');
 const audit = require('./audit.service');
+const whatsapp = require('./whatsapp.service');
 const M = require('../lib/money');
 const {
   PAYMENT_STATUS,
@@ -103,7 +126,7 @@ function bookingTotal(booking) {
 }
 
 /**
- * What to charge.
+ * What to charge against a BOOKING.
  *
  * An explicit `amount` is allowed, because ops genuinely need it — a part
  * payment a customer negotiated on the phone, a waiver, a top-up after a
@@ -128,6 +151,29 @@ function resolveAmount(booking, purpose, requested) {
       `That is more than the ₹${M.toStr(outstanding)} outstanding on this booking`,
       'AMOUNT_EXCEEDS_OUTSTANDING',
     );
+  }
+  return asked;
+}
+
+/**
+ * What to charge with NO booking.
+ *
+ * Required, and uncapped — there is no outstanding figure to cap it against.
+ * That makes it the one number in this file nothing can cross-check, so the
+ * validator holds it to two decimals and a sane ceiling, and the audit entry
+ * records who typed it. An admin asking for ₹45,000 instead of ₹4,500 is a
+ * mistake only a human can catch, and the trail is what lets them.
+ */
+function resolveStandaloneAmount(requested) {
+  if (requested == null) {
+    throw ApiError.badRequest(
+      'An amount is required when there is no booking to take it from',
+      'AMOUNT_REQUIRED',
+    );
+  }
+  const asked = M.round2(requested);
+  if (!M.isPositive(asked)) {
+    throw ApiError.badRequest('Amount must be greater than zero', 'INVALID_AMOUNT');
   }
   return asked;
 }
@@ -181,6 +227,32 @@ function payerFor(booking) {
   };
 }
 
+/**
+ * The payer for a standalone collection: whatever the admin typed.
+ *
+ * The phone is MANDATORY and normalised to ten Indian digits here, not in Zod,
+ * because the same normalisation has to hold for the wa.me target, Razorpay's
+ * SMS delivery and the payer_phone column — three consumers that must agree on
+ * what "the customer's number" is. A row whose phone is stored as typed and
+ * shared as normalised is a row nobody can search for.
+ */
+function standalonePayer(payload) {
+  const phone = whatsapp.waNumber(payload.customerPhone);
+  if (!phone) {
+    throw ApiError.badRequest(
+      'A valid 10-digit Indian mobile number is required',
+      'INVALID_PHONE',
+    );
+  }
+  return {
+    // Stored and sent without the country code, matching how every other
+    // phone in this system is held (users.phone, bookings.guestPhone).
+    phone: phone.slice(-10),
+    name: payload.customerName?.trim() || null,
+    email: payload.customerEmail?.trim() || null,
+  };
+}
+
 function requireCapability(method, label) {
   if (!paymentProvider.supports(method)) {
     const provider = paymentProvider.getProvider().name;
@@ -199,17 +271,22 @@ function requireCapability(method, label) {
  * An unexpired, unpaid instrument of the same kind for the same amount.
  *
  * Returned instead of creating a second one, for a reason that is operational
- * rather than tidy: two live links for one booking means two ways to pay it,
+ * rather than tidy: two live links for the same ask means two ways to pay it,
  * and a customer who pays the older one leaves a captured payment the admin is
  * not watching. The admin cancels explicitly when they want a fresh one.
  *
  * Amount is part of the match because a repriced booking SHOULD get a new
  * link — the old one would collect the wrong figure.
+ *
+ * For a standalone collection the match is on the PHONE instead of a booking.
+ * It is the only identifier a customer who is not in the system yet has, and
+ * the double-click it defends against is the common one: an admin who did not
+ * see the first link appear.
  */
-async function findReusable(bookingId, collectionType, amount) {
+async function findReusable({ bookingId, payerPhone, collectionType, amount }) {
   const open = await prisma.payment.findFirst({
     where: {
-      bookingId,
+      ...(bookingId ? { bookingId } : { bookingId: null, payerPhone }),
       collectionType,
       status: { in: [...LIVE_STATUSES] },
       OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
@@ -227,103 +304,219 @@ async function findReusable(bookingId, collectionType, amount) {
  * Create
  * ------------------------------------------------------------------ */
 
+/**
+ * The one creation path, for all four combinations of
+ * {LINK, QR} x {booking-scoped, standalone}.
+ *
+ * `booking` is null for a standalone collection, and everything that differs
+ * follows from that single fact: where the amount came from, who the payer is,
+ * what the reference and description say.
+ */
+async function create({
+  collectionType,
+  booking,
+  payer,
+  amount,
+  purpose,
+  payload,
+  actor,
+  meta,
+}) {
+  const isLink = collectionType === COLLECTION_TYPE.LINK;
+
+  if (!M.isPositive(amount)) {
+    throw ApiError.badRequest(
+      booking ? 'Nothing is outstanding on this booking' : 'Amount must be greater than zero',
+      booking ? 'NOTHING_TO_CHARGE' : 'INVALID_AMOUNT',
+    );
+  }
+
+  const reuse = await findReusable({
+    bookingId: booking?.id || null,
+    payerPhone: payer.phone,
+    collectionType,
+    amount,
+  });
+  if (reuse) {
+    return { payment: await decorate(reuse, booking), reused: true, whatsapp: null };
+  }
+
+  const expiresAt = resolveExpiry(
+    payload.expiresInHours,
+    payload.expiresAt,
+    isLink ? DEFAULT_LINK_HOURS : DEFAULT_QR_HOURS,
+  );
+  const provider = paymentProvider.getProvider();
+
+  /*
+   * What the customer sees on the hosted page, and what goes in the WhatsApp
+   * message. Resolved here rather than left to the provider's own fallback,
+   * which interpolates a bookingId that does not exist on a standalone
+   * collection and renders as "Trip undefined".
+   */
+  const description =
+    payload.description?.trim() ||
+    (booking ? `AbhiCabs trip ${booking.bookingNumber}` : 'AbhiCabs payment');
+
+  let instrument;
+  if (isLink) {
+    /*
+     * reference_id must be unique per link across the whole Razorpay account,
+     * and a booking can legitimately need a second one — the first expired, or
+     * the fare changed. Suffixing with the timestamp keeps the booking number
+     * searchable in their dashboard (which is the point) while never
+     * colliding. A standalone link has no booking number, so it carries the
+     * payer's last four digits instead — the next best thing staff can search
+     * for when a customer calls about "the link you sent me".
+     */
+    const stem = booking ? booking.bookingNumber : `ADHOC-${payer.phone.slice(-4)}`;
+    const referenceId = `${stem}-${Date.now().toString(36)}`;
+
+    instrument = await provider.createPaymentLink({
+      amount: M.toStr(amount),
+      currency: 'INR',
+      bookingId: booking?.id || null,
+      purpose,
+      referenceId,
+      description,
+      customer: payer,
+      // Default ON. A link nobody is told about is not a collection method, and
+      // Razorpay's own delivery is the only transactional channel available here.
+      notifyBySms: payload.notifyBySms !== false,
+      notifyByEmail: payload.notifyByEmail !== false,
+      expireBy: expiresAt,
+    });
+  } else {
+    instrument = await provider.createQrCode({
+      amount: M.toStr(amount),
+      bookingId: booking?.id || null,
+      purpose,
+      description,
+      closeBy: expiresAt,
+    });
+  }
+
+  const { payment } = await persist({
+    booking,
+    payer,
+    description,
+    provider,
+    instrument,
+    collectionType,
+    purpose,
+    amount,
+    expiresAt,
+    actor,
+    meta,
+    auditAction: isLink ? 'PAYMENT_LINK_CREATED' : 'PAYMENT_QR_CREATED',
+    auditExtra: isLink ? { notifiedSms: payload.notifyBySms !== false } : {},
+  });
+
+  /*
+   * The WhatsApp share, composed in the same response that created the link.
+   *
+   * Two reasons it is not a second request. The admin's intent — "send this
+   * person a payment link on WhatsApp" — is one act, and splitting it means a
+   * created link that nobody sent whenever the second call is forgotten or
+   * fails. And `sendWhatsApp` is opt-in rather than default-on, because the
+   * bot path delivers a message to a real person's phone, and that must never
+   * be a side effect of a field the admin did not set.
+   */
+  const share = await shareFor(payment, booking, { send: payload.sendWhatsApp === true });
+
+  if (share?.sent) {
+    audit.recordAsync({
+      actor,
+      action: 'PAYMENT_LINK_WHATSAPP_SENT',
+      entityType: 'payment',
+      entityId: payment.id,
+      after: { to: whatsapp.maskPhone(payer.phone), collectionType, via: 'bot' },
+      meta,
+    });
+  }
+
+  return {
+    payment: { ...(await decorate(payment, booking)) },
+    reused: false,
+    whatsapp: share,
+  };
+}
+
+/** Booking-scoped payment link. Amount derived from the booking unless given. */
 async function createLink(bookingId, payload = {}, actor, meta = {}) {
   requireCapability('createPaymentLink', 'Payment links');
 
   const booking = await loadBooking(bookingId);
   const purpose = payload.purpose || PAYMENT_PURPOSE.BALANCE;
-  const amount = resolveAmount(booking, purpose, payload.amount);
 
-  if (!M.isPositive(amount)) {
-    throw ApiError.badRequest('Nothing is outstanding on this booking', 'NOTHING_TO_CHARGE');
-  }
-
-  const reuse = await findReusable(bookingId, COLLECTION_TYPE.LINK, amount);
-  if (reuse) return { payment: reuse, reused: true };
-
-  const expiresAt = resolveExpiry(payload.expiresInHours, payload.expiresAt, DEFAULT_LINK_HOURS);
-  const provider = paymentProvider.getProvider();
-  const payer = payerFor(booking);
-
-  /*
-   * reference_id must be unique per link across the whole Razorpay account,
-   * and a booking can legitimately need a second one — the first expired, or
-   * the fare changed. Suffixing with the timestamp keeps the booking number
-   * searchable in their dashboard (which is the point) while never colliding.
-   */
-  const referenceId = `${booking.bookingNumber}-${Date.now().toString(36)}`;
-
-  const link = await provider.createPaymentLink({
-    amount: M.toStr(amount),
-    currency: 'INR',
-    bookingId,
-    purpose,
-    referenceId,
-    description: payload.description || `AbhiCabs trip ${booking.bookingNumber}`,
-    customer: payer,
-    // Default ON. A link nobody is told about is not a collection method, and
-    // Razorpay's own delivery is the only transactional channel available here.
-    notifyBySms: payload.notifyBySms !== false,
-    notifyByEmail: payload.notifyByEmail !== false,
-    expireBy: expiresAt,
-  });
-
-  return persist({
-    booking,
-    provider,
-    instrument: link,
+  return create({
     collectionType: COLLECTION_TYPE.LINK,
+    booking,
+    payer: payerFor(booking),
+    amount: resolveAmount(booking, purpose, payload.amount),
     purpose,
-    amount,
-    expiresAt,
+    payload,
     actor,
     meta,
-    auditAction: 'PAYMENT_LINK_CREATED',
-    auditExtra: { notifiedSms: payload.notifyBySms !== false, referenceId },
   });
 }
 
+/** Booking-scoped UPI QR. */
 async function createQr(bookingId, payload = {}, actor, meta = {}) {
   requireCapability('createQrCode', 'UPI QR codes');
 
   const booking = await loadBooking(bookingId);
   const purpose = payload.purpose || PAYMENT_PURPOSE.BALANCE;
-  const amount = resolveAmount(booking, purpose, payload.amount);
 
-  if (!M.isPositive(amount)) {
-    throw ApiError.badRequest('Nothing is outstanding on this booking', 'NOTHING_TO_CHARGE');
-  }
-
-  const reuse = await findReusable(bookingId, COLLECTION_TYPE.QR, amount);
-  if (reuse) return { payment: reuse, reused: true };
-
-  /*
-   * Shorter default than a link, on purpose. A QR is for paying now, and the
-   * image ends up in a WhatsApp thread where it outlives the conversation —
-   * a payment instrument with a long life and no owner watching it.
-   */
-  const expiresAt = resolveExpiry(payload.expiresInHours, payload.expiresAt, DEFAULT_QR_HOURS);
-  const provider = paymentProvider.getProvider();
-
-  const qr = await provider.createQrCode({
-    amount: M.toStr(amount),
-    bookingId,
-    purpose,
-    description: payload.description || `AbhiCabs trip ${booking.bookingNumber}`,
-    closeBy: expiresAt,
-  });
-
-  return persist({
-    booking,
-    provider,
-    instrument: qr,
+  return create({
     collectionType: COLLECTION_TYPE.QR,
+    booking,
+    payer: payerFor(booking),
+    amount: resolveAmount(booking, purpose, payload.amount),
     purpose,
-    amount,
-    expiresAt,
+    payload,
     actor,
     meta,
-    auditAction: 'PAYMENT_QR_CREATED',
+  });
+}
+
+/**
+ * A payment link with NO booking behind it.
+ *
+ * purpose is forced to FULL and is not accepted from the caller. ADVANCE and
+ * BALANCE describe a position against a fare — "part of it", "the rest of it"
+ * — and there is no fare here for either word to mean anything against. A
+ * standalone collection is the whole of what is being asked, and labelling it
+ * BALANCE would put a meaningless BALANCE_RECEIVED row in the ledger.
+ */
+async function createStandaloneLink(payload = {}, actor, meta = {}) {
+  requireCapability('createPaymentLink', 'Payment links');
+
+  return create({
+    collectionType: COLLECTION_TYPE.LINK,
+    booking: null,
+    payer: standalonePayer(payload),
+    amount: resolveStandaloneAmount(payload.amount),
+    purpose: PAYMENT_PURPOSE.FULL,
+    payload,
+    actor,
+    meta,
+  });
+}
+
+/** A UPI QR with no booking behind it. */
+async function createStandaloneQr(payload = {}, actor, meta = {}) {
+  requireCapability('createQrCode', 'UPI QR codes');
+
+  return create({
+    collectionType: COLLECTION_TYPE.QR,
+    booking: null,
+    payer: standalonePayer(payload),
+    amount: resolveStandaloneAmount(payload.amount),
+    purpose: PAYMENT_PURPOSE.FULL,
+    payload,
+    actor,
+    meta,
   });
 }
 
@@ -344,6 +537,8 @@ async function createQr(bookingId, payload = {}, actor, meta = {}) {
  */
 async function persist({
   booking,
+  payer,
+  description,
   provider,
   instrument,
   collectionType,
@@ -359,7 +554,7 @@ async function persist({
   try {
     payment = await prisma.payment.create({
       data: {
-        bookingId: booking.id,
+        bookingId: booking?.id || null,
         provider: provider.name,
         // The INSTRUMENT's id (plink_… / qr_…), not an order id — this is what
         // the webhook matches on. See razorpay.provider.js parseWebhook.
@@ -371,6 +566,19 @@ async function persist({
         collectionType,
         shareUrl: instrument.shareUrl || null,
         expiresAt: instrument.expiresAt || expiresAt,
+        /*
+         * Stored on BOTH kinds, not only standalone.
+         *
+         * A booking-scoped row could derive the payer by joining, so writing
+         * it looks redundant — until the question is "which number did we
+         * actually send this to?" six weeks later, after the customer updated
+         * their profile. The payer is a fact about the instrument at the
+         * moment it was raised, so it is recorded with it.
+         */
+        payerName: payer.name,
+        payerPhone: payer.phone,
+        payerEmail: payer.email,
+        description,
         rawResponse: instrument.raw || {},
       },
       select: PAYMENT_SELECT,
@@ -386,13 +594,17 @@ async function persist({
     entityType: 'payment',
     entityId: payment.id,
     after: {
-      bookingId: booking.id,
-      bookingNumber: booking.bookingNumber,
+      bookingId: booking?.id || null,
+      bookingNumber: booking?.bookingNumber || null,
+      standalone: !booking,
       purpose,
       amount: M.toStr(amount),
       collectionType,
       providerOrderId: instrument.id,
       expiresAt: payment.expiresAt,
+      // Masked, never full. An audit log is read by more people than the
+      // payments table, and a customer's number has no business being in it.
+      payer: whatsapp.maskPhone(payer.phone),
       ...auditExtra,
     },
     meta,
@@ -419,36 +631,226 @@ async function rollbackInstrument(provider, collectionType, id) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Sharing on WhatsApp
+ * ------------------------------------------------------------------ */
+
+/**
+ * Builds (and optionally sends) the WhatsApp message for one payment row.
+ *
+ * Returns null when there is no shareable instrument — a cash payment, a
+ * checkout order, or a link whose gateway response carried no URL. Callers
+ * treat null as "nothing to share" rather than an error, because an admin
+ * looking at a row that cannot be shared is a UI question, not a failure.
+ */
+async function shareFor(payment, booking = null, { send = false, phoneOverride = null } = {}) {
+  if (!payment.shareUrl) return null;
+
+  const phone = phoneOverride || payment.payerPhone;
+  if (!phone) return null;
+
+  return whatsapp.sharePaymentLink({
+    phone,
+    payerName: payment.payerName,
+    amount: M.toStr(M.round2(payment.amount)),
+    description: payment.description,
+    shareUrl: payment.shareUrl,
+    expiresAt: payment.expiresAt,
+    isQr: payment.collectionType === COLLECTION_TYPE.QR,
+    bookingNumber: booking?.bookingNumber || null,
+    send,
+  });
+}
+
+/**
+ * The explicit "send this on WhatsApp" action, for an instrument that already
+ * exists.
+ *
+ * Distinct from `resend`, and the distinction matters: resend asks RAZORPAY to
+ * deliver the link again over SMS or email, while this one goes out from us —
+ * either through our own bot, or as a deep link the admin taps. A customer who
+ * ignored an SMS from a shortcode will open a WhatsApp message from the number
+ * they booked through.
+ *
+ * `phone` may override the stored payer, for the ordinary case of a number
+ * typed wrong the first time. It is NOT written back to the row: the stored
+ * payer records who the instrument was raised for, and quietly editing it
+ * would destroy the only evidence of the original mistake. The override goes
+ * in the audit entry instead.
+ */
+async function shareOnWhatsApp(paymentId, { phone = null, send = false } = {}, actor, meta = {}) {
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+    select: { ...PAYMENT_SELECT, booking: { select: { bookingNumber: true } } },
+  });
+  if (!payment) throw ApiError.notFound('Payment not found');
+
+  if (!payment.shareUrl) {
+    throw ApiError.badRequest(
+      'This payment has no link or QR code to share',
+      'NOT_SHAREABLE',
+    );
+  }
+  if (!LIVE_STATUSES.includes(payment.status)) {
+    throw ApiError.conflict(
+      `This ${payment.collectionType === COLLECTION_TYPE.QR ? 'QR code' : 'link'} is ${payment.status}`,
+      'NOT_SHAREABLE',
+    );
+  }
+  if (payment.expiresAt && new Date(payment.expiresAt).getTime() < Date.now()) {
+    throw ApiError.conflict('This has expired — create a new one', 'COLLECTION_EXPIRED');
+  }
+
+  const target = phone || payment.payerPhone;
+  if (!whatsapp.waNumber(target)) {
+    throw ApiError.badRequest(
+      'No valid mobile number to share this with — pass one explicitly',
+      'INVALID_PHONE',
+    );
+  }
+
+  const share = await shareFor(payment, payment.booking, { send, phoneOverride: phone });
+
+  audit.recordAsync({
+    actor,
+    action: share.sent ? 'PAYMENT_LINK_WHATSAPP_SENT' : 'PAYMENT_LINK_WHATSAPP_PREPARED',
+    entityType: 'payment',
+    entityId: paymentId,
+    after: {
+      to: whatsapp.maskPhone(target),
+      overrode: Boolean(phone && whatsapp.waNumber(phone) !== whatsapp.waNumber(payment.payerPhone)),
+      via: share.sent ? 'bot' : 'deep-link',
+      reason: share.reason || null,
+    },
+    meta,
+  });
+
+  return {
+    paymentId,
+    /** Always present. The admin can tap this whether or not the bot sent it. */
+    whatsappUrl: share.whatsappUrl,
+    /** The exact text, so the UI can offer copy-to-clipboard as a third fallback. */
+    message: share.message,
+    sent: share.sent,
+    reason: share.reason || null,
+    canAutoSend: whatsapp.canSend(),
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * Read, cancel, resend
  * ------------------------------------------------------------------ */
 
+/**
+ * Adds the fields that are TRUE RIGHT NOW rather than stored.
+ *
+ * `expired` and `payable` are derived on every read, never written. The
+ * gateway stops accepting payment the moment expires_at passes, but nothing
+ * writes a row at that instant — a stored "expired" flag would be wrong for
+ * however long it took a job to notice.
+ */
+async function decorate(payment, booking = null) {
+  const now = Date.now();
+  const expired =
+    !!payment.expiresAt &&
+    new Date(payment.expiresAt).getTime() < now &&
+    LIVE_STATUSES.includes(payment.status);
+  const payable =
+    LIVE_STATUSES.includes(payment.status) &&
+    (!payment.expiresAt || new Date(payment.expiresAt).getTime() > now);
+
+  /*
+   * The deep link is built for payable rows only, and is never SENT from here.
+   * Building it is pure string work, so it costs nothing on a list; sending it
+   * from a read would mean a customer receiving a WhatsApp message because an
+   * admin opened a screen.
+   */
+  let whatsappUrl = null;
+  if (payable && payment.shareUrl && payment.payerPhone) {
+    const share = await shareFor(payment, booking, { send: false });
+    whatsappUrl = share?.whatsappUrl || null;
+  }
+
+  return { ...payment, expired, payable, whatsappUrl, standalone: !payment.bookingId };
+}
+
 /** Every link and QR raised against a booking, newest first. */
 async function listForBooking(bookingId) {
-  const items = await prisma.payment.findMany({
-    where: {
-      bookingId,
-      collectionType: { in: [COLLECTION_TYPE.LINK, COLLECTION_TYPE.QR] },
-    },
-    orderBy: { createdAt: 'desc' },
-    select: PAYMENT_SELECT,
-  });
+  const [booking, items] = await Promise.all([
+    prisma.booking.findUnique({ where: { id: bookingId }, select: { bookingNumber: true } }),
+    prisma.payment.findMany({
+      where: {
+        bookingId,
+        collectionType: { in: [COLLECTION_TYPE.LINK, COLLECTION_TYPE.QR] },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: PAYMENT_SELECT,
+    }),
+  ]);
 
-  const now = Date.now();
-  return items.map((p) => ({
-    ...p,
+  return Promise.all(items.map((p) => decorate(p, booking)));
+}
+
+/**
+ * Every collection, with a booking or without, for the admin payments screen.
+ *
+ * `scope` is the filter that matters: 'standalone' is the list of money asked
+ * for outside the booking flow, which is exactly the set nobody can find any
+ * other way — a booking-scoped link is reachable from its booking, and these
+ * are reachable from nowhere else.
+ */
+async function listCollections({
+  page = 1,
+  limit = 20,
+  scope = 'all',
+  collectionType,
+  status,
+  phone,
+  from,
+  to,
+} = {}) {
+  const where = {
+    collectionType: collectionType
+      ? collectionType
+      : { in: [COLLECTION_TYPE.LINK, COLLECTION_TYPE.QR] },
+  };
+
+  if (scope === 'standalone') where.bookingId = null;
+  if (scope === 'booking') where.bookingId = { not: null };
+  if (status) where.status = status;
+
+  if (phone) {
+    const normalised = whatsapp.waNumber(phone);
     /*
-     * Derived, never stored. The gateway stops accepting payment the moment
-     * expires_at passes, but nothing writes a row at that instant — a stored
-     * "expired" flag would be wrong for however long it took a job to notice.
+     * An unparseable number matches NOTHING rather than everything. Falling
+     * back to "no filter" on a bad search term shows the admin the whole table
+     * and lets them believe it is the result for what they typed.
      */
-    expired:
-      !!p.expiresAt &&
-      new Date(p.expiresAt).getTime() < now &&
-      LIVE_STATUSES.includes(p.status),
-    payable:
-      LIVE_STATUSES.includes(p.status) &&
-      (!p.expiresAt || new Date(p.expiresAt).getTime() > now),
-  }));
+    where.payerPhone = normalised ? normalised.slice(-10) : '__no_match__';
+  }
+
+  if (from || to) {
+    where.createdAt = {};
+    if (from) where.createdAt.gte = from;
+    if (to) where.createdAt.lt = to;
+  }
+
+  const [total, items] = await Promise.all([
+    prisma.payment.count({ where }),
+    prisma.payment.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
+      select: {
+        ...PAYMENT_SELECT,
+        booking: { select: { bookingNumber: true, status: true } },
+      },
+    }),
+  ]);
+
+  const decorated = await Promise.all(items.map((p) => decorate(p, p.booking)));
+
+  return paginated(decorated, { page, limit, total });
 }
 
 /**
@@ -496,8 +898,8 @@ async function cancel(paymentId, actor, meta = {}) {
    * It is also the SAFE choice for the race that matters here: a customer who
    * paid in the seconds before the admin hit cancel. FAILED ranks 1 and
    * CAPTURED ranks 4, so canAdvance still lets that capture through and the
-   * money is recorded against the booking. A status ranked above CAPTURED
-   * would have silently discarded a real payment.
+   * money is recorded. A status ranked above CAPTURED would have silently
+   * discarded a real payment.
    */
   const updated = await prisma.payment.update({
     where: { id: paymentId },
@@ -519,11 +921,12 @@ async function cancel(paymentId, actor, meta = {}) {
 }
 
 /**
- * Asks Razorpay to send an existing link again.
+ * Asks Razorpay to send an existing link again, over SMS or email.
  *
  * A RESEND, not a new link — the customer may already have the first one open.
  * Links only; a QR is an image the admin shares themselves, and there is
- * nothing for the gateway to deliver.
+ * nothing for the gateway to deliver. For WhatsApp use shareOnWhatsApp: this
+ * route is the gateway's own delivery, which does not speak WhatsApp at all.
  */
 async function resend(paymentId, medium, actor, meta = {}) {
   requireCapability('resendPaymentLink', 'Resending payment links');
@@ -567,7 +970,11 @@ async function resend(paymentId, medium, actor, meta = {}) {
 module.exports = {
   createLink,
   createQr,
+  createStandaloneLink,
+  createStandaloneQr,
   listForBooking,
+  listCollections,
+  shareOnWhatsApp,
   cancel,
   resend,
   LIVE_STATUSES,

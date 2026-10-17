@@ -995,8 +995,21 @@ model TripEvent {
 // ===========================================================================
 
 model Payment {
-  id        String @id @default(uuid()) @db.Uuid
-  bookingId String @map("booking_id") @db.Uuid
+  id String @id @default(uuid()) @db.Uuid
+
+  /// NULLABLE since standalone collections exist.
+  ///
+  /// Every payment used to belong to a booking, because the only way to ask
+  /// for money was a trip that already existed in the system. That stopped
+  /// being true the moment an admin needed to collect an advance over the
+  /// phone before the trip was entered, or settle a cancellation fee, or take
+  /// money for something that is not a booking at all.
+  ///
+  /// A standalone collection carries payerName / payerPhone instead, and its
+  /// capture writes a ledger entry with a null bookingId and moves no booking
+  /// counters. Everything else — webhook matching, the forward-only status
+  /// machine, the unique ledger reference — is unchanged.
+  bookingId String? @map("booking_id") @db.Uuid
 
   provider          String  @db.VarChar(24) // mock | razorpay | cashfree
   providerOrderId   String? @map("provider_order_id") @db.VarChar(120)
@@ -1030,6 +1043,25 @@ model Payment {
   /// Null for a checkout order, which has no expiry of its own.
   expiresAt DateTime? @map("expires_at")
 
+  /// WHO IS BEING ASKED, for a collection with no booking behind it.
+  ///
+  /// A booking-scoped payment derives the payer from the booking (guest first,
+  /// then the account holder — see paymentCollection.payerFor). A standalone
+  /// one has nowhere to derive it from, so it is captured at creation and
+  /// stored here. These are also what the admin's WhatsApp share targets, and
+  /// what makes a standalone payment findable later by the only identifier
+  /// anyone will remember: the customer's phone number.
+  payerName  String? @map("payer_name") @db.VarChar(120)
+  payerPhone String? @map("payer_phone") @db.VarChar(20)
+  payerEmail String? @map("payer_email") @db.VarChar(160)
+
+  /// What the money is for, in the admin's words. Shown on the hosted page and
+  /// in the WhatsApp message. Stored rather than left in rawResponse for the
+  /// same reason shareUrl is: applyGatewayEvent overwrites rawResponse on
+  /// capture, and "what did we tell them this was for?" is exactly the
+  /// question asked during a dispute.
+  description String? @db.VarChar(500)
+
   rawResponse   Json    @default("{}") @map("raw_response")
   failureReason String? @map("failure_reason") @db.VarChar(255)
 
@@ -1037,13 +1069,19 @@ model Payment {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
 
-  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: Restrict)
 
   @@unique([provider, providerOrderId])
   @@index([bookingId])
   @@index([status, createdAt])
   // Finding a booking's live link/QR without scanning every payment it has.
   @@index([bookingId, collectionType, status])
+  // The standalone collections list: every link/QR not tied to a booking,
+  // newest first. The index above cannot serve it — booking_id is null there.
+  @@index([collectionType, status, createdAt])
+  // "Did we already send this number a link?" — the only lookup an admin has
+  // for a customer who is not in the system yet.
+  @@index([payerPhone])
   @@map("payments")
 }
 

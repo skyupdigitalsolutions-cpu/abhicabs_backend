@@ -191,6 +191,15 @@ function wire(io) {
   /* ---- payment.received → the booking room ---- */
 
   bus.on(EVENTS.PAYMENT_RECEIVED, (payload) => {
+    /*
+     * A standalone collection (a link or QR raised without a booking) has no
+     * booking room to broadcast into. Without this guard the emit goes to a
+     * room literally named "booking:null" — harmless today, and exactly the
+     * kind of thing that becomes a cross-customer leak the day someone makes
+     * room names less specific.
+     */
+    if (!payload.bookingId) return;
+
     io.to(rooms.booking(payload.bookingId)).emit('payment:received', {
       bookingId: payload.bookingId,
       paymentId: payload.paymentId,
