@@ -228,6 +228,27 @@ async function applyGatewayEvent(tx, parsed) {
     return { changed: false, reason: 'unmapped_status' };
   }
 
+  /*
+   * NO ID, NO MATCH — checked before the query, not after.
+   *
+   * `providerOrderId` is nullable: cash settlements have none, and so does any
+   * row written without a gateway instrument. A null here would therefore not
+   * fail to match — it would match the FIRST row whose providerOrderId IS
+   * NULL, which is some unrelated payment on some unrelated booking, and the
+   * event would be applied to it.
+   *
+   * It is reachable. A UPI QR payment does not always carry an order_id on the
+   * accompanying `payment.captured` event, and parseWebhook only trusts the
+   * qr_code entity on `qr_code.*` events — correctly, but that leaves the
+   * payment.* twin with nothing to match on.
+   *
+   * Treated as an acknowledged no-op, the same as an unknown order: the real
+   * `qr_code.credited` event carries the id and settles the right row.
+   */
+  if (!parsed.providerOrderId) {
+    return { changed: false, reason: 'no_order_reference' };
+  }
+
   const payment = await tx.payment.findFirst({
     where: { providerOrderId: parsed.providerOrderId },
     select: { ...PAYMENT_SELECT, rawResponse: false },

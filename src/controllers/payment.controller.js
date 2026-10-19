@@ -96,7 +96,20 @@ exports.simulateWebhook = asyncHandler(async (req, res) => {
     );
   }
 
-  const payment = await paymentService.getById(req.params.id);
+  /*
+   * `req.user` is passed, where it previously was not.
+   *
+   * getById only applies its ownership check when it is given an actor, so
+   * omitting it here skipped the Day 14 IDOR fix on the one route that can
+   * move a payment to CAPTURED. Any payment id in the system was a valid
+   * target — including an admin-raised collection link belonging to someone
+   * else entirely.
+   *
+   * The PAYMENT_MANAGE gate on the route already keeps customers out; this is
+   * the second lock, and it is the one that still holds if the route is ever
+   * re-mounted somewhere less careful.
+   */
+  const payment = await paymentService.getById(req.params.id, req.user);
   if (!payment.providerOrderId) {
     throw ApiError.badRequest('Payment has no gateway order to simulate against', 'NO_ORDER');
   }

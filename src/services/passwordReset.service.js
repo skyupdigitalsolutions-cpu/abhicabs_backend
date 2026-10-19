@@ -42,10 +42,12 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 
+const env = require('../config/env');
 const { prisma } = require('../config/prisma');
 const { cache: redis, isCacheUp } = require('../config/redis');
 const { ApiError } = require('../utils/helpers');
 const authService = require('./auth.service');
+const emailService = require('./email.service');
 
 /** Long enough that guessing is hopeless; short enough to survive email clients. */
 const TOKEN_BYTES = 32;
@@ -70,10 +72,13 @@ const GENERIC_REPLY = 'If that email is registered, a reset link is on its way.'
 /**
  * Issue a reset token for an email address, if it belongs to a real account.
  *
- * Returns the same payload in every case. In development the raw token is
- * echoed back so the flow is testable without an email provider wired up — it
- * is omitted in production, where leaking it in an API response would defeat
- * the entire point of emailing it.
+ * The link goes out by email through the same provider as login codes and
+ * invoices (Brevo over HTTPS in production; the console fallback locally).
+ *
+ * Returns the same payload in every case. In development the raw token is also
+ * echoed back, so the flow stays testable against the console provider — it is
+ * omitted in production, where leaking it in an API response would defeat the
+ * entire point of emailing it.
  */
 async function requestReset(rawEmail) {
   const email = String(rawEmail || '').trim().toLowerCase();
@@ -88,11 +93,29 @@ async function requestReset(rawEmail) {
     );
   }
 
+  // No page to link to means no usable email, so there is no point minting a
+  // token. Checked BEFORE the user lookup so the 503 is returned for every
+  // address alike — branching after the lookup would make a misconfigured
+  // server answer differently for real accounts and leak who exists.
+  if (!env.app.passwordResetUrl) {
+    console.error('[pwreset] APP_WEB_URL is not configured — cannot send reset links');
+    throw new ApiError(
+      503,
+      'RESET_UNAVAILABLE',
+      'Password reset is temporarily unavailable. Please try again shortly.'
+    );
+  }
+
   const user = await prisma.user.findUnique({ where: { email } });
 
-  // Unknown address, deactivated account, or a phone-only account with no real
-  // password: all three stop here, and all three look identical from outside.
-  const eligible = Boolean(user && user.isActive);
+  // Unknown address, deactivated account, or a phone-only account whose
+  // `@placeholder.local` row exists only to satisfy UNIQUE(email): all three
+  // stop here, and all three look identical from outside. The last one matters
+  // because mailing a placeholder is a guaranteed hard bounce, and enough of
+  // those get the sending domain throttled.
+  const eligible = Boolean(
+    user && user.isActive && emailService.isDeliverableEmail(user.email)
+  );
 
   if (!eligible) {
     // Logged, not returned. Ops can see enumeration attempts; the caller cannot.
@@ -116,9 +139,37 @@ async function requestReset(rawEmail) {
     .set(userKey(user.id), hash, 'EX', TOKEN_TTL_SECONDS)
     .exec();
 
-  // TODO: hand `token` to the mailer once an email provider is configured.
-  // The link is typically https://<app>/reset-password?token=<token>
-  console.log(`[pwreset] token issued for ${email}`);
+  /* ---------------- deliver it ---------------- */
+
+  // The link is the whole feature, so a failed send must not leave a live
+  // token behind: the user would get nothing, request another, and the old
+  // one would stay redeemable for half an hour for no reason.
+  //
+  // The caller still gets GENERIC_REPLY. Reporting the failure would say "this
+  // address exists" out loud for every send error, which is exactly the
+  // membership oracle the identical-response rule above exists to close.
+  const resetUrl = `${env.app.passwordResetUrl}?token=${encodeURIComponent(token)}`;
+
+  try {
+    await emailService.sendPasswordResetEmail({
+      to: user.email,
+      name: user.name,
+      resetUrl,
+      ttlSeconds: TOKEN_TTL_SECONDS,
+    });
+  } catch (err) {
+    await redis.del(tokenKey(hash), userKey(user.id));
+
+    // Loud, because from outside this looks identical to a typo'd address and
+    // nobody will report it as a bug. A misconfigured mailer will show up here
+    // and nowhere else.
+    console.error(
+      `[pwreset] DELIVERY FAILED for ${emailService.maskEmail(user.email)} — ` +
+      `token discarded. ${err.message}`
+    );
+  }
+
+  console.log(`[pwreset] request handled for ${emailService.maskEmail(email)}`);
 
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {

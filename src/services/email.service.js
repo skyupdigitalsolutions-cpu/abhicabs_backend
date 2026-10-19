@@ -237,6 +237,113 @@ async function sendTripStartOtpEmail({ to, name, code, bookingNumber, pickupAt }
 }
 
 /* ------------------------------------------------------------------ *
+ * Password reset
+ * ------------------------------------------------------------------ */
+
+/**
+ * The reset link.
+ *
+ * WHY THIS ONE THROWS
+ * -------------------
+ * Booking confirmations and invoices swallow send failures, because the thing
+ * they describe has already happened — the trip is booked, the money has
+ * moved, and failing the request would roll back something real over a mail
+ * outage. A reset email is the opposite: the email IS the feature. If it does
+ * not go out there is nothing else for the user to fall back on, so the caller
+ * has to know, and does — it deletes the token it just issued rather than
+ * leaving a live credential nobody can use.
+ *
+ * WHY THE TOKEN IS NEVER IN THE SUBJECT OR A QUERY STRING WE LOG
+ * --------------------------------------------------------------
+ * It is a bearer credential for 30 minutes. It belongs in the body of one
+ * email and in no log line, which is why the console messages below print the
+ * masked address and nothing else.
+ */
+function passwordResetTemplate({ name, resetUrl, ttlSeconds }) {
+  const minutes = Math.max(1, Math.round(ttlSeconds / 60));
+  const greeting = name ? `Hi ${name},` : 'Hi,';
+
+  const text = [
+    greeting,
+    '',
+    `Someone asked to reset the password on your ${BRAND} account.`,
+    '',
+    'Open this link to choose a new one:',
+    resetUrl,
+    '',
+    `The link works once and expires in ${minutes} minutes.`,
+    '',
+    'If this was not you, ignore this email. Your password has not changed and',
+    'nobody can change it without this link.',
+    '',
+    `— ${BRAND}`,
+  ].join('\n');
+
+  // Both a button and the bare URL: a fair number of clients strip or rewrite
+  // anchors, and a user who cannot click still has something to copy.
+  const html = `<!doctype html>
+<html>
+  <body style="margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;margin:0 auto;background:#ffffff;border-radius:12px;">
+      <tr><td style="padding:32px;">
+        <p style="margin:0 0 8px;font-size:15px;">${escapeHtml(greeting)}</p>
+        <p style="margin:0 0 24px;font-size:20px;font-weight:700;">Reset your password</p>
+        <p style="margin:0 0 24px;font-size:15px;line-height:1.5;">
+          Someone asked to reset the password on your ${escapeHtml(BRAND)} account.
+          Choose a new one here:
+        </p>
+        <p style="margin:0 0 24px;text-align:center;">
+          <a href="${escapeHtml(resetUrl)}"
+             style="display:inline-block;padding:14px 28px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:8px;font-size:15px;font-weight:600;">
+            Set a new password
+          </a>
+        </p>
+        <p style="margin:0 0 24px;font-size:13px;color:#777;line-height:1.5;word-break:break-all;">
+          Or paste this into your browser:<br>${escapeHtml(resetUrl)}
+        </p>
+        <p style="margin:0 0 16px;font-size:14px;color:#555;">
+          The link works once and expires in ${minutes} minutes.
+        </p>
+        <p style="margin:0;font-size:13px;color:#777;line-height:1.5;">
+          If this was not you, ignore this email — your password has not changed,
+          and nobody can change it without this link.
+        </p>
+      </td></tr>
+    </table>
+    <p style="max-width:480px;margin:16px auto 0;font-size:12px;color:#999;text-align:center;">${escapeHtml(BRAND)}</p>
+  </body>
+</html>`;
+
+  return {
+    subject: `Reset your ${BRAND} password`,
+    text,
+    html,
+  };
+}
+
+/**
+ * Send a reset link. Throws on any failure — see the note above.
+ */
+async function sendPasswordResetEmail({ to, name, resetUrl, ttlSeconds }) {
+  if (!isDeliverableEmail(to)) {
+    // A phone-first account's @placeholder.local address. The caller should
+    // already have filtered this out; refusing here stops a hard bounce from
+    // reaching the sending domain's reputation if it ever slips through.
+    throw new Error(`not a deliverable address: ${maskEmail(to)}`);
+  }
+
+  if (!resetUrl) {
+    throw new Error('no reset URL configured (set APP_WEB_URL)');
+  }
+
+  const { subject, text, html } = passwordResetTemplate({ name, resetUrl, ttlSeconds });
+  const result = await getProvider().send({ to, subject, text, html });
+
+  console.log(`[mail] password reset link sent to ${maskEmail(to)} (${result.messageId})`);
+  return { ...result, to: maskEmail(to) };
+}
+
+/* ------------------------------------------------------------------ *
  * Booking confirmation
  * ------------------------------------------------------------------ */
 
@@ -457,6 +564,7 @@ async function sendInvoiceEmail({ to, name, invoice, booking, customer, seller }
 module.exports = {
   sendOtpEmail,
   sendTripStartOtpEmail,
+  sendPasswordResetEmail,
   sendBookingConfirmedEmail,
   sendInvoiceEmail,
   maskEmail,

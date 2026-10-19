@@ -94,6 +94,24 @@ const env = {
     .map((o) => o.trim())
     .filter(Boolean),
 
+  /* ---------------- Public web app (links inside emails) ---------------- */
+  /*
+   * The backend has to be able to write a URL the RECIPIENT can click, and a
+   * request's own Host header is not it: a reset link must not be constructible
+   * by whoever sends the request, or an attacker poisons the Host and emails
+   * the victim a link pointing at the attacker's page. So it comes from config.
+   *
+   * Falls back to the first CORS origin, which is already the frontend this API
+   * serves, so a correctly configured deployment usually needs nothing new.
+   * Resolved below, after corsOrigins exists.
+   */
+  app: {
+    webUrl: (process.env.APP_WEB_URL || '').replace(/\/+$/, ''),
+    passwordResetPath: process.env.PASSWORD_RESET_PATH || '/reset-password',
+    // Filled in below.
+    passwordResetUrl: '',
+  },
+
   /* ---------------- Redis ---------------- */
   redis: {
     // Upstash gives a rediss:// URL. ioredis enables TLS from the scheme.
@@ -434,6 +452,119 @@ const env = {
 
 if (env.accessSecret === env.refreshSecret) {
   throw new Error('[env] JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different');
+}
+
+/* ---------------- No fake payment gateway in production ---------------- */
+
+/*
+ * payment.provider.js says, in a comment: "in production the env guard (see
+ * config/env.js) refuses to boot with the mock, so this fallback can never
+ * silently take real money through a fake gateway."
+ *
+ * That guard did not exist. The fallback to mock is silent by design — a
+ * `console.warn` and nothing else — so PAYMENT_PROVIDER left unset, or set to
+ * razorpay with an empty key, produced a production server that creates
+ * payment links nobody can pay (https://mock.invalid/...) and accepts
+ * simulated captures. Everything appears to work, which is what makes it
+ * dangerous.
+ *
+ * Mirrors payment.provider.getProvider()'s selection logic exactly. If the two
+ * ever drift this guard stops meaning anything, so they must be changed
+ * together.
+ */
+const paymentProviderName = (env.payment.provider || 'mock').toLowerCase();
+const razorpayKeysPresent = Boolean(
+  env.payment.razorpay.keyId && env.payment.razorpay.keySecret
+);
+const willUseMockGateway = paymentProviderName !== 'razorpay' || !razorpayKeysPresent;
+
+/*
+ * TEST-MODE KEYS ARE THE SAME PROBLEM WEARING A REAL GATEWAY'S CLOTHES.
+ *
+ * rzp_test_ keys reach the genuine Razorpay API, return genuine pay_… ids and
+ * render the genuine hosted success page — while no money moves and the UPI
+ * QR they generate carries a VPA that real UPI apps reject as invalid. From
+ * the backend's side everything is indistinguishable from a live capture, so
+ * nothing downstream can catch it. The key prefix is the only signal, and it
+ * is checked here because this is the only place that runs before any of it.
+ */
+const razorpayTestKeys = String(env.payment.razorpay.keyId || '').startsWith('rzp_test_');
+env.payment.razorpay.isTestKey = razorpayTestKeys;
+
+/** True when this process cannot actually take a rupee, for any reason. */
+const cannotTakeRealMoney = willUseMockGateway || razorpayTestKeys;
+
+/*
+ * The escape hatch is a SEPARATE variable from ALLOW_PAYMENT_SIMULATION, and
+ * deliberately so. A staging box runs with NODE_ENV=production — that is what
+ * makes it staging rather than a laptop — and legitimately wants the mock. But
+ * reusing the simulation flag would mean one variable silently unlocking two
+ * unrelated things, and the whole failure being fixed here is a flag that did
+ * more than its name suggested.
+ */
+if (env.isProd && cannotTakeRealMoney && process.env.ALLOW_MOCK_PAYMENTS !== 'true') {
+  const why = razorpayTestKeys
+    ? 'RAZORPAY_KEY_ID is a test key (rzp_test_…), so Razorpay will report ' +
+      'every payment as successful without money moving, and its UPI QR codes ' +
+      'carry a VPA that real UPI apps reject'
+    : paymentProviderName !== 'razorpay'
+      ? `PAYMENT_PROVIDER is "${paymentProviderName}", so the mock gateway would ` +
+        'be used: payment links would be unpayable and captures could be simulated'
+      : 'PAYMENT_PROVIDER=razorpay but RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are ' +
+        'empty, so the mock gateway would be used';
+
+  throw new Error(
+    `[env] NODE_ENV=production with no gateway that can take real money. ${why}. ` +
+    'Use live Razorpay keys (rzp_live_…) with PAYMENT_PROVIDER=razorpay, or set ' +
+    'ALLOW_MOCK_PAYMENTS=true if this is a staging or UAT environment.'
+  );
+}
+
+// Legal on staging, and the one line that explains a "successful" payment
+// nobody paid for. Printed on every boot, not only in production, because the
+// question it answers is asked most often on a box somebody forgot was test.
+if (razorpayTestKeys) {
+  console.warn(
+    '[payment] Razorpay is in TEST MODE (rzp_test_ key). Payments will report ' +
+    'success without money moving. Webhooks must be configured on the Razorpay ' +
+    'dashboard\'s TEST tab, which has its own secret.'
+  );
+}
+
+// Legal on staging, never on a box real customers touch. Loud at boot because
+// the symptom — payments that settle without money — looks like a gateway bug
+// rather than a configuration one.
+if (env.isProd && env.allowPaymentSimulation) {
+  console.warn(
+    '[env] WARNING: ALLOW_PAYMENT_SIMULATION=true with NODE_ENV=production. ' +
+    'Payments can be marked captured without money moving. Turn this off ' +
+    'before real customers.'
+  );
+}
+
+/* ---------------- Resolve the password-reset link base ---------------- */
+
+// APP_WEB_URL wins; otherwise borrow the frontend already named in CORS_ORIGINS
+// so an existing deployment does not need a new variable to start sending
+// working reset links.
+if (!env.app.webUrl && env.corsOrigins.length) {
+  env.app.webUrl = env.corsOrigins[0].replace(/\/+$/, '');
+}
+
+env.app.passwordResetUrl = env.app.webUrl
+  ? `${env.app.webUrl}${env.app.passwordResetPath.startsWith('/') ? '' : '/'}${env.app.passwordResetPath}`
+  : '';
+
+// Warn rather than throw: an unset URL breaks password reset only, and taking
+// the whole API down over it would be worse than the thing it is protecting
+// against. passwordReset.service refuses to issue a token it cannot deliver,
+// so the failure is loud where it matters.
+if (!env.app.passwordResetUrl) {
+  console.warn(
+    '[env] APP_WEB_URL is not set and CORS_ORIGINS is empty — password reset ' +
+    'emails cannot be sent, because there is no page to link to. Set ' +
+    'APP_WEB_URL to the frontend origin (e.g. https://admin.abhicabs.in).'
+  );
 }
 
 
