@@ -47,6 +47,7 @@
  */
 
 const env = require('../../config/env');
+const { ApiError } = require('../../utils/helpers');
 
 /** Every adapter must implement these three. */
 const REQUIRED_METHODS = ['createOrder', 'verifyWebhookSignature', 'parseWebhook'];
@@ -87,15 +88,84 @@ function assertImplements(adapter, name) {
   return adapter;
 }
 
+/* ------------------------------------------------------------------ *
+ * Refusing to ask for money a fake gateway cannot take
+ * ------------------------------------------------------------------ */
+
+/**
+ * The three calls that put a payable instrument in front of a customer.
+ *
+ * Only these. Cancelling a link, closing a QR, verifying a signature and
+ * parsing a webhook all stay available when the guard is active: an instrument
+ * raised before the misconfiguration was noticed still needs to be cancellable,
+ * and a webhook that arrives for one still needs to be processed.
+ */
+const COLLECTING_METHODS = Object.freeze([
+  'createOrder',
+  'createPaymentLink',
+  'createQrCode',
+]);
+
+/**
+ * Wraps the adapter so the collecting calls fail loudly instead of producing
+ * an instrument nobody can pay.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY HERE RATHER THAN AT BOOT, AND WHY NOT AT EACH CALL SITE
+ * ---------------------------------------------------------------------------
+ * At boot it was fatal to the whole process — config/env.js is required by
+ * config/prisma.js, so a payments problem stopped bookings, dispatch and every
+ * worker. At each call site it would be four copies of the same check
+ * (createOrder, createLink, createQr, and both standalone variants), and the
+ * fifth one somebody adds next month would not have it.
+ *
+ * Wrapping the adapter is the one place every path already funnels through.
+ * `supports()` still reports true for a wrapped method, which is correct: the
+ * capability exists, it is the configuration that is refusing.
+ *
+ * 409 rather than 503 deliberately. The error middleware replaces the message
+ * on any 5xx in production, and the message is the entire value of this
+ * error — an admin seeing "Internal server error" learns nothing, while
+ * "Razorpay is in test mode" is actionable without opening a log.
+ */
+function guardCollections(adapter) {
+  if (!env.payment.blockCollections) return adapter;
+
+  const reason = env.payment.razorpay.isTestKey
+    ? 'Razorpay is in test mode (rzp_test_ key), so payments would report success without money moving'
+    : `the "${adapter.name}" gateway cannot take real money`;
+
+  const wrapped = Object.create(adapter);
+
+  for (const method of COLLECTING_METHODS) {
+    if (typeof adapter[method] !== 'function') continue;
+    wrapped[method] = async () => {
+      throw new ApiError(
+        409,
+        'PAYMENT_GATEWAY_NOT_LIVE',
+        `Cannot collect payment: ${reason}. Set live Razorpay keys, or set ` +
+          'ALLOW_MOCK_PAYMENTS=true if this environment is for testing.',
+      );
+    };
+  }
+
+  return wrapped;
+}
+
 let cached = null;
 
 /**
  * Returns the configured adapter.
  *
  * Falls back to the mock rather than throwing when a real gateway has no
- * credentials. In development this means the app runs with zero setup; in
- * production the env guard (see config/env.js) refuses to boot with the mock,
- * so this fallback can never silently take real money through a fake gateway.
+ * credentials, so development runs with zero setup.
+ *
+ * That fallback used to be silent in production too — a console.warn and
+ * nothing else — which meant a deployment with PAYMENT_PROVIDER unset, or a
+ * razorpay key left empty, happily issued mock.invalid payment links and
+ * accepted simulated captures. guardCollections() closes that: in production
+ * without a gateway that can take real money, every call that would ask a
+ * customer to pay now throws instead.
  */
 function getProvider() {
   if (cached) return cached;
@@ -120,21 +190,25 @@ function getProvider() {
     }
   };
 
-  cached = assertImplements(build(), name);
-  console.log(`[payment] provider: ${cached.name}`);
+  // Checked against the RAW adapter, before wrapping: the contract is a fact
+  // about the adapter, not about this environment's configuration.
+  cached = guardCollections(assertImplements(build(), name));
+
+  console.log(
+    `[payment] provider: ${cached.name}` +
+      (cached.name === 'razorpay' && env.payment.razorpay.isTestKey ? ' (TEST MODE)' : '') +
+      (env.payment.blockCollections ? ' — new collections BLOCKED' : ''),
+  );
 
   /*
-   * Say it loudly when a deployed server can mark payments captured for free.
-   *
-   * The two conditions are easy to set and easy to forget, and the failure is
-   * silent — the app works perfectly, which is exactly the problem. A line in
-   * the boot log is the cheapest way to notice it is still on next month.
+   * env.js prints the full banner for "no gateway that can take real money".
+   * This one covers the case it cannot see: the mock running in production
+   * with collections deliberately permitted, where captures are free.
    */
-  if (cached.name === 'mock' && env.isProd) {
+  if (cached.name === 'mock' && env.isProd && !env.payment.blockCollections) {
     console.warn(
-      env.allowPaymentSimulation
-        ? '[payment] WARNING: mock provider with ALLOW_PAYMENT_SIMULATION=true — payments can be marked captured without money. Testing only.'
-        : '[payment] WARNING: mock provider in production — payments cannot be captured. Set PAYMENT_PROVIDER=razorpay for real payments.',
+      '[payment] WARNING: mock provider in production with ALLOW_MOCK_PAYMENTS=true — ' +
+        'payments can be marked captured without money moving. Testing only.',
     );
   }
   return cached;

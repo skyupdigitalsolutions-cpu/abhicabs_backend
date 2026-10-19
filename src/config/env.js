@@ -502,32 +502,65 @@ const cannotTakeRealMoney = willUseMockGateway || razorpayTestKeys;
  * unrelated things, and the whole failure being fixed here is a flag that did
  * more than its name suggested.
  */
-if (env.isProd && cannotTakeRealMoney && process.env.ALLOW_MOCK_PAYMENTS !== 'true') {
-  const why = razorpayTestKeys
-    ? 'RAZORPAY_KEY_ID is a test key (rzp_test_…), so Razorpay will report ' +
-      'every payment as successful without money moving, and its UPI QR codes ' +
-      'carry a VPA that real UPI apps reject'
-    : paymentProviderName !== 'razorpay'
-      ? `PAYMENT_PROVIDER is "${paymentProviderName}", so the mock gateway would ` +
-        'be used: payment links would be unpayable and captures could be simulated'
-      : 'PAYMENT_PROVIDER=razorpay but RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are ' +
-        'empty, so the mock gateway would be used';
+/*
+ * WHY THIS WARNS AND DOES NOT THROW.
+ *
+ * The first version of this guard threw at boot, and that was wrong. env.js is
+ * required by config/prisma.js, so a payments misconfiguration took down the
+ * API and every BullMQ worker with it — bookings, dispatch, trip lifecycle,
+ * OTP, all of it — over a problem confined to taking money. The blast radius
+ * has to match the fault.
+ *
+ * So the process boots, and the refusal moves to the only place where the
+ * misconfiguration can actually hurt anyone: the calls that ask a customer for
+ * money. See payment.provider.js, which reads the flag below and rejects
+ * createOrder / createPaymentLink / createQrCode. Everything that does not
+ * involve collecting money carries on working, and cancelling or reading an
+ * existing instrument still works too.
+ */
+env.payment.simulated = cannotTakeRealMoney;
+env.payment.allowMock = process.env.ALLOW_MOCK_PAYMENTS === 'true';
 
-  throw new Error(
-    `[env] NODE_ENV=production with no gateway that can take real money. ${why}. ` +
-    'Use live Razorpay keys (rzp_live_…) with PAYMENT_PROVIDER=razorpay, or set ' +
-    'ALLOW_MOCK_PAYMENTS=true if this is a staging or UAT environment.'
+/** True when asking a customer for money must be refused outright. */
+env.payment.blockCollections =
+  env.isProd && env.payment.simulated && !env.payment.allowMock;
+
+if (env.payment.simulated) {
+  const why = razorpayTestKeys
+    ? 'RAZORPAY_KEY_ID is a test key (rzp_test_…), so Razorpay reports every ' +
+      'payment as successful without money moving, and its UPI QR codes carry ' +
+      'a VPA that real UPI apps reject as invalid'
+    : paymentProviderName !== 'razorpay'
+      ? `PAYMENT_PROVIDER is "${paymentProviderName}", so the mock gateway is in ` +
+        'use: payment links are unpayable and captures can be simulated'
+      : 'PAYMENT_PROVIDER=razorpay but RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are ' +
+        'empty, so the mock gateway is in use';
+
+  const banner = env.payment.blockCollections
+    ? 'NEW PAYMENT COLLECTIONS ARE BLOCKED on this server'
+    : 'payments here are NOT REAL';
+
+  console.warn(
+    `\n${'='.repeat(78)}\n` +
+    `[payment] NO GATEWAY THAT CAN TAKE REAL MONEY — ${banner}.\n` +
+    `  ${why}.\n` +
+    '  Fix: PAYMENT_PROVIDER=razorpay with live keys (rzp_live_…).\n' +
+    (env.payment.blockCollections
+      ? '  Staging/UAT: set ALLOW_MOCK_PAYMENTS=true to allow simulated collections.\n'
+      : '  ALLOW_MOCK_PAYMENTS=true is set, so simulated collections are permitted.\n') +
+    `${'='.repeat(78)}\n`
   );
 }
 
-// Legal on staging, and the one line that explains a "successful" payment
-// nobody paid for. Printed on every boot, not only in production, because the
-// question it answers is asked most often on a box somebody forgot was test.
+// Test and live are separate configurations at Razorpay, with separate webhook
+// endpoints and separate secrets. Switching the keys without switching
+// PAYMENT_WEBHOOK_SECRET is the failure that loses real money: the gateway
+// captures, every webhook fails signature verification, and the payment sits
+// at CREATED forever.
 if (razorpayTestKeys) {
   console.warn(
-    '[payment] Razorpay is in TEST MODE (rzp_test_ key). Payments will report ' +
-    'success without money moving. Webhooks must be configured on the Razorpay ' +
-    'dashboard\'s TEST tab, which has its own secret.'
+    "[payment] Razorpay TEST MODE: webhooks come from the dashboard's TEST tab, " +
+    'which has its own PAYMENT_WEBHOOK_SECRET. Change both together when going live.'
   );
 }
 
