@@ -356,7 +356,8 @@ async function sendPasswordResetEmail({ to, name, resetUrl, ttlSeconds }) {
  * it. The fare was last seen on a quote screen before an admin had confirmed
  * anything, so after confirmation there is no durable record of the number the
  * rider agreed to until the invoice arrives at the END of the trip. This email
- * is that record: total, what has already been paid, and what is still owed.
+ * is that record: the breakdown, what has already been paid, what is still
+ * owed, and the extras that can still move it.
  *
  * WHY "estimated"
  * ---------------
@@ -366,135 +367,33 @@ async function sendPasswordResetEmail({ to, name, resetUrl, ttlSeconds }) {
  * estimated, names the extras that can move it, and the invoice email at
  * COMPLETED carries the real figure.
  *
+ * WHY THE LAYOUT LIVES ELSEWHERE
+ * ------------------------------
+ * Same reason the invoice does: a sectioned document with a fare breakdown and
+ * a terms block is more markup than a send function should hold, and the HTML
+ * and plain-text versions have to be generated from one model or they drift.
+ * See bookingConfirmationTemplate.js.
+ *
  * Never throws. A mail provider being down must not fail a notification job,
  * which would have BullMQ retry a push the rider already received.
  */
-async function sendBookingConfirmedEmail({ to, name, booking = {} }) {
+async function sendBookingConfirmedEmail({ to, name, booking = {}, seller }) {
   if (!isDeliverableEmail(to)) {
     // Phone-first account with a placeholder address. Normal, not an error.
     return { skipped: true, reason: 'NO_EMAIL' };
   }
 
   try {
-    const greeting = name ? `Hi ${name},` : 'Hi,';
+    const {
+      buildBookingConfirmationHtml,
+      buildBookingConfirmationText,
+    } = require('./bookingConfirmationTemplate');
+
+    const html = buildBookingConfirmationHtml({ booking, name, seller, brand: BRAND });
+    const text = buildBookingConfirmationText({ booking, name, seller, brand: BRAND });
 
     const bookingNumber = booking.bookingNumber ?? '';
-    const tripType = TRIP_TYPE_LABEL[booking.tripType] || booking.tripType || null;
-    const pickupAt = formatIst(booking.pickupAt);
-    const returnAt = formatIst(booking.returnAt);
-
-    // finalFare only exists once the trip is settled; at confirmation it is the
-    // frozen quote on estimatedFare that the rider agreed to.
-    const isFinal = booking.finalFare != null;
     const total = formatAmount(booking.finalFare ?? booking.estimatedFare);
-    const advance = formatAmount(booking.advancePaid);
-    const balance = formatAmount(booking.balanceDue);
-
-    // `advancePaid` is 0 on a pay-later booking; a "₹0.00 paid" row is noise.
-    const showAdvance = Number(booking.advancePaid ?? 0) > 0;
-    const payLater = booking.paymentMode === 'ZERO';
-
-    // fareBasis.discount is written at create time and is NET of the total
-    // above — see booking.service. Showing it answers "why is this less than
-    // the quote I screenshotted".
-    const discount = booking.fareBasis?.discount || null;
-    const discountAmount = discount ? formatAmount(discount.amount) : null;
-
-    /* ---------------- plain text ---------------- */
-
-    const rows = [
-      ['Booking', bookingNumber],
-      tripType ? ['Trip type', tripType] : null,
-      pickupAt ? ['Pickup', pickupAt] : null,
-      booking.pickupAddress ? ['From', booking.pickupAddress] : null,
-      booking.dropAddress ? ['To', booking.dropAddress] : null,
-      returnAt ? ['Return', returnAt] : null,
-      booking.distanceKm != null ? ['Distance', `${booking.distanceKm} km`] : null,
-    ].filter(Boolean);
-
-    const moneyRows = [
-      discountAmount ? [`Discount${discount.code ? ` (${discount.code})` : ''}`, `− ${discountAmount}`] : null,
-      total ? [isFinal ? 'Total fare' : 'Estimated fare', total] : null,
-      showAdvance && advance ? ['Paid in advance', advance] : null,
-      balance ? [payLater ? 'Payable to the driver' : 'Balance due', balance] : null,
-    ].filter(Boolean);
-
-    const text = [
-      greeting,
-      '',
-      `Your booking ${bookingNumber} is confirmed.`,
-      '',
-      ...rows.map(([k, v]) => `${k}: ${v}`),
-      '',
-      ...moneyRows.map(([k, v]) => `${k}: ${v}`),
-      '',
-      isFinal
-        ? ''
-        : 'This is the fare quoted at booking. Tolls, parking, state permits and any\nextra distance or hours beyond the booked package are billed at the end of\nthe trip, and your invoice will show the final amount.',
-      '',
-      'You can see this booking any time in the app.',
-      '',
-      `— ${BRAND}`,
-    ].filter((line) => line !== undefined).join('\n');
-
-    /* ---------------- html ---------------- */
-
-    const detailHtml = rows
-      .map(
-        ([k, v]) => `<tr>
-          <td style="padding:6px 0;font-size:14px;color:#777;vertical-align:top;width:40%;">${escapeHtml(k)}</td>
-          <td style="padding:6px 0;font-size:14px;color:#1a1a1a;vertical-align:top;">${escapeHtml(v)}</td>
-        </tr>`,
-      )
-      .join('');
-
-    const moneyHtml = moneyRows
-      .map(([k, v], i) => {
-        const strong = i === moneyRows.length - 1;
-        return `<tr>
-          <td style="padding:8px 0;font-size:${strong ? '15' : '14'}px;color:${strong ? '#1a1a1a' : '#777'};font-weight:${strong ? '600' : '400'};">${escapeHtml(k)}</td>
-          <td style="padding:8px 0;font-size:${strong ? '16' : '14'}px;color:#1a1a1a;font-weight:${strong ? '700' : '500'};text-align:right;white-space:nowrap;">${escapeHtml(v)}</td>
-        </tr>`;
-      })
-      .join('');
-
-    const html = `<!doctype html>
-<html>
-  <body style="margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;">
-      <tr><td style="padding:32px;">
-        <p style="margin:0 0 8px;font-size:15px;">${escapeHtml(greeting)}</p>
-        <p style="margin:0 0 24px;font-size:20px;font-weight:700;">Your booking is confirmed</p>
-
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${detailHtml}</table>
-
-        <div style="height:1px;background:#e9eaee;margin:20px 0;"></div>
-
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${moneyHtml}</table>
-
-        ${
-          isFinal
-            ? ''
-            : `<p style="margin:20px 0 0;font-size:13px;color:#777;line-height:1.5;">
-                 This is the fare quoted at booking. Tolls, parking, state permits and any extra
-                 distance or hours beyond the booked package are billed at the end of the trip —
-                 your invoice will show the final amount.
-               </p>`
-        }
-        ${
-          payLater
-            ? `<p style="margin:12px 0 0;font-size:13px;color:#777;">Please pay the driver at the end of your trip.</p>`
-            : ''
-        }
-
-        <p style="margin:24px 0 0;font-size:13px;color:#777;">
-          You can see this booking any time in the ${escapeHtml(BRAND)} app.
-        </p>
-      </td></tr>
-    </table>
-    <p style="max-width:520px;margin:16px auto 0;font-size:12px;color:#999;text-align:center;">${escapeHtml(BRAND)}</p>
-  </body>
-</html>`;
 
     const result = await getProvider().send({
       to,
