@@ -82,6 +82,11 @@ async function allocate(bookingId, { vehicleId, driverId = null }, actor = null,
     );
   }
 
+  // If dispatch is acting on a PENDING booking, auto-confirm it first so the
+  // booking reaches CONFIRMED before the allocation transaction writes ALLOCATED.
+  // This avoids requiring a separate admin-confirm step before dispatch can assign.
+  const needsConfirm = booking.status === 'PENDING';
+
   const vehicle = await prisma.vehicle.findUnique({
     where: { id: vehicleId },
     select: { id: true, vehicleClass: true, cityId: true, status: true, isActive: true },
@@ -123,6 +128,16 @@ async function allocate(bookingId, { vehicleId, driverId = null }, actor = null,
         },
         select: ALLOCATION_SELECT,
       });
+
+      // If the booking was PENDING, promote it to CONFIRMED first — dispatch
+      // assigning a vehicle is confirmation enough. Done inside the tx so it's
+      // atomic with the allocation insert and the ALLOCATED move below.
+      if (needsConfirm) {
+        await tx.booking.updateMany({
+          where: { id: bookingId, status: 'PENDING' },
+          data: { status: 'CONFIRMED', confirmedAt: new Date() },
+        });
+      }
 
       // Move the booking forward and mark the vehicle assigned, in the same tx.
       // Conditional update on status keeps the booking transition race-free too.

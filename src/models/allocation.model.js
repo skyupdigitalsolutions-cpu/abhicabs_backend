@@ -6,8 +6,11 @@
  * Shared selects and the hold-window rule for allocations.
  */
 
-/** Bookings that may receive a vehicle. */
-const ASSIGNABLE_BOOKING_STATUSES = ['CONFIRMED', 'ALLOCATED'];
+/** Bookings that may receive a vehicle.
+ * PENDING is included so dispatch can assign directly without a separate
+ * admin-confirm step. The allocate() function auto-promotes PENDING → CONFIRMED
+ * inside the same transaction before moving to ALLOCATED. */
+const ASSIGNABLE_BOOKING_STATUSES = ['PENDING', 'CONFIRMED', 'ALLOCATED'];
 
 const ALLOCATION_SELECT = {
   id: true,

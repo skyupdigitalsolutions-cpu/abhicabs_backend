@@ -93,12 +93,93 @@ async function create(input, actor, meta = {}) {
     select: { id: true, name: true, role: true },
   });
 
+  /*
+   * If the phone belongs to an EXISTING DRIVER, reuse them for this temporary
+   * assignment instead of blocking. This lets dispatch assign any known driver
+   * — whether permanent or temporary — without re-creating their account.
+   *
+   * If the phone belongs to a non-driver (customer), still block: silently
+   * converting a customer into a driver would be a security escalation.
+   */
   if (phoneOwner) {
     if (phoneOwner.role === 'DRIVER') {
-      throw ApiError.conflict(
-        `${phoneOwner.name} is already registered as a driver on this number`,
-        'DRIVER_EXISTS',
-      );
+      // Reuse the existing driver — just ensure they have a vehicle assigned
+      const existingDriver = await prisma.driver.findUnique({
+        where: { userId: phoneOwner.id },
+        select: {
+          userId: true,
+          isTemporary: true,
+          assignedVehicleId: true,
+          user: { select: { id: true, name: true, phone: true, isActive: true } },
+          assignedVehicle: { select: { id: true, registrationNumber: true, vehicleClass: true, status: true } },
+        },
+      });
+
+      if (existingDriver) {
+        // Reactivate if deactivated
+        if (!existingDriver.user.isActive) {
+          await prisma.user.update({ where: { id: phoneOwner.id }, data: { isActive: true } });
+        }
+
+        // If they don't have a vehicle or need a different one, create/assign the vehicle
+        let vehicle = existingDriver.assignedVehicle;
+        if (!vehicle || vehicle.registrationNumber !== registrationNumber) {
+          // Check if vehicle already exists
+          const existingVehicle = await prisma.vehicle.findUnique({
+            where: { registrationNumber },
+            select: { id: true, registrationNumber: true, vehicleClass: true, status: true, isActive: true },
+          });
+
+          if (existingVehicle) {
+            vehicle = existingVehicle;
+            if (!existingVehicle.isActive) {
+              await prisma.vehicle.update({ where: { id: existingVehicle.id }, data: { isActive: true, status: 'ACTIVE' } });
+            }
+          } else {
+            vehicle = await prisma.vehicle.create({
+              data: {
+                registrationNumber,
+                vehicleClass: input.vehicleClass,
+                isTemporary: true,
+                status: 'ACTIVE',
+              },
+            });
+          }
+
+          await prisma.driver.update({
+            where: { userId: phoneOwner.id },
+            data: { assignedVehicleId: vehicle.id, isOnline: true },
+          });
+        } else {
+          // Just set online
+          await prisma.driver.update({
+            where: { userId: phoneOwner.id },
+            data: { isOnline: true },
+          });
+        }
+
+        audit.recordAsync({
+          actor,
+          action: 'TEMP_DRIVER_REUSED',
+          entityType: 'driver',
+          entityId: phoneOwner.id,
+          after: { name: existingDriver.user.name, phone, registrationNumber },
+          meta,
+        });
+
+        return {
+          userId: phoneOwner.id,
+          name: existingDriver.user.name,
+          mobile: phone,
+          licenceNumber: existingDriver.licenceNumber || null,
+          vehicle: {
+            id: vehicle.id,
+            registrationNumber: vehicle.registrationNumber || registrationNumber,
+            vehicleClass: vehicle.vehicleClass || input.vehicleClass,
+            status: vehicle.status || 'ACTIVE',
+          },
+        };
+      }
     }
     throw ApiError.conflict(
       'That mobile number already belongs to another account',

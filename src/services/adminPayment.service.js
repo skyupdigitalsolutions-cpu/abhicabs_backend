@@ -25,23 +25,34 @@ const PAYMENT_SELECT = {
   method: true,
   status: true,
   purpose: true,
+  collectionType: true,
+  shareUrl: true,
+  payerName: true,
+  payerPhone: true,
+  payerEmail: true,
+  description: true,
+  rawResponse: true,
   failureReason: true,
   paidAt: true,
   createdAt: true,
+  updatedAt: true,
   booking: {
     select: {
       bookingNumber: true,
       status: true,
-      customer: { select: { userId: true, user: { select: { name: true, phone: true } } } },
+      pickupAddress: true,
+      dropAddress: true,
+      customer: { select: { userId: true, user: { select: { name: true, phone: true, email: true } } } },
     },
   },
 };
 
-async function list({ page, limit, status, method, from, to, bookingId, sortBy, order }) {
+async function list({ page, limit, status, method, purpose, from, to, bookingId, sortBy, order }) {
   const where = {};
 
   if (status) where.status = status;
   if (method) where.method = method;
+  if (purpose) where.purpose = purpose;
   if (bookingId) where.bookingId = bookingId;
 
   // createdAt window: from inclusive, to exclusive.
