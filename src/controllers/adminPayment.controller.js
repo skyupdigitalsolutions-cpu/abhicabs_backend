@@ -139,3 +139,48 @@ exports.resendLink = asyncHandler(async (req, res) => {
   );
   res.json({ success: true, message: `Link resent by ${data.medium}`, data });
 });
+
+/* ------------------------------------------------------------------ *
+ * Cash handovers
+ * ------------------------------------------------------------------ */
+
+/** GET /admin/payments/cash-handovers */
+exports.listCashHandovers = asyncHandler(async (req, res) => {
+  const data = await adminPaymentService.listCashHandovers(
+    req.validatedQuery || req.query,
+  );
+  res.json({ success: true, data });
+});
+
+/** POST /admin/payments/:id/reconcile */
+exports.reconcileCash = asyncHandler(async (req, res) => {
+  const payment = await adminPaymentService.reconcileCash(
+    req.params.id,
+    req.body.note || null,
+    req.user,
+    meta(req),
+  );
+  res.json({
+    success: true,
+    message: 'Cash handover confirmed',
+    data: { payment },
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Refunds
+ * ------------------------------------------------------------------ */
+
+/** POST /admin/payments/refunds */
+exports.createRefund = asyncHandler(async (req, res) => {
+  const refund = await adminPaymentService.createRefund(
+    req.body,
+    req.user,
+    meta(req),
+  );
+  res.status(201).json({
+    success: true,
+    message: `Refund of ₹${refund.amount} recorded`,
+    data: { refund },
+  });
+});

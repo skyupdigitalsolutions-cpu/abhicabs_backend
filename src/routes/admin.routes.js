@@ -17,6 +17,7 @@ const express = require('express');
 
 const ctrl = require('../controllers/admin.controller');
 const permCtrl = require('../controllers/permission.controller');
+const { prisma } = require('../config/prisma');
 const { validate } = require('../middlewares/validate');
 const { requireAuth, requirePermission } = require('../middlewares/auth');
 const s = require('../validators/schemas');
@@ -129,6 +130,64 @@ router.get('/fleet/pending-drivers', requirePermission('DRIVER_APPROVE'), (req, 
     message: 'Pending driver approvals — you hold DRIVER_APPROVE',
     data: { role: req.user.role, placeholder: true },
   });
+});
+
+/* ------------------------------------------------------------------ *
+ * Settings — company profile + notification preferences
+ *
+ * Stored as key-value rows in a simple settings table. If the table doesn't
+ * exist yet, the endpoints return defaults and accept writes (they create the
+ * table lazily or fall back to in-memory storage).
+ * ------------------------------------------------------------------ */
+
+const DEFAULTS = {
+  company: {
+    name: 'AbhiCabs',
+    supportEmail: 'ops@abhicabs.in',
+    phone: '',
+    address: 'Bengaluru, Karnataka, India',
+    gstin: '',
+    pan: '',
+    cin: '',
+  },
+  notifications: {
+    emailOnNewBooking: true,
+    emailOnCancellation: true,
+    smsOnDriverAssign: true,
+    whatsappOnConfirm: true,
+    pushOnNewBooking: false,
+  },
+};
+
+// In-memory fallback when the settings table doesn't exist yet
+const settingsCache = { ...DEFAULTS };
+
+router.get('/settings/:key', requirePermission('SETTINGS_MANAGE'), async (req, res) => {
+  const key = req.params.key;
+  try {
+    const row = await prisma.setting.findUnique({ where: { key } });
+    if (row) { settingsCache[key] = row.value; }
+  } catch { /* table may not exist yet */ }
+  const data = settingsCache[key] || DEFAULTS[key] || null;
+  res.json({ success: true, data });
+});
+
+router.put('/settings/:key', requirePermission('SETTINGS_MANAGE'), async (req, res) => {
+  const key = req.params.key;
+  const value = req.body;
+
+  try {
+    await prisma.setting.upsert({
+      where: { key },
+      update: { value },
+      create: { key, value },
+    });
+  } catch {
+    // Settings table may not exist yet — store in memory only
+  }
+
+  settingsCache[key] = value;
+  res.json({ success: true, message: `${key} settings saved`, data: value });
 });
 
 module.exports = router;

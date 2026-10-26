@@ -123,6 +123,7 @@ const locationRoutes = require('./location.routes');
 router.use('/driver/location', apiLimiter, locationRoutes.driver);
 router.use('/admin/location', apiLimiter, locationRoutes.ops);
 router.use('/location', apiLimiter, locationRoutes.rider);
+router.use('/admin/notifications', apiLimiter, require('./notification.routes'));
 router.use('/admin/audit', apiLimiter, require('./audit.routes'));
 
 // The in-app help bot. apiLimiter on top of the route's own writeLimiter,

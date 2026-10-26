@@ -34,8 +34,41 @@
 const { bus, EVENTS } = require('../lib/events');
 const rooms = require('./rooms');
 const redis = require('../config/redis');
+const { prisma } = require('../config/prisma');
 
 let wired = false;
+
+/**
+ * Persist a notification for every staff user with a given role (or all staff).
+ * Fire-and-forget: failures are logged but never break the live path.
+ *
+ * @param {{ title: string, body?: string, type?: string, linkTo?: string, roles?: string[] }} opts
+ */
+async function persistNotification({ title, body, type = 'INFO', linkTo, roles }) {
+  try {
+    const where = { isActive: true };
+    if (roles && roles.length) {
+      where.role = { in: roles };
+    } else {
+      // All staff roles (not customers)
+      where.role = { in: ['ADMIN', 'OPS', 'FINANCE', 'FLEET', 'SUPPORT'] };
+    }
+    const staffUsers = await prisma.user.findMany({ where, select: { id: true } });
+    if (!staffUsers.length) return;
+
+    await prisma.notification.createMany({
+      data: staffUsers.map((u) => ({
+        userId: u.id,
+        title,
+        body: body || null,
+        type,
+        linkTo: linkTo || null,
+      })),
+    });
+  } catch (err) {
+    console.error('[bridge] persistNotification failed:', err.message);
+  }
+}
 
 /**
  * Subscribes to the event bus and starts forwarding to rooms.
@@ -80,13 +113,29 @@ function wire(io) {
         reason: payload.failureReason || 'unknown',
         at: payload.at,
       });
+
+      persistNotification({
+        title: 'Booking attempt failed',
+        body: `Reason: ${payload.failureReason || 'unknown'}`,
+        type: 'ALERT',
+        linkTo: '/admin/bookings',
+        roles: ['ADMIN', 'OPS'],
+      });
     }
   });
 
-  /* ---- booking.created → dispatch feed ---- */
+  /* ---- booking.created → dispatch feed + persist notification ---- */
 
   bus.on(EVENTS.BOOKING_CREATED, (payload) => {
     io.to(rooms.DISPATCH).emit('booking:created', slimBooking(payload));
+
+    persistNotification({
+      title: `New booking ${payload.bookingNumber || ''}`.trim(),
+      body: `${payload.vehicleClass || 'Vehicle'} booking needs confirmation`,
+      type: 'BOOKING',
+      linkTo: payload.bookingId ? `/admin/bookings/${payload.bookingId}` : '/admin/bookings',
+      roles: ['ADMIN', 'OPS'],
+    });
   });
 
   /* ---- booking.status_changed → the booking room + dispatch ---- */
@@ -162,6 +211,13 @@ function wire(io) {
     };
     io.to(rooms.booking(payload.bookingId)).emit('trip:status', body);
     io.to(rooms.DISPATCH).emit('trip:status', body);
+
+    persistNotification({
+      title: `Booking ${payload.bookingNumber || ''} cancelled`.trim(),
+      type: 'BOOKING',
+      linkTo: payload.bookingId ? `/admin/bookings/${payload.bookingId}` : '/admin/bookings',
+      roles: ['ADMIN', 'OPS'],
+    });
   });
 
   /* ---- allocation.made → the assigned driver + the booking room ---- */
@@ -200,6 +256,15 @@ function wire(io) {
      */
     if (!payload.bookingId) return;
 
+    // Persist payment notification for finance staff
+    persistNotification({
+      title: `Payment ₹${payload.amount} received`,
+      body: payload.purpose ? `Purpose: ${payload.purpose}` : null,
+      type: 'PAYMENT',
+      linkTo: `/admin/payments`,
+      roles: ['ADMIN', 'FINANCE'],
+    });
+
     io.to(rooms.booking(payload.bookingId)).emit('payment:received', {
       bookingId: payload.bookingId,
       paymentId: payload.paymentId,
@@ -217,6 +282,31 @@ function wire(io) {
        */
       balanceDue: payload.balanceDue,
       at: payload.at,
+    });
+  });
+
+  /* ---- booking_request.created → admin notification ---- */
+
+  bus.on(EVENTS.BOOKING_REQUEST_CREATED, (payload) => {
+    // The frontend currently polls for new requests because this event was
+    // never forwarded to sockets. Now we do both: emit to dispatch so the
+    // poll can stop, AND persist a notification so it's not lost on refresh.
+    io.to(rooms.DISPATCH).emit('booking_request:created', {
+      requestId: payload.requestId || payload.id,
+      customerName: payload.customerName,
+      pickup: payload.pickup,
+      drop: payload.drop,
+      at: payload.at,
+    });
+
+    persistNotification({
+      title: 'New booking request',
+      body: payload.customerName
+        ? `${payload.customerName} requested a ride outside service area`
+        : 'Out-of-area ride request received',
+      type: 'BOOKING',
+      linkTo: '/admin/booking-requests',
+      roles: ['ADMIN', 'OPS'],
     });
   });
 

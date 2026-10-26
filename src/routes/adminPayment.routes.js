@@ -112,6 +112,56 @@ router.get(
   ctrl.listCollections
 );
 
+/* ---- Cash handovers ---- */
+
+/**
+ * GET /admin/payments/cash-handovers
+ *
+ * Every captured CASH payment (purpose != REFUND), enriched with the booking
+ * and reconciliation status. The admin cash-handover tab reads this instead
+ * of assembling it from three separate endpoints.
+ */
+router.get(
+  '/cash-handovers',
+  requirePermission('PAYMENT_VIEW'),
+  validate({ query: s.listPaymentsQuerySchema }),
+  ctrl.listCashHandovers
+);
+
+/**
+ * POST /admin/payments/:id/reconcile
+ *
+ * Confirm that cash collected by a driver has been handed over to the office.
+ * Records who confirmed and when, with an optional note. Idempotent: a
+ * second call on an already-reconciled payment returns the existing record
+ * without error.
+ */
+router.post(
+  '/:id/reconcile',
+  requirePermission('PAYMENT_MANAGE'),
+  idempotent('POST /admin/payments/:id/reconcile'),
+  validate({ params: s.paymentIdParamSchema, body: s.reconcileSchema }),
+  ctrl.reconcileCash
+);
+
+/* ---- Refunds ---- */
+
+/**
+ * POST /admin/payments/refunds
+ *
+ * Issue a refund against a booking's captured payments. The amount is capped
+ * at (totalCaptured - alreadyRefunded) and a REFUND-purpose payment record
+ * is created. If a payment gateway is configured, the refund is initiated
+ * there; otherwise it is recorded as a manual refund for offline processing.
+ */
+router.post(
+  '/refunds',
+  requirePermission('PAYMENT_REFUND'),
+  idempotent('POST /admin/payments/refunds'),
+  validate({ body: s.createRefundSchema }),
+  ctrl.createRefund
+);
+
 /* ---- Acting on one instrument ---- */
 
 /**

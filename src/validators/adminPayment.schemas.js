@@ -192,6 +192,17 @@ const resendSchema = z.object({
   medium: z.enum(['sms', 'email']).default('sms'),
 });
 
+const reconcileSchema = z.object({
+  note: z.string().trim().max(500).nullable().optional(),
+});
+
+const createRefundSchema = z.object({
+  bookingId: uuid,
+  amount: z.coerce.number().positive('Refund amount must be greater than zero'),
+  reason: z.string().trim().min(2).max(500),
+  method: z.enum(['ORIGINAL', 'MANUAL']).default('ORIGINAL'),
+});
+
 const bookingIdParamSchema = z.object({ bookingId: uuid });
 const paymentIdParamSchema = z.object({ id: uuid });
 
@@ -207,6 +218,8 @@ module.exports = {
   createStandaloneQrSchema,
   whatsappShareSchema,
   resendSchema,
+  reconcileSchema,
+  createRefundSchema,
   bookingIdParamSchema,
   paymentIdParamSchema,
 };

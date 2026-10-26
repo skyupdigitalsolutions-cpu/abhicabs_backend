@@ -193,6 +193,7 @@ model User {
   driver                 Driver?
   ledgerEntries          LedgerEntry[]
   auditLogs              AuditLog[]
+  notifications          Notification[]
   idempotencyKeys        IdempotencyKey[]
   cancelledBookings      Booking[]        @relation("BookingCancelledBy")
   bookingRequests        BookingRequest[] @relation("BookingRequestCustomer")
@@ -1069,6 +1070,11 @@ model Payment {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
 
+  /// Cash reconciliation: when a driver hands over cash, an admin confirms it.
+  reconciledAt   DateTime? @map("reconciled_at")
+  reconciledBy   String?   @map("reconciled_by") @db.Uuid
+  reconcileNote  String?   @map("reconcile_note") @db.VarChar(500)
+
   booking Booking? @relation(fields: [bookingId], references: [id], onDelete: Restrict)
 
   @@unique([provider, providerOrderId])
@@ -1270,6 +1276,27 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+// ===========================================================================
+// NOTIFICATION  — in-app notifications for staff
+// ===========================================================================
+
+model Notification {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  title     String   @db.VarChar(200)
+  body      String?  @db.VarChar(1000)
+  type      String   @default("INFO") @db.VarChar(32) // INFO, BOOKING, PAYMENT, ALERT, DRIVER
+  read      Boolean  @default(false)
+  linkTo    String?  @map("link_to") @db.VarChar(500) // deep-link path, e.g. /admin/bookings/xyz
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read, createdAt])
+  @@index([createdAt])
+  @@map("notifications")
 }
 
 // ===========================================================================
@@ -1932,4 +1959,16 @@ model TripReview {
   @@index([rating, createdAt])
   @@index([driverId, createdAt])
   @@map("trip_reviews")
+}
+
+// ===========================================================================
+// SETTINGS  — key-value store for company profile, notification preferences
+// ===========================================================================
+
+model Setting {
+  key       String   @id @db.VarChar(64)
+  value     Json     @default("{}")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("settings")
 }
