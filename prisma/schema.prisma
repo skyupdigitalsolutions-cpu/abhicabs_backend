@@ -1962,6 +1962,29 @@ model TripReview {
 }
 
 // ===========================================================================
+// BLOG USERS — separate auth for the blog builder (not shared with admin)
+// ===========================================================================
+
+enum BlogRole {
+  admin
+  editor
+  viewer
+}
+
+model BlogUser {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(120)
+  email     String   @unique @db.VarChar(180)
+  password  String   @db.VarChar(255)
+  role      BlogRole @default(editor)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("blog_users")
+}
+
+// ===========================================================================
 // SETTINGS  — key-value store for company profile, notification preferences
 // ===========================================================================
 
