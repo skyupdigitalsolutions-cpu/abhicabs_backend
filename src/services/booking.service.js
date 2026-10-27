@@ -516,7 +516,19 @@ async function create(input, actor, meta = {}) {
           bookingNumber,
           customerId,
           corporateAccountId: billing.corporateAccountId,
-          cityId: input.cityId,
+          /*
+           * The city that PRICED the trip, not the one the app sent.
+           *
+           * quoteService.getQuote resolves an out-of-radius pickup to the
+           * nearest city that actually has rate cards, so a Hyderabad pickup
+           * sent with cityId=Bengaluru is priced by whichever city covers it.
+           * Storing input.cityId filed the booking under a city that had
+           * nothing to do with its fare — dispatch then looked for a vehicle
+           * in the wrong place, and every city report counted the trip in the
+           * wrong row. Falls back to the request only if a quote somehow
+           * returned no city.
+           */
+          cityId: quote.trip.cityId ?? input.cityId,
           tripType: input.tripType,
           /*
            * EVERY booking starts PENDING, whatever the payment mode, and

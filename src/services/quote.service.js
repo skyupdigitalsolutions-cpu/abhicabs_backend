@@ -436,8 +436,34 @@ async function priceableSets() {
  * centre told a customer in a state we serve that we do not serve them.
  *
  * So the radius now SELECTS a city rather than gating the trip: the nearest
- * active city wins, and its rate cards price the journey. A pickup inside the
- * requested city keeps using it, so nothing changes for a normal booking.
+ * active city that can actually PRICE the trip wins, and its rate cards price
+ * the journey. A pickup inside the requested city keeps using it, so nothing
+ * changes for a normal booking.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY "NEAREST" ALONE WAS NOT ENOUGH
+ * ---------------------------------------------------------------------------
+ * This used to take the nearest active city unconditionally, with no regard
+ * for whether that city had a single rate card. A city row is created from the
+ * admin panel and `copyFromCityId` is OPTIONAL, so an admin opening Telangana
+ * by adding a Hyderabad row — the obvious, correct-looking thing to do —
+ * produced a city with no rate cards and no statewide Telangana card behind
+ * it.
+ *
+ * Every Hyderabad pickup then resolved to that empty city, the fare-options
+ * query over [city:hyderabad, state:telangana] matched nothing, and
+ * quoteAllClasses returned `options: []` with a 200. The rider app has no way
+ * to tell an empty list from a priced one, so it rendered "No rides available
+ * for this route right now" — geography, for what was a pricing-coverage
+ * problem. The reverse direction (Bengaluru pickup) kept working, because that
+ * pickup is inside Bengaluru's own radius and never reached this function.
+ *
+ * So the nearest city is now the nearest city WITH COVERAGE for the trip type
+ * being priced: its own CITY card, or a STATE card for its state. A pickup in
+ * a serviced state is always priced by something rather than silently falling
+ * into a hole. If nothing anywhere is priced for that trip type, the plain
+ * nearest city is returned and the caller raises FARE_CONFIG_MISSING, which
+ * names the problem instead of hiding it.
  *
  * WHAT THIS DOES NOT SOLVE, and someone should decide on it:
  * dispatch assigns vehicles by cityId. A Mysuru pickup priced against
@@ -446,9 +472,60 @@ async function priceableSets() {
  * exactly right. For a local one it is not, and the answer is a Mysuru city
  * row with its own fleet and rate cards.
  */
-async function resolveOperatingCity(pickupPoint, requestedCity) {
+
+/**
+ * Active cities that have a live rate card for `tripType` — their own, or one
+ * scoped to their state.
+ *
+ * Resolved in JS against a distinct list of scope keys rather than per city,
+ * because the whole point is to answer "which of these twenty cities can quote
+ * an ONE_WAY right now" in one round trip. Cached for the same 50 seconds as
+ * priceableSets, and for the same reason: a rate card added in the admin panel
+ * must become bookable within the minute without a restart, and
+ * invalidateFareConfig clears it explicitly anyway.
+ */
+const PRICED_CITIES_KEY = (tripType) => `fare:pricedcities:v1:${tripType}`;
+
+async function citiesWithPricing(tripType) {
+  return cache.getOrSet(
+    PRICED_CITIES_KEY(tripType),
+    async () => {
+      const [cities, cards] = await Promise.all([
+        prisma.city.findMany({
+          where: { isActive: true },
+          select: { id: true, state: true },
+        }),
+        prisma.fareConfig.findMany({
+          where: { tripType, isActive: true, effectiveFrom: { lte: new Date() } },
+          select: { scopeKey: true },
+          distinct: ['scopeKey'],
+        }),
+      ]);
+
+      const keys = new Set(cards.map((c) => c.scopeKey));
+
+      return cities
+        .filter(
+          (c) =>
+            keys.has(fareLookup.cityScopeKey(c.id)) ||
+            (c.state && keys.has(fareLookup.stateScopeKey(c.state))),
+        )
+        .map((c) => c.id);
+    },
+    { ttl: 50 },
+  );
+}
+
+/**
+ * @param {object}      pickupPoint
+ * @param {object}      requestedCity
+ * @param {string|null} tripType  the product being priced. Omitted only by
+ *   callers that genuinely do not know it yet; without it the old
+ *   nearest-city-wins behaviour applies.
+ */
+async function resolveOperatingCity(pickupPoint, requestedCity, tripType = null) {
   if (maps.isServiceable(pickupPoint, requestedCity).ok) {
-    return { city: requestedCity, switched: false, distanceKm: 0 };
+    return { city: requestedCity, switched: false, distanceKm: 0, pricedFallback: false };
   }
 
   const cities = await cache.getOrSet(
@@ -461,27 +538,48 @@ async function resolveOperatingCity(pickupPoint, requestedCity) {
     throw ApiError.badRequest('No service cities are configured', 'NO_SERVICE_CITY');
   }
 
-  let nearest = null;
-  let nearestKm = Infinity;
+  const ranked = cities
+    .map((candidate) => ({
+      city: candidate,
+      km: geo.haversineKm(pickupPoint, {
+        lat: Number(candidate.centreLat),
+        lng: Number(candidate.centreLng),
+      }),
+    }))
+    .sort((a, b) => a.km - b.km);
 
-  for (const candidate of cities) {
-    const km = geo.haversineKm(pickupPoint, {
-      lat: Number(candidate.centreLat),
-      lng: Number(candidate.centreLng),
-    });
-    if (km < nearestKm) {
-      nearest = candidate;
-      nearestKm = km;
+  let chosen = ranked[0];
+  let pricedFallback = false;
+
+  if (tripType) {
+    const priced = new Set(await citiesWithPricing(tripType));
+    const nearestPriced = ranked.find((r) => priced.has(r.city.id));
+
+    /*
+     * Only overrides when the nearest city genuinely cannot quote. A priced
+     * nearest city is still the nearest city, and skipping past one because a
+     * farther one is "more priced" would reprice trips for no reason.
+     */
+    if (nearestPriced && nearestPriced.city.id !== chosen.city.id) {
+      chosen = nearestPriced;
+      pricedFallback = true;
     }
   }
 
   return {
-    city: nearest,
+    city: chosen.city,
     // True whenever the trip is priced by a city other than the one asked for,
     // so the response can say so rather than a rider wondering why a Mysuru
     // trip quotes Bengaluru rates.
-    switched: nearest.id !== requestedCity.id,
-    distanceKm: Number(nearestKm.toFixed(1)),
+    switched: chosen.city.id !== requestedCity.id,
+    distanceKm: Number(chosen.km.toFixed(1)),
+    /*
+     * True when the geographically nearest city had no rate cards and pricing
+     * fell through to a farther one. Distinct from `switched`, which only says
+     * the city differs from the one the app asked for — this says WHY, and it
+     * is the line to look at when a quote comes back at a surprising rate.
+     */
+    pricedFallback,
   };
 }
 
@@ -597,6 +695,13 @@ async function getCity(cityId) {
  */
 async function invalidatePriceable() {
   await cache.del(PRICEABLE_KEY);
+  /*
+   * The per-trip-type coverage set too. It decides WHICH city prices an
+   * out-of-radius pickup, so a rate card added for a new city has to clear it
+   * — otherwise the city stays invisible to resolveOperatingCity for up to a
+   * minute after the admin can plainly see the card in the panel.
+   */
+  await cache.delByPrefix('fare:pricedcities:v1:');
 }
 
 /**
@@ -975,8 +1080,14 @@ async function getQuote(input) {
    * The state check above already decided whether we operate here. This picks
    * whose rate cards apply, falling back to the nearest active city when the
    * pickup is outside the one the app asked for.
+   *
+   * tripType is passed so an unpriced city cannot be chosen — see
+   * resolveOperatingCity. Note this is the REQUESTED trip type: localSwitch
+   * has not run yet, and it cannot, because it needs the city this call
+   * returns. A switch to HOURLY afterwards is still priced against a city that
+   * was chosen for having cards, which is the property that matters.
    */
-  const operating = await resolveOperatingCity(pickupPoint, city);
+  const operating = await resolveOperatingCity(pickupPoint, city, tripType);
   city = operating.city;
 
   // An outstation request that never leaves the city becomes a local rental
@@ -1042,7 +1153,19 @@ async function getQuote(input) {
 
   /* -- 3. rate card + pure computation -- */
 
-  const config = await getFareConfig(cityId, vehicleClass, effectiveTripType);
+  /*
+   * city.id, NOT the cityId off the request.
+   *
+   * `city` was reassigned to the operating city above. Reading the request's
+   * cityId here meant the fare list and the booking disagreed about who was
+   * pricing the trip: quoteAllClasses already queried the OPERATING city's
+   * scope keys, while this priced the city the app happened to send. For a
+   * Hyderabad pickup sent with cityId=Bengaluru that is two different rate
+   * cards for one journey — the rider is shown one total on the fare screen
+   * and charged against another at booking, and nothing in either response
+   * says why.
+   */
+  const config = await getFareConfig(city.id, vehicleClass, effectiveTripType);
 
   /* -- HOURLY: resolve which rental product is actually being bought -- */
 
@@ -1055,13 +1178,13 @@ async function getQuote(input) {
     // its duration label, then match the same label for the booked class. So
     // "4hr/40km" works whatever class the user chooses.
     const requested = await prisma.rentalPackage.findFirst({
-      where: { id: Number(effectivePackageId), cityId: Number(cityId), isActive: true },
+      where: { id: Number(effectivePackageId), cityId: Number(city.id), isActive: true },
     });
     rentalPackage = requested && requested.vehicleClass === vehicleClass
       ? requested
       : requested
         ? await prisma.rentalPackage.findFirst({
-            where: { cityId: Number(cityId), vehicleClass, label: requested.label, isActive: true },
+            where: { cityId: Number(city.id), vehicleClass, label: requested.label, isActive: true },
           })
         : null;
     if (!rentalPackage) {
@@ -1088,7 +1211,7 @@ async function getQuote(input) {
      */
     rentalPackage = await prisma.rentalPackage.findFirst({
       where: {
-        cityId: Number(cityId),
+        cityId: Number(city.id),
         vehicleClass,
         includedHours: Number(effectiveHours),
         isActive: true,
@@ -1260,9 +1383,11 @@ async function compareTripTypes(input) {
 
   await assertPickupWithinServiceStates(pickupPoint);
 
-  // Same rule as the single-class quote: nearest city prices it, the state
-  // check decides whether we operate here at all.
-  const operating = await resolveOperatingCity(pickupPoint, city);
+  // Same rule as the single-class quote: nearest PRICED city prices it, the
+  // state check decides whether we operate here at all. ONE_WAY is passed as
+  // the coverage trip type because that is the half of the comparison that
+  // must exist for the endpoint to mean anything.
+  const operating = await resolveOperatingCity(pickupPoint, city, 'ONE_WAY');
   city = operating.city;
 
   // This endpoint exists to compare ONE_WAY against ROUND_TRIP for one route.
@@ -1292,8 +1417,8 @@ async function compareTripTypes(input) {
   });
 
   const [oneWayConfig, roundConfig] = await Promise.all([
-    getFareConfig(input.cityId, input.vehicleClass, 'ONE_WAY').catch(() => null),
-    getFareConfig(input.cityId, input.vehicleClass, 'ROUND_TRIP').catch(() => null),
+    getFareConfig(city.id, input.vehicleClass, 'ONE_WAY').catch(() => null),
+    getFareConfig(city.id, input.vehicleClass, 'ROUND_TRIP').catch(() => null),
   ]);
 
   /*
@@ -1419,9 +1544,16 @@ async function quoteAllClasses(input) {
 
   await assertPickupWithinServiceStates(pickupPoint);
 
-  // Same rule as the single-class quote: nearest city prices it, the state
-  // check decides whether we operate here at all.
-  const operating = await resolveOperatingCity(pickupPoint, city);
+  /*
+   * Same rule as the single-class quote: the nearest city that can actually
+   * PRICE this trip type prices it, and the state check above decides whether
+   * we operate here at all.
+   *
+   * input.tripType is what makes the difference between a priced fare list and
+   * the empty one that rendered "No rides available for this route right now"
+   * on every Hyderabad pickup.
+   */
+  const operating = await resolveOperatingCity(pickupPoint, city, input.tripType);
   city = operating.city;
 
   // An outstation request that never leaves the city becomes a local rental.
@@ -1556,11 +1688,11 @@ async function quoteAllClasses(input) {
     // but this endpoint prices every class — so find the chosen package's label
     // and fetch that same product for each class.
     const chosen = await prisma.rentalPackage.findFirst({
-      where: { id: Number(effectivePackageId), cityId: Number(input.cityId), isActive: true },
+      where: { id: Number(effectivePackageId), cityId: Number(city.id), isActive: true },
     });
     const pkgs = chosen
       ? await prisma.rentalPackage.findMany({
-          where: { cityId: Number(input.cityId), label: chosen.label, isActive: true },
+          where: { cityId: Number(city.id), label: chosen.label, isActive: true },
         })
       : [];
     packagesByClass = new Map(pkgs.map((p) => [p.vehicleClass, p]));
@@ -1615,6 +1747,54 @@ async function quoteAllClasses(input) {
   options.sort((a, b) => Number(a.total) - Number(b.total));
 
   /*
+   * AN EMPTY LIST IS A FAILURE, NOT AN ANSWER.
+   *
+   * This used to return `{ options: [] }` with a 200. The rider app cannot
+   * tell that apart from a route nobody drives, so it showed "No rides
+   * available for this route right now" — a sentence about geography for what
+   * is always a configuration problem, on a route the fleet runs daily. It
+   * cost a day to trace, because nothing anywhere logged a reason.
+   *
+   * There are exactly two ways to get here with nothing:
+   *   - the operating city has no live rate card for this trip type, and
+   *     neither does its state (the Hyderabad case: a city row created with no
+   *     `copyFromCityId` and no statewide Telangana card behind it)
+   *   - every card that does exist prices a class retired from
+   *     vehicle_catalog, so nothing is visible to a rider
+   *
+   * Both are fixed in the admin panel, and both need to SAY so. The details
+   * carry the operating city, its state and the scope keys that were queried,
+   * which is everything needed to find the missing card without opening a
+   * database client.
+   */
+  if (!options.length) {
+    throw new ApiError(
+      400,
+      'FARE_CONFIG_MISSING',
+      `No ${String(effectiveTripType).toLowerCase().replace('_', '-')} fares are configured for ` +
+        `${city.name}${city.state ? `, ${city.state}` : ''}. ` +
+        'Add a rate card for this city, or a statewide card for its state.',
+      {
+        cityId: city.id,
+        cityName: city.name,
+        state: city.state || null,
+        tripType: effectiveTripType,
+        requestedTripType: input.tripType,
+        requestedCityId: Number(input.cityId),
+        scopeKeys,
+        /*
+         * How many cards matched before the vehicle_catalog filter. Non-zero
+         * with an empty list means the cards exist and the CLASSES are
+         * retired, which is a different fix in a different screen.
+         */
+        cardsBeforeCatalogFilter: configs.length,
+        switchedCity: operating.switched,
+        pricedFallback: operating.pricedFallback,
+      },
+    );
+  }
+
+  /*
    * TAX, PER OPTION.
    *
    * Attached at quote time so the rider can see what GST is embedded in the
@@ -1655,7 +1835,17 @@ async function quoteAllClasses(input) {
       // What was PRICED, which may differ from what was asked for.
       tripType: effectiveTripType,
       requestedTripType: input.tripType,
+      /*
+       * The city that actually PRICED this list, which is not necessarily the
+       * one the app sent. Returned so the booking call can send it back and
+       * the two steps cannot disagree — and so a surprising rate is traceable
+       * from the response alone.
+       */
+      cityId: city.id,
       cityName: city.name,
+      requestedCityId: Number(input.cityId),
+      switchedCity: operating.switched,
+      pricedFallback: operating.pricedFallback,
       oneWayKm: route.distanceKm,
       totalKm: route.distanceKm * multiplier,
       durationMin: route.durationMin * multiplier,
