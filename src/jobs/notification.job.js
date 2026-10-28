@@ -159,28 +159,50 @@ const TEMPLATES = {
     }),
   },
 
-  // Push-only today: the producer sends no phone number, so the WhatsApp/SMS
-  // leg is skipped. The template name is here for when that channel goes live.
+  /*
+   * THE RIDER'S CONFIRMATION — SENT AT BOOKING, NOT AT ADMIN CONFIRM.
+   *
+   * This type fires from BOOKING_CREATED, the moment the rider finishes
+   * booking in the app. It carries the "Your booking is confirmed!" DLT SMS.
+   *
+   * The admin's confirm step is INTERNAL DISPATCH WORK: it decides which car
+   * goes, not whether the trip is happening. Making the rider wait for it
+   * meant someone could book at 11pm and hear nothing until morning, which
+   * reads as a failed booking. So the rider is told immediately, and
+   * BOOKING_CONFIRMED below has become the internal event.
+   *
+   * `amount` is pre-formatted here rather than in the push copy so the
+   * channels can never quote the rider different numbers. `sms` carries the
+   * DLT template's four variables, already ASCII-clean and length-capped —
+   * the provider substitutes them by name and reformats nothing.
+   */
   BOOKING_RECEIVED: {
-    channel: 'whatsapp',
-    template: 'booking_received',
-    render: (b) => ({ bookingNumber: b.bookingNumber, pickup: b.pickupAddress }),
-  },
-  BOOKING_CONFIRMED: {
     channel: 'sms',
     template: 'booking_confirmed',
-    // `amount` is pre-formatted here rather than in the push/SMS copy so the
-    // channels can never quote the rider different numbers.
-    //
-    // `sms` carries the DLT template's variables, already ASCII-clean and
-    // length-capped. The provider substitutes them by name and does not
-    // reformat anything — so what the rider reads in the text, the push and
-    // the email all come from this one render.
     render: (b) => ({
       bookingNumber: b.bookingNumber,
       pickup: b.pickupAddress,
       amount: emailService.formatAmount(b.finalFare ?? b.estimatedFare),
       sms: bookingConfirmedSmsVars(b),
+    }),
+  },
+
+  /*
+   * The admin's confirm step. NO SMS — the rider already got one at booking,
+   * and a second identical text would read as a duplicate send.
+   *
+   * `booking_confirmed_internal` is deliberately NOT mapped in
+   * notify.provider's SMS_KIND, so this logs rather than sends. Leaving the
+   * type in place keeps the push, the email and the notification record that
+   * ops and the app's notification list rely on.
+   */
+  BOOKING_CONFIRMED: {
+    channel: 'whatsapp',
+    template: 'booking_confirmed_internal',
+    render: (b) => ({
+      bookingNumber: b.bookingNumber,
+      pickup: b.pickupAddress,
+      amount: emailService.formatAmount(b.finalFare ?? b.estimatedFare),
     }),
   },
   DRIVER_ASSIGNED: {
@@ -208,24 +230,35 @@ const PUSH = {
         : `Your trip ${route} starts in about an hour.`,
     };
   },
-  // Honest about where the booking stands: received, awaiting the admin's
-  // confirmation — which arrives as its own "Booking confirmed" push.
-  BOOKING_RECEIVED: (b) => ({
-    title: 'Booking received',
-    body: `We've received your booking ${b.bookingNumber}. We'll notify you as soon as it's confirmed.`,
-  }),
-  BOOKING_CONFIRMED: (b) => {
+  /*
+   * Fires at booking, alongside the confirmation SMS.
+   *
+   * The old copy said "we'll notify you as soon as it's confirmed" — written
+   * when the rider genuinely was waiting on the admin. It cannot stay now
+   * that a text saying "Your booking is confirmed!" lands in the same second;
+   * two channels contradicting each other is worse than either alone.
+   *
+   * The fare goes in the tray so the rider sees the number without opening
+   * anything. A booking with no readable fare gets the shorter line rather
+   * than a push that trails off.
+   */
+  BOOKING_RECEIVED: (b) => {
     const amount = b.params?.amount || null;
     return {
       title: 'Booking confirmed',
-      // The fare in the tray, so the rider sees the number without opening
-      // anything. A booking with no readable fare still gets the old copy
-      // rather than a push that trails off.
       body: amount
-        ? `Your booking ${b.bookingNumber} is confirmed. Estimated fare ${amount}. Details sent to your email.`
+        ? `Your booking ${b.bookingNumber} is confirmed. Estimated fare ${amount}.`
         : `Your booking ${b.bookingNumber} is confirmed.`,
     };
   },
+
+  /*
+   * The admin's confirm step, now INTERNAL. No push — the rider was told at
+   * booking, and a second "Booking confirmed" an hour later invites the
+   * question of which one was real. The trip screen still flips live via
+   * BOOKING_STATUS_CHANGED, and ops still get the notification record.
+   */
+  BOOKING_CONFIRMED: null,
   DRIVER_ASSIGNED: (b) => ({
     title: 'Driver assigned',
     body: `A driver has been assigned to booking ${b.bookingNumber}.`,
@@ -236,8 +269,16 @@ const PUSH = {
   }),
 };
 
-/** Types that also get an email. Keyed so adding one is a line, not a branch. */
-const EMAIL_TYPES = new Set(['BOOKING_CONFIRMED']);
+/**
+ * Types that also get an email. Keyed so adding one is a line, not a branch.
+ *
+ * Moved from BOOKING_CONFIRMED to BOOKING_RECEIVED with the SMS. The three
+ * rider-facing channels now leave together at booking and say the same thing;
+ * leaving the email on the admin's confirm would have had the rider read
+ * "Booking confirmed" twice, hours apart, with the fare breakdown arriving
+ * long after the text that quoted the fare.
+ */
+const EMAIL_TYPES = new Set(['BOOKING_RECEIVED']);
 
 /**
  * The confirmation email.
@@ -430,6 +471,8 @@ async function handle(job) {
     emailResult = await sendConfirmationEmail(bookingId);
   }
 
+
+  
   // One line per notification, in production too. Completed jobs are not
   // logged there (workers/index.js), so without this a notification that ran
   // and one that never ran looked identical in the worker log.
