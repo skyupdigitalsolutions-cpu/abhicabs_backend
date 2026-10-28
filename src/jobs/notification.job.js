@@ -60,7 +60,7 @@ function placeName(address) {
  *      Truncating HERE, deliberately, is better than having the gateway do it
  *      somewhere mid-word or refuse the send outright.
  */
-function smsVar(value, max = 30) {
+function smsVar(value, max = env.msg91.smsVarMax) {
   if (value == null) return '';
   const ascii = String(value)
     .normalize('NFKD')
@@ -72,6 +72,53 @@ function smsVar(value, max = 30) {
     .replace(/\s+/g, ' ')
     .trim();
   return ascii.length > max ? `${ascii.slice(0, max - 1).trim()}.` : ascii;
+}
+
+/**
+ * Segments that carry no information for a rider reading a text: the country,
+ * the state, and a six-digit PIN. Dropping them is what makes room for the
+ * parts that identify the place — "Dasarahalli, Sahakar Nagar" beats
+ * "Bengaluru, Karnataka, India" in the same number of characters.
+ */
+const ADDRESS_NOISE = /^(india|bharat|karnataka|ka|\d{6}|[a-z .]*\s\d{6})$/i;
+
+/**
+ * As much of an address as will fit in one SMS variable.
+ *
+ * placeName (used by the push copy) keeps only the text before the first
+ * comma, which turned "SKYUP Digital Solutions, Dasarahalli Main Road,
+ * Sahakar Nagar, Bengaluru" into just the company name. This keeps adding
+ * comma-separated segments while they fit, so the rider gets the road and the
+ * locality too.
+ *
+ * WHOLE SEGMENTS, NOT A HARD CUT. Truncating the joined string mid-word gives
+ * "SKYUP Digital Solutions, Dasarahal." — the half-word reads like a bug. An
+ * address that overflows simply stops at the last segment that fit.
+ */
+function addressForSms(raw, max = env.msg91.smsVarMax) {
+  if (!raw) return '';
+
+  const seen = new Set();
+  const segments = [];
+  for (const part of String(raw).split(',')) {
+    // A trailing PIN rides along inside a segment ("Bengaluru 560092") as
+    // often as it gets one of its own.
+    const clean = smsVar(part, max).replace(/\s*\b\d{6}\b\s*$/, '').trim();
+    if (!clean || ADDRESS_NOISE.test(clean)) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;   // "Bengaluru, Bengaluru Urban"
+    seen.add(key);
+    segments.push(clean);
+  }
+  if (!segments.length) return '';
+
+  let out = segments[0];
+  for (const segment of segments.slice(1)) {
+    const next = `${out}, ${segment}`;
+    if (next.length > max) break;
+    out = next;
+  }
+  return out;
 }
 
 /** "28 Oct 9:00 am" in India time — short, because it shares a variable. */
@@ -154,11 +201,11 @@ function bookingConfirmedSmsVars(b) {
    * A local rental has no destination; its drop is the pickup again, so the
    * template's "to" slot says so instead of sitting empty.
    */
-  const from = smsVar(placeName(b.pickupAddress)) || 'pickup point';
+  const from = addressForSms(b.pickupAddress) || 'pickup point';
   const to =
     b.tripType === 'HOURLY'
       ? 'local rental'
-      : smsVar(placeName(b.dropAddress)) || 'drop point';
+      : addressForSms(b.dropAddress) || 'drop point';
 
   const values = [
     smsVar(b.bookingNumber),

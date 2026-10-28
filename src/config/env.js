@@ -378,6 +378,20 @@ const env = {
      *
      * Defaults to var1..var6 because that is what MSG91 usually generates.
      */
+    /**
+     * How many characters one template variable may carry.
+     *
+     * DLT's own guidance is 30, and several operators enforce it by rejecting
+     * the message outright — but 30 characters cannot hold a real Bengaluru
+     * address, so the default here is 60 and the limit is tunable without a
+     * deploy. If confirmations start failing or arriving truncated by the
+     * operator rather than by us, set MSG91_SMS_VAR_MAX=30 and the copy falls
+     * back to the short form.
+     *
+     * Longer values also cost money: an SMS part is 160 GSM-7 characters, and
+     * this template's fixed text already fills most of two parts.
+     */
+    smsVarMax: Number(process.env.MSG91_SMS_VAR_MAX || 60),
     bookingVars: (process.env.MSG91_BOOKING_VARS || 'var1,var2,var3,var4,var5,var6')
       .split(',')
       .map((s) => s.trim())
