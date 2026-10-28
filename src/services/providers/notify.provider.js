@@ -11,9 +11,21 @@
  *
  * Contract:
  *   send({ to, channel, template, params }) -> { messageId, status }
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT CHANGED WHEN THE FIRST TEMPLATE WAS APPROVED
+ * ---------------------------------------------------------------------------
+ * `booking_confirmed` is now live on DLT, so msg91 is no longer a stub that
+ * throws. It is still a PARTIAL provider, and that is the important part: only
+ * templates with an approved id send: every other template falls through to
+ * the mock's log line rather than throwing. The old behaviour — throw on
+ * everything — meant that turning NOTIFY_PROVIDER=msg91 on for the one working
+ * template would have broken the driver-assigned and cancellation legs at the
+ * same moment.
  */
 
 const env = require('../../config/env');
+const smsService = require('../sms.service');
 
 const mock = {
   name: 'mock',
@@ -24,18 +36,52 @@ const mock = {
   },
 };
 
-// MSG91 stub — real integration once DLT templates are approved. Kept thin: the
-// mock already proved the surrounding pipeline.
+/**
+ * Template name (as used by notification.job) -> the sms.service kind that
+ * holds its DLT id. A template absent here, or present with no id configured,
+ * is not sendable by MSG91 yet.
+ */
+const SMS_KIND = {
+  booking_confirmed: 'BOOKING_CONFIRMED',
+};
+
 const msg91 = {
   name: 'msg91',
   async send({ to, channel, template, params }) {
-    if (!env.msg91.authKey) {
-      throw new Error('[notify:msg91] MSG91_AUTH_KEY not set');
+    const kind = SMS_KIND[template];
+
+    /*
+     * NOT APPROVED YET -> MOCK, NOT AN EXCEPTION.
+     *
+     * driver_assigned, booking_cancelled, trip_reminder and booking_received
+     * have no DLT template behind them. Throwing here would turn every one of
+     * them into a logged failure the moment MSG91 went live for bookings, and
+     * (worse) a retry storm in the notifications queue. Logging it keeps the
+     * pipeline honest about what did and did not go out.
+     */
+    if (!kind || !smsService.isConfigured(kind)) {
+      const why = kind
+        ? `missing ${smsService.missingConfig(kind).join(', ')}`
+        : 'no DLT template mapped';
+      console.warn(`[notify:msg91] ${template} not sendable (${why}) — logging instead`);
+      return mock.send({ to, channel, template, params });
     }
-    // Placeholder: POST to MSG91 flow/SMS API with authKey + template. Left
-    // unimplemented until DLT approval; the factory falls back to mock so this
-    // never runs without credentials.
-    throw new Error('[notify:msg91] not implemented yet — awaiting DLT approval');
+
+    /*
+     * The variables come from the job's render step, already ASCII-clean and
+     * capped at the DLT per-variable length. A template that is mapped above
+     * but whose params carry no `sms` block is a bug in that render, not a
+     * reason to send a half-filled message: MSG91 would substitute nothing and
+     * the rider would get a text with literal ##var2## in it.
+     */
+    const vars = params?.sms;
+    if (!vars) {
+      console.error(`[notify:msg91] ${template} carried no sms vars — not sending`);
+      return { messageId: null, status: 'SKIPPED' };
+    }
+
+    const result = await smsService.sendTemplate({ kind, phone: to, vars });
+    return { messageId: result.requestId, status: 'SENT', to: result.to };
   },
 };
 

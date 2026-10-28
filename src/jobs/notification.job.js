@@ -43,6 +43,107 @@ function placeName(address) {
   return head.length > 1 ? head : String(address);
 }
 
+/* ---------------- formatting for the DLT SMS copy ---------------- */
+
+/**
+ * An SMS variable as DLT and the GSM-7 alphabet will actually accept it.
+ *
+ * TWO CONSTRAINTS, BOTH SILENT WHEN BROKEN:
+ *
+ *   1. One non-GSM character anywhere in the body — "₹", a curly quote, an
+ *      en dash, a Kannada or Devanagari place name — flips the whole message
+ *      to UCS-2. That halves the per-part length to 70 characters and bills
+ *      accordingly, and some operators drop the message rather than re-encode
+ *      it. So everything here is stripped to plain ASCII.
+ *   2. Operators reject or truncate a variable longer than 30 characters.
+ *      Truncating HERE, deliberately, is better than having the gateway do it
+ *      somewhere mid-word or refuse the send outright.
+ */
+function smsVar(value, max = 30) {
+  if (value == null) return '';
+  const ascii = String(value)
+    .normalize('NFKD')
+    // Curly quotes / dashes that sneak in from addresses and admin input.
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2010-\u2015]/g, '-')
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return ascii.length > max ? `${ascii.slice(0, max - 1).trim()}.` : ascii;
+}
+
+/** "28 Oct 9:00 am" in India time — short, because it shares a variable. */
+function istShort(date) {
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return null;
+  return d
+    .toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      day: '2-digit',
+      month: 'short',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    })
+    .replace(/,/g, '');
+}
+
+/**
+ * "2,450.00" — the same number emailService.formatAmount produces, WITHOUT the
+ * rupee sign. The approved template already prints "Rs.", and "₹" is not in
+ * GSM-7 (see smsVar).
+ */
+function plainAmount(value) {
+  const formatted = emailService.formatAmount(value);
+  return formatted ? formatted.replace(/^₹/, '') : null;
+}
+
+/**
+ * The four variables of the approved booking-confirmed template, in order:
+ *
+ *   Booking ID: ##var1##
+ *   Trip details: ##var2##
+ *   Scheduled date and vehicle: ##var3##
+ *   Estimated fare: Rs. ##var4##
+ *
+ * Returns null when the fare cannot be read — a confirmation SMS quoting a
+ * blank or "NaN" fare is worse than no SMS, and the push and email still go.
+ */
+function bookingConfirmedSmsVars(b) {
+  const amount = plainAmount(b.finalFare ?? b.estimatedFare);
+  if (!amount) return null;
+
+  /*
+   * "Koramangala to Mysuru Palace" has to fit in ONE 30-character variable,
+   * so the two ends share the budget — 13 each, plus " to ". Truncating the
+   * joined string instead would spend the whole allowance on the pickup and
+   * leave the rider's destination as a full stop.
+   *
+   * A place name can also come back empty: smsVar strips non-ASCII, and an
+   * address stored entirely in Kannada or Devanagari reduces to "". Hence the
+   * fallbacks — a vague "Pickup to drop" beats "Local rental from".
+   */
+  const from = smsVar(placeName(b.pickupAddress), 13) || 'pickup';
+  const to = b.tripType === 'HOURLY' ? null : smsVar(placeName(b.dropAddress), 13);
+  const trip = to
+    ? `${from} to ${to}`
+    : b.tripType === 'HOURLY'
+      ? `Local rental, ${from}`
+      : `Pickup at ${from}`;
+
+  const when = istShort(b.pickupAt);
+  const vehicle = b.vehicleClass || '';
+  const schedule = [when, vehicle].filter(Boolean).join(', ');
+
+  return {
+    var1: smsVar(b.bookingNumber),
+    var2: smsVar(trip),
+    var3: smsVar(schedule),
+    var4: smsVar(amount),
+  };
+}
+
 const TEMPLATES = {
   // Sent ~1 hour before pickup by the trip-reminder sweeper (jobs/scheduled).
   // Push-only today — the sweeper sends no phone number.
@@ -66,14 +167,20 @@ const TEMPLATES = {
     render: (b) => ({ bookingNumber: b.bookingNumber, pickup: b.pickupAddress }),
   },
   BOOKING_CONFIRMED: {
-    channel: 'whatsapp',
+    channel: 'sms',
     template: 'booking_confirmed',
-    // `amount` is pre-formatted here rather than in the push/WhatsApp copy so
-    // the two channels can never quote the rider different numbers.
+    // `amount` is pre-formatted here rather than in the push/SMS copy so the
+    // channels can never quote the rider different numbers.
+    //
+    // `sms` carries the DLT template's variables, already ASCII-clean and
+    // length-capped. The provider substitutes them by name and does not
+    // reformat anything — so what the rider reads in the text, the push and
+    // the email all come from this one render.
     render: (b) => ({
       bookingNumber: b.bookingNumber,
       pickup: b.pickupAddress,
       amount: emailService.formatAmount(b.finalFare ?? b.estimatedFare),
+      sms: bookingConfirmedSmsVars(b),
     }),
   },
   DRIVER_ASSIGNED: {
@@ -207,23 +314,43 @@ async function handle(job) {
         // route and the pickup time.
         // estimatedFare / finalFare: BOOKING_CONFIRMED quotes the amount in
         // the push and the WhatsApp params.
+        // vehicleClass / guestPhone / customer.user.phone: the confirmation
+        // SMS names the vehicle and needs somewhere to send the text.
         select: {
           bookingNumber: true,
           pickupAddress: true,
           dropAddress: true,
           pickupAt: true,
           tripType: true,
+          vehicleClass: true,
           estimatedFare: true,
           finalFare: true,
           customerId: true,
+          guestPhone: true,
+          customer: { select: { user: { select: { phone: true } } } },
         },
       });
       if (!booking) throw new Error(`[notification] booking ${bookingId} not found`);
 
+      /*
+       * THE PHONE IS RESOLVED HERE, NOT TAKEN FROM THE JOB.
+       *
+       * Producers pass `to: p.customerPhone`, and nothing emits customerPhone —
+       * lifecycle.confirm emits bookingId / bookingNumber / customerId /
+       * pickupAt and no number. So `to` was always null and the SMS leg below
+       * never ran, for any type. Reading the number from the booking makes
+       * every notification type work regardless of what its producer happens
+       * to put on the event; a producer that DOES send one still wins.
+       *
+       * guestPhone first: on a guest booking the user row deliberately has no
+       * phone, and the booking is the only place the rider's number exists.
+       */
+      const phone = to || booking.guestPhone || booking.customer?.user?.phone || null;
+
       return {
         bookingNumber: booking.bookingNumber,
         customerId: booking.customerId, // == User.id — the push target
-        to: to || null,
+        to: phone,
         channel: tpl.channel,
         template: tpl.template,
         params: tpl.render({ ...booking, ...extra }),
@@ -255,13 +382,21 @@ async function handle(job) {
   //    throws, so NOTIFY_PROVIDER=msg91 plus an auth key (now set for login
   //    SMS) would have silently killed every push. A failure here is logged
   //    and the push still goes out.
+  let sendResult = null;
   if (rec.to) {
     try {
       const provider = notifyProvider.getProvider();
-      await provider.send({ to: rec.to, channel: rec.channel, template: rec.template, params: rec.params });
+      sendResult = await provider.send({
+        to: rec.to,
+        channel: rec.channel,
+        template: rec.template,
+        params: rec.params,
+      });
     } catch (err) {
       console.error(`[notification] ${rec.channel} failed for ${type} ${bookingId}: ${err.message}`);
     }
+  } else {
+    console.warn(`[notification] ${type} ${rec.bookingNumber}: no phone on the booking — ${rec.channel} skipped`);
   }
 
   // 2) FCM push to the customer's devices. Independent of the phone channel and
@@ -300,6 +435,9 @@ async function handle(job) {
   // and one that never ran looked identical in the worker log.
   console.log(
     `[notification] ${type} ${rec.bookingNumber} -> ` +
+      (sendResult
+        ? `${rec.channel} ${sendResult.status}${sendResult.messageId ? ` (${sendResult.messageId})` : ''} | `
+        : rec.to ? `${rec.channel} FAILED | ` : '') +
       (pushResult ? `push ${JSON.stringify(pushResult)}` : 'no push for this type') +
       (emailResult
         ? ` | email ${emailResult.skipped ? emailResult.reason : emailResult.failed ? 'FAILED' : 'sent'}`

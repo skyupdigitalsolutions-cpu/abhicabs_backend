@@ -355,6 +355,17 @@ const env = {
      * not a deploy.
      */
     otpVar: process.env.MSG91_OTP_VAR || 'var1',
+    /**
+     * The DLT-approved "booking confirmed" SMS template id, from
+     * MSG91 -> SMS -> Templates — a different template, and a different id,
+     * from the login one above.
+     *
+     * Its four variables are filled by name (var1..var4) in
+     * notification.job -> sms.service. Leaving this empty turns the
+     * confirmation SMS off and nothing else: the push and the email still go,
+     * and the notify provider logs the message instead of sending it.
+     */
+    bookingTemplateId: process.env.MSG91_BOOKING_TEMPLATE_ID || '',
     // The sender id is bound to the template inside MSG91 and is not sent per
     // request.
     senderId: process.env.MSG91_SENDER_ID || '',

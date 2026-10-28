@@ -60,11 +60,22 @@ const FLOW_API = 'https://control.msg91.com/api/v5/flow';
  */
 const OTP_VAR = () => env.msg91.otpVar || 'var1';
 
-/** Which templates are usable. */
+/**
+ * Which templates are usable, and the env var that holds each id.
+ *
+ * One entry per DLT-approved template. Both go through the same flow API — the
+ * only difference between a login code and a booking confirmation is the id
+ * and which variables the approved text carries.
+ *
+ * The trip start code is NOT here: it is shown in the rider's app only
+ * (tripOtp.issue), never texted.
+ */
 const TEMPLATES = {
-  LOGIN: () => env.msg91.templateId,
-  // The trip start code is NOT sent by SMS — it is shown in the rider's app
-  // only (tripOtp.issue). Add a kind here if another SMS is ever needed.
+  LOGIN: { id: () => env.msg91.templateId, envVar: 'MSG91_OTP_TEMPLATE_ID' },
+  BOOKING_CONFIRMED: {
+    id: () => env.msg91.bookingTemplateId,
+    envVar: 'MSG91_BOOKING_TEMPLATE_ID',
+  },
 };
 
 /**
@@ -74,14 +85,15 @@ const TEMPLATES = {
 function missingConfig(kind = 'LOGIN') {
   const missing = [];
   if (!env.msg91.authKey) missing.push('MSG91_AUTH_KEY');
-  if (kind === 'LOGIN' && !env.msg91.templateId) missing.push('MSG91_OTP_TEMPLATE_ID');
+  const tpl = TEMPLATES[kind];
+  if (tpl && !tpl.id()) missing.push(tpl.envVar);
   return missing;
 }
 
 /** True when an SMS of this kind can actually be sent. */
 function isConfigured(kind = 'LOGIN') {
-  const template = TEMPLATES[kind] ? TEMPLATES[kind]() : '';
-  return Boolean(env.msg91.authKey && template);
+  const tpl = TEMPLATES[kind];
+  return Boolean(env.msg91.authKey && tpl && tpl.id());
 }
 
 /**
@@ -103,25 +115,27 @@ function maskPhone(raw) {
 }
 
 /**
- * Send one code by SMS.
+ * Send one templated SMS.
+ *
+ * THE ONE PLACE THAT TALKS TO MSG91. A login code and a booking confirmation
+ * differ only in the template id and the variables; everything that is easy to
+ * get wrong — the flow API, the auth key in a header, "a 200 is not success",
+ * the masked log line — is written once, here.
  *
  * @param {object} p
- * @param {'LOGIN'} p.kind              selects the DLT template
- * @param {string} p.phone               any format; normalised here
- * @param {string} p.code                the code WE generated
- * @param {number} [p.expiryMinutes]     IGNORED on the flow API — expiry is
- *                                       baked into the approved template text
- *                                       ("Valid for 5 minutes"). Kept in the
- *                                       signature so callers need no change,
- *                                       and because WE enforce the real expiry
- *                                       in otp.service regardless of what the
- *                                       message claims.
- * @param {object} [p.vars]              extra template variables, if the
- *                                       approved text has any besides the code
+ * @param {'LOGIN'|'BOOKING_CONFIRMED'} p.kind  selects the DLT template
+ * @param {string} p.phone                       any format; normalised here
+ * @param {object} p.vars                        the template's variables, BY
+ *                                               THE TEMPLATE'S OWN NAMES
+ *                                               (var1, var2, ...). MSG91
+ *                                               matches on the name: a
+ *                                               mismatch substitutes nothing
+ *                                               and sends a literal ##var1##,
+ *                                               or nothing at all.
  * @returns {Promise<{ to: string, requestId: string|null }>}
  * @throws on any failure — callers decide whether that is fatal
  */
-async function sendOtp({ kind = 'LOGIN', phone, code, vars } = {}) {
+async function sendTemplate({ kind, phone, vars } = {}) {
   if (!isConfigured(kind)) {
     throw new Error(`MSG91 ${kind} SMS is not configured`);
   }
@@ -137,13 +151,15 @@ async function sendOtp({ kind = 'LOGIN', phone, code, vars } = {}) {
    * sends a message with a literal ##var1## in it, or none at all.
    */
   const payload = {
-    template_id: TEMPLATES[kind](),
+    template_id: TEMPLATES[kind].id(),
     recipients: [
       {
         mobiles: `${env.msg91.countryCode}${mobile}`,
-        [OTP_VAR()]: String(code),
-        // Any extra variables the approved text carries besides the code.
-        ...(vars || {}),
+        // Stringified: MSG91 drops a numeric variable on some templates, and
+        // a fare sent as a number would also lose its formatting.
+        ...Object.fromEntries(
+          Object.entries(vars || {}).map(([k, v]) => [k, String(v ?? '')]),
+        ),
       },
     ],
   };
@@ -196,4 +212,46 @@ async function sendOtp({ kind = 'LOGIN', phone, code, vars } = {}) {
   return { to: maskPhone(mobile), requestId: body.request_id || null, raw: body };
 }
 
-module.exports = { sendOtp, isConfigured, missingConfig, indianMobile, maskPhone };
+/**
+ * The login code. Unchanged signature — otp.service calls this exactly as
+ * before; only the plumbing underneath moved into sendTemplate.
+ *
+ * `expiryMinutes` is still IGNORED on the flow API: expiry is baked into the
+ * approved template text ("Valid for 5 minutes"), and WE enforce the real
+ * expiry in otp.service regardless of what the message claims.
+ */
+async function sendOtp({ kind = 'LOGIN', phone, code, vars } = {}) {
+  return sendTemplate({
+    kind,
+    phone,
+    vars: { [OTP_VAR()]: String(code), ...(vars || {}) },
+  });
+}
+
+/**
+ * "Your booking is confirmed" — the DLT template:
+ *
+ *   Abhi Cabs: Your booking is confirmed!
+ *   Booking ID: ##var1##
+ *   Trip details: ##var2##
+ *   Scheduled date and vehicle: ##var3##
+ *   Estimated fare: Rs. ##var4##
+ *   ...
+ *
+ * The variables arrive already ASCII-clean and length-capped from
+ * notification.job — this function does not reformat them, so what the SMS
+ * says and what the push says cannot drift.
+ */
+async function sendBookingConfirmed({ phone, vars } = {}) {
+  return sendTemplate({ kind: 'BOOKING_CONFIRMED', phone, vars });
+}
+
+module.exports = {
+  sendTemplate,
+  sendOtp,
+  sendBookingConfirmed,
+  isConfigured,
+  missingConfig,
+  indianMobile,
+  maskPhone,
+};
