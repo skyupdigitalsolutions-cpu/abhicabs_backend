@@ -366,6 +366,22 @@ const env = {
      * and the notify provider logs the message instead of sending it.
      */
     bookingTemplateId: process.env.MSG91_BOOKING_TEMPLATE_ID || '',
+    /**
+     * The VARIABLE NAMES of that template, in the order the message reads
+     * them: booking id, pickup, drop, date, vehicle, fare.
+     *
+     * MSG91 substitutes by name. A name that is not in the approved template
+     * fills nothing and the SMS arrives with empty fields while the fixed text
+     * comes through perfectly — which is exactly how a wrong value here looks
+     * in the wild, so it is worth checking against the panel rather than
+     * assuming. MSG91 -> SMS -> Templates shows the names on the body.
+     *
+     * Defaults to var1..var6 because that is what MSG91 usually generates.
+     */
+    bookingVars: (process.env.MSG91_BOOKING_VARS || 'var1,var2,var3,var4,var5,var6')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     // The sender id is bound to the template inside MSG91 and is not sent per
     // request.
     senderId: process.env.MSG91_SENDER_ID || '',

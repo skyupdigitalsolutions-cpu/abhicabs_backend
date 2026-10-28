@@ -16,6 +16,7 @@
  */
 
 const { prisma } = require('../config/prisma');
+const env = require('../config/env');
 const { runOnce } = require('./runOnce');
 const notifyProvider = require('../services/providers/notify.provider');
 const pushService = require('../services/push.service');
@@ -110,38 +111,75 @@ function plainAmount(value) {
  * Returns null when the fare cannot be read — a confirmation SMS quoting a
  * blank or "NaN" fare is worse than no SMS, and the push and email still go.
  */
+/**
+ * The variable NAMES this template uses, in the order the message reads them.
+ *
+ * MSG91 matches variables BY NAME, not by position — a name that is not in the
+ * approved template substitutes nothing, which is why the first live message
+ * arrived with every field blank while the fixed text came through intact.
+ *
+ * The names belong to whatever MSG91 generated when the DLT template was
+ * imported, not to this code, so they are an env var: open the template in
+ * MSG91 -> SMS -> Templates, read the six names off the body, and set
+ * MSG91_BOOKING_VARS to them in this order:
+ *
+ *   booking id, pickup, drop, date, vehicle, fare
+ */
+const BOOKING_SMS_VARS = () => env.msg91.bookingVars;
+
+/**
+ * The six values of the approved booking-confirmed template:
+ *
+ *   Booking ID: ##1##
+ *   Trip: ##2## to ##3##
+ *   Date: ##4##
+ *   Vehicle: ##5##
+ *   Estimated fare: Rs. ##6##
+ *
+ * Each sits in its OWN variable, so each gets the full 30-character DLT
+ * allowance — the pickup and drop no longer have to share one.
+ *
+ * Returns null when the fare cannot be read: a confirmation quoting a blank
+ * fare is worse than no SMS, and the push and email still go out.
+ */
 function bookingConfirmedSmsVars(b) {
   const amount = plainAmount(b.finalFare ?? b.estimatedFare);
   if (!amount) return null;
 
   /*
-   * "Koramangala to Mysuru Palace" has to fit in ONE 30-character variable,
-   * so the two ends share the budget — 13 each, plus " to ". Truncating the
-   * joined string instead would spend the whole allowance on the pickup and
-   * leave the rider's destination as a full stop.
+   * A place name can come back empty — smsVar strips non-ASCII, so an address
+   * stored entirely in Kannada or Devanagari reduces to "". The fallbacks keep
+   * the line readable rather than printing "Trip:  to Mysuru".
    *
-   * A place name can also come back empty: smsVar strips non-ASCII, and an
-   * address stored entirely in Kannada or Devanagari reduces to "". Hence the
-   * fallbacks — a vague "Pickup to drop" beats "Local rental from".
+   * A local rental has no destination; its drop is the pickup again, so the
+   * template's "to" slot says so instead of sitting empty.
    */
-  const from = smsVar(placeName(b.pickupAddress), 13) || 'pickup';
-  const to = b.tripType === 'HOURLY' ? null : smsVar(placeName(b.dropAddress), 13);
-  const trip = to
-    ? `${from} to ${to}`
-    : b.tripType === 'HOURLY'
-      ? `Local rental, ${from}`
-      : `Pickup at ${from}`;
+  const from = smsVar(placeName(b.pickupAddress)) || 'pickup point';
+  const to =
+    b.tripType === 'HOURLY'
+      ? 'local rental'
+      : smsVar(placeName(b.dropAddress)) || 'drop point';
 
-  const when = istShort(b.pickupAt);
-  const vehicle = b.vehicleClass || '';
-  const schedule = [when, vehicle].filter(Boolean).join(', ');
+  const values = [
+    smsVar(b.bookingNumber),
+    from,
+    to,
+    smsVar(istShort(b.pickupAt)),
+    smsVar(b.vehicleClass),
+    smsVar(amount),
+  ];
 
-  return {
-    var1: smsVar(b.bookingNumber),
-    var2: smsVar(trip),
-    var3: smsVar(schedule),
-    var4: smsVar(amount),
-  };
+  // Zipped against the configured names. A short MSG91_BOOKING_VARS silently
+  // dropping the last fields is the one failure mode worth shouting about.
+  const names = BOOKING_SMS_VARS();
+  if (names.length < values.length) {
+    console.error(
+      `[notification] MSG91_BOOKING_VARS has ${names.length} names but the ` +
+        `template needs ${values.length} — the SMS will arrive incomplete`,
+    );
+  }
+
+  return Object.fromEntries(values.map((value, i) => [names[i] || `var${i + 1}`, value]));
 }
 
 const TEMPLATES = {
@@ -471,8 +509,6 @@ async function handle(job) {
     emailResult = await sendConfirmationEmail(bookingId);
   }
 
-
-  
   // One line per notification, in production too. Completed jobs are not
   // logged there (workers/index.js), so without this a notification that ran
   // and one that never ran looked identical in the worker log.

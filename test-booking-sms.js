@@ -47,13 +47,14 @@ const mask = (v) => (v ? `${String(v).slice(0, 4)}…${String(v).slice(-4)} (${S
     );
   }
 
-  // Shaped exactly like notification.job builds them: ASCII only, <= 30 chars.
-  const vars = {
-    var1: 'TEST-0000',
-    var2: 'Koramangala to Mysuru',
-    var3: '29 Oct 9:00 am, SEDAN',
-    var4: '4,250.00',
-  };
+  // Shaped exactly like notification.job builds them: ASCII only, <= 30 chars,
+  // keyed by the names in MSG91_BOOKING_VARS and in the template's own order:
+  // booking id, pickup, drop, date, vehicle, fare.
+  const values = ['TEST-0000', 'Koramangala', 'Mysuru', '29 Oct 9:00 am', 'swift-dzire', '4,250.00'];
+  const names = env.msg91.bookingVars;
+  const vars = Object.fromEntries(values.map((v, i) => [names[i] || `var${i + 1}`, v]));
+
+  console.log('MSG91_BOOKING_VARS        ', names.join(', '));
 
   console.log(`\nSending to ${sms.maskPhone(phone)} with:`);
   console.log(vars);
