@@ -204,12 +204,24 @@ async function sendTemplate({ kind, phone, vars } = {}) {
   // mismatch is the usual reason), and that failure never comes back to this
   // server. The request_id is what to search for in MSG91 -> Reports to see
   // what actually happened to the message.
+  /*
+   * THE FLOW API PUTS THE REQUEST ID IN `message`.
+   *
+   * The OTP API returns { type, request_id }; the flow API returns
+   * { type: "success", message: "366a42707a416f6641394269" } — the same
+   * identifier under a different key. Reading only request_id logged "none
+   * returned" on every send and threw away the one handle that MSG91 ->
+   * Reports searches on, which is exactly what you need when a message is
+   * accepted here and then dropped by the operator.
+   */
+  const requestId = body.request_id || body.message || null;
+
   console.log(
     `[sms] MSG91 accepted ${kind} SMS to ${maskPhone(mobile)} ` +
-      `(request_id ${body.request_id || 'none returned'})`,
+      `(request_id ${requestId || 'none returned'})`,
   );
 
-  return { to: maskPhone(mobile), requestId: body.request_id || null, raw: body };
+  return { to: maskPhone(mobile), requestId, raw: body };
 }
 
 /**
