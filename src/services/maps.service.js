@@ -57,10 +57,24 @@ const TTL = {
   AIRPORTS: 30 * 24 * 3600,   // 30 days
 };
 
+/*
+ * VERSIONED, and v2 for a reason.
+ *
+ * Geocodes live for 30 DAYS. `city` was just added to the provider responses
+ * so local-trip detection can tell Hyderabad->Hyderabad from an outstation
+ * run, and every entry written before today has no `city` key at all. Without
+ * a version bump those entries keep being served for a month and the fix
+ * appears to work only for addresses nobody has looked up recently — the
+ * worst possible failure, because it looks intermittent.
+ *
+ * Bumping orphans them instantly. The cost is one round of re-geocoding as
+ * the hot addresses are touched again; the alternative is a month of
+ * unexplainable behaviour.
+ */
 const keys = {
   geocode: (address) =>
-    `maps:geo:${crypto.createHash('sha1').update(String(address).toLowerCase().trim()).digest('hex').slice(0, 16)}`,
-  reverse: (lat, lng) => `maps:rev:${geo.coordKey({ lat, lng })}`,
+    `maps:geo:v2:${crypto.createHash('sha1').update(String(address).toLowerCase().trim()).digest('hex').slice(0, 16)}`,
+  reverse: (lat, lng) => `maps:rev:v2:${geo.coordKey({ lat, lng })}`,
   distance: (o, d) => `maps:dm:${geo.coordKey(o)}:${geo.coordKey(d)}`,
   autocomplete: (q) => `maps:ac:${String(q).toLowerCase().trim().slice(0, 40)}`,
   // Version the prefix. These entries live for 30 days, so a filtering fix

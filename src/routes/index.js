@@ -31,6 +31,7 @@ router.get('/', (req, res) => {
       fareConfigs: '/api/v1/admin/fare-configs',
       cities: '/api/v1/admin/cities',
       surge: '/api/v1/admin/surge',
+      gstConfigs: '/api/v1/admin/gst-configs',
       temporaryDrivers: '/api/v1/admin/temporary-drivers',
       discounts: '/api/v1/admin/discounts',
       guest: '/api/v1/guest',
@@ -84,6 +85,17 @@ router.use('/admin/cities', apiLimiter, require('./city.routes'));
 // Area tiers and surge percentages. Same permission as rate cards — both
 // change what a customer pays.
 router.use('/admin/surge', apiLimiter, require('./surge.routes'));
+
+/*
+ * GST registrations. Same permission as rate cards, and for the same reason:
+ * flipping is_inclusive on one of these rows moves every corporate fare by
+ * the tax rate.
+ *
+ * This table shipped with a migration and NO API — which is why the Telangana
+ * registration the client holds was never added and a Hyderabad pickup
+ * silently issued a bill of supply with no GSTIN on it.
+ */
+router.use('/admin/gst-configs', apiLimiter, require('./gstConfig.routes'));
 
 // Hired-in drivers and their vehicles, for when demand outruns the fleet.
 router.use('/admin/temporary-drivers', apiLimiter, require('./temporaryDriver.routes'));

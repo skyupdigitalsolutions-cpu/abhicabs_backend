@@ -104,6 +104,184 @@ async function getMyAccount(userId) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Add GST  (the one-field door)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Attach a GSTIN to the signed-in customer and make tax actually apply.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT WAS BROKEN
+ * ---------------------------------------------------------------------------
+ * Storing a GSTIN on a RETAIL customer does nothing. gst_config.apply_retail
+ * is false and apply_corporate is true, so resolveRate returns NO_TAX for a
+ * retail account whatever number is on it. The website's "Add GST" could
+ * therefore succeed against PATCH /customers/me, show a tick, and produce no
+ * GST on the fare screen and no tax lines on the invoice — with nothing
+ * anywhere saying why.
+ *
+ * Adding a GSTIN is a statement that these trips are a business expense. So
+ * this does the whole thing: stores the number AND moves the account to
+ * CORPORATE, which is the only state in which tax is charged.
+ *
+ * ---------------------------------------------------------------------------
+ * THE BILLING STATE COMES FROM THE GSTIN
+ * ---------------------------------------------------------------------------
+ * The first two digits of a GSTIN are the state code — that is what the
+ * number IS. Asking the customer to type the state as well creates a field
+ * that can contradict the number, which is the mismatch
+ * assertGstinMatchesState exists to warn about. Derive it instead.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THIS DELIBERATELY DOES NOT DO
+ * ---------------------------------------------------------------------------
+ * It does not hand over an existing company. If the GSTIN already belongs to
+ * a corporate account, the customer is told to ask their administrator —
+ * joining a company is that company's decision, not one made by a stranger
+ * who knows the right fifteen characters. Same rule as registerCorporate,
+ * and for the same reason.
+ *
+ * SECURITY NOTE, same as registerCorporate's: the GSTIN is format-checked,
+ * not verified against the tax authority, and a corporate account starts with
+ * uncapped post-paid credit (STARTER_CREDIT_LIMIT = 0 reads as unlimited).
+ * This door therefore inherits that exposure. Gate both behind GSTIN
+ * verification or a non-zero starter cap before this is heavily used.
+ */
+async function addGstin(userId, input, meta = {}) {
+  const customer = await customerService.findOrCreate(userId);
+  const gstin = String(input.gstin || '').trim().toUpperCase();
+
+  const billingState = corporateService.stateFromGstin(gstin);
+  if (!billingState) {
+    throw ApiError.badRequest(
+      `${gstin.slice(0, 2)} is not a valid GST state code.`,
+      'GSTIN_STATE_UNKNOWN',
+    );
+  }
+
+  /* -- already corporate: just record the number on the profile -- */
+
+  if (customer.accountType === 'CORPORATE' && customer.corporateAccountId) {
+    await prisma.customer.update({ where: { userId }, data: { gstin } });
+    return {
+      accountType: 'CORPORATE',
+      corporateStatus: 'ACTIVE',
+      gstin,
+      billingState,
+      message: 'GST number saved. Your trips are billed with GST.',
+    };
+  }
+
+  /* -- the GSTIN already belongs to somebody -- */
+
+  const existing = await prisma.corporateAccount.findUnique({
+    where: { gstin },
+    select: { id: true, companyName: true },
+  });
+  if (existing) {
+    throw ApiError.conflict(
+      `${existing.companyName} is already registered under this GST number. ` +
+        'Ask your company administrator to add you to it.',
+      'CORPORATE_ALREADY_REGISTERED',
+    );
+  }
+
+  const companyName = (input.companyName || '').trim() || `GSTIN ${gstin}`;
+  const activate = !REQUIRE_ADMIN_APPROVAL;
+
+  const corporate = await prisma.$transaction(async (tx) => {
+    const created = await tx.corporateAccount.create({
+      data: {
+        companyName,
+        gstin,
+        /*
+         * The billing address fields are NOT NULL on the table and the
+         * website's Add GST form has none of them. A placeholder keeps the
+         * row valid and is visibly a placeholder on the invoice, which is
+         * what prompts someone to fill it in — the alternative is refusing
+         * the whole feature over an address nobody was asked for.
+         */
+        billingEmail: input.billingEmail || null,
+        billingAddress: input.billingAddress || 'Address not provided',
+        billingCity: '',
+        billingState,
+        billingPincode: '',
+        billingCycle: 'PER_TRIP',
+        creditLimit: STARTER_CREDIT_LIMIT,
+        creditUsed: 0,
+        isActive: activate,
+      },
+      select: SELF_CORPORATE_SELECT,
+    });
+
+    await tx.customer.update({
+      where: { userId },
+      data: {
+        corporateAccountId: created.id,
+        accountType: activate ? 'CORPORATE' : 'RETAIL',
+        // On the customer too, so billing.service can fall back to it for a
+        // rider who has a GSTIN but no company.
+        gstin,
+      },
+    });
+
+    return created;
+  });
+
+  await audit.record(prisma, {
+    actor: { id: userId },
+    action: 'CORPORATE_GSTIN_ADDED',
+    entityType: 'CorporateAccount',
+    entityId: corporate.id,
+    after: { gstin, companyName, billingState, isActive: activate },
+    meta,
+  });
+
+  return {
+    accountType: activate ? 'CORPORATE' : 'RETAIL',
+    corporateStatus: activate ? 'ACTIVE' : 'PENDING',
+    gstin,
+    billingState,
+    corporate,
+    message: activate
+      ? 'GST number added. Your trips are now billed with GST.'
+      : 'GST number added. It applies once our team verifies the details.',
+  };
+}
+
+/**
+ * Remove the GSTIN. Retail from the next booking.
+ *
+ * Detaches rather than deleting the company, because an invoice already
+ * issued against it must keep resolving.
+ */
+async function removeGstin(userId, meta = {}) {
+  const customer = await customerService.findOrCreate(userId);
+
+  await prisma.customer.update({
+    where: { userId },
+    data: { gstin: null, accountType: 'RETAIL', corporateAccountId: null },
+  });
+
+  await audit.record(prisma, {
+    actor: { id: userId },
+    action: 'CORPORATE_GSTIN_REMOVED',
+    entityType: 'Customer',
+    entityId: userId,
+    before: { gstin: customer.gstin, corporateAccountId: customer.corporateAccountId },
+    after: { gstin: null, corporateAccountId: null },
+    meta,
+  });
+
+  return {
+    accountType: 'RETAIL',
+    corporateStatus: 'NONE',
+    gstin: null,
+    message: 'GST number removed. Your trips are billed to you personally.',
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * Register  (instant activation)
  * ------------------------------------------------------------------ */
 
@@ -338,6 +516,8 @@ async function withdrawApplication(userId, meta = {}) {
 
 module.exports = {
   getMyAccount,
+  addGstin,
+  removeGstin,
   registerCorporate,
   updateMyCorporate,
   withdrawApplication,

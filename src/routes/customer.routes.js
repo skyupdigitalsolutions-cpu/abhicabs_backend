@@ -42,6 +42,22 @@ router.get('/me/billing', ctrl.getMyBilling);
 
 router.get('/me/account', ctrl.getMyAccountType);
 
+/*
+ * "Add GST" — one field.
+ *
+ * The website had no endpoint that both stored a GSTIN and made tax apply.
+ * PATCH /me accepts the number but leaves the account RETAIL, which is never
+ * taxed; POST /me/corporate applies tax but demands seven fields the form
+ * does not collect. Hence this.
+ */
+router.post(
+  '/me/gstin',
+  validate({ body: s.addGstinSchema }),
+  ctrl.addGstin
+);
+
+router.delete('/me/gstin', ctrl.removeGstin);
+
 router.post(
   '/me/corporate',
   validate({ body: s.registerCorporateSelfSchema }),

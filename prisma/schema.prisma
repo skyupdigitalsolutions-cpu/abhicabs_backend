@@ -825,6 +825,33 @@ model Booking {
   guestPhone String? @map("guest_phone") @db.VarChar(20)
   guestEmail String? @map("guest_email") @db.VarChar(180)
 
+  /**
+   * WHERE THE PASSENGER EMBARKED, and where they got out.
+   *
+   * billing.service.createInvoice has always read `booking.pickupState` and
+   * `booking.dropState`. Neither was a column, so both were permanently
+   * undefined and place of supply silently fell back to the operating city's
+   * state — which, for a Hyderabad pickup priced by the Bengaluru row, put a
+   * Telangana trip on the Karnataka registration.
+   *
+   * Recorded from the RESOLVED pickup and drop at booking time, not from the
+   * city, because the two differ precisely in the cases that matter.
+   */
+  pickupState String? @map("pickup_state") @db.VarChar(80)
+  dropState   String? @map("drop_state") @db.VarChar(80)
+
+  /**
+   * The customer's own GSTIN, as supplied for THIS booking.
+   *
+   * On the booking as well as on the customer, for the same reason guestName
+   * and guestPhone are: a web guest checkout has no durable account to hang
+   * it on, and the invoice still needs the number they typed. For a
+   * signed-in customer this is a snapshot — correcting the profile later must
+   * not rewrite an invoice already issued.
+   */
+  gstin          String? @db.VarChar(15)
+  gstCompanyName String? @map("gst_company_name") @db.VarChar(180)
+
   // --- trip start code ---------------------------------------------------
   // The six digits the rider reads out to the driver at pickup. Proves the
   // rider is PRESENT when the meter starts — not who they are, which booking
@@ -1498,6 +1525,32 @@ model VehicleCatalog {
   groupKey     String? @map("group_key") @db.VarChar(24)
   variantLabel String? @map("variant_label") @db.VarChar(24)
 
+  /// WHICH TRIP TYPES THIS CLASS MAY BE BOOKED FOR.
+  ///
+  /// A JSON array of TripType names — ["ONE_WAY","AIRPORT"]. EMPTY MEANS ALL,
+  /// which is what every existing class gets, so adding this column changes
+  /// nothing until an admin says otherwise.
+  ///
+  /// WHY NOT JUST RETIRE THE CLASS
+  /// isActive is all-or-nothing: it takes a class off every screen. The rule
+  /// the business actually has is narrower — a 17-seat tempo is a perfectly
+  /// good round-trip and rental vehicle and a ridiculous airport transfer —
+  /// so one flag per class cannot express it and a second flag per class per
+  /// trip type is four columns that need a migration each.
+  ///
+  /// WHY NOT A JOIN TABLE
+  /// It is the normalised answer and it is four rows of admin UI for a list
+  /// of at most four strings. The list is read on every fare request and
+  /// written about twice a year. A JSON column is read with the row that is
+  /// already being fetched and edited in the screen that already exists.
+  ///
+  /// NOT VALIDATED BY THE DATABASE. The TripType enum lives in Postgres and
+  /// a JSONB array cannot reference it, so the validator is the gate — see
+  /// validators/vehicleCatalog.schemas.js. An unrecognised string here means
+  /// the class is bookable for a trip type that does not exist, which is
+  /// inert rather than dangerous.
+  tripTypes Json @default("[]") @map("trip_types")
+
   /// Display order. Riders should see Hatchback before Bus regardless of when
   /// each row was inserted.
   sortOrder Int     @default(0) @map("sort_order")
@@ -1869,6 +1922,21 @@ model GstConfig {
   /// intra-state. True: split by route, pickup state vs drop state.
   /// Confirm with a CA before changing.
   interstateByRoute Boolean @default(false) @map("interstate_by_route")
+
+  /// Split CGST+SGST vs IGST by comparing this registration's state against
+  /// the state encoded in the RECIPIENT's GSTIN, rather than against the drop.
+  ///
+  /// Only ever consulted for a B2B supply where the customer actually supplied
+  /// a GSTIN; a retail trip has no recipient registration to compare with and
+  /// falls through to interstateByRoute.
+  ///
+  /// OFF BY DEFAULT, and it should stay off until a CA says otherwise. For
+  /// passenger transport the place of supply is where the passenger embarks,
+  /// which makes the pickup state the answer and every trip intra-state. This
+  /// flag exists because a client holding registrations in two states will ask
+  /// for it, and a flag someone can read in the admin panel is better than the
+  /// same rule hardcoded in a service six months from now.
+  splitByRecipientGstin Boolean @default(false) @map("split_by_recipient_gstin")
   hsnSac            String  @default("9964") @map("hsn_sac") @db.VarChar(10)
 
   /// False retires a registration without deleting it, so invoices issued

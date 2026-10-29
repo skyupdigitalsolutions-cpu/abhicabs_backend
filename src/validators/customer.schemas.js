@@ -64,6 +64,47 @@ const updateCustomerSelfSchema = z
   })
   .refine((d) => Object.keys(d).length > 0, 'Provide at least one field to update');
 
+/**
+ * ADD GST — one field.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS WHEN PATCH /customers/me ALREADY TAKES A gstin
+ * ---------------------------------------------------------------------------
+ * Because the website's "Add GST" button has nowhere good to post to. The two
+ * existing doors are:
+ *
+ *   PATCH /customers/me        takes a gstin, but it is a profile edit — it
+ *                              does nothing about the fact that a RETAIL
+ *                              account is never taxed, so the number is
+ *                              stored and no GST ever appears
+ *   POST /customers/me/corporate   actually switches the account, and demands
+ *                              companyName, billingEmail, billingAddress,
+ *                              billingCity, billingState AND billingPincode.
+ *                              Send it a GSTIN alone and zod rejects the
+ *                              whole body.
+ *
+ * So the button either appears to work and changes nothing, or returns a
+ * validation error listing six fields the form never had.
+ *
+ * This schema is the minimum that can actually make GST apply: the number,
+ * and the company name to put on the invoice. The service derives the billing
+ * state from the GSTIN's own state code — those first two digits ARE the
+ * state, so asking the customer to type it again is asking them to repeat
+ * themselves and introduces a way for the two to disagree.
+ */
+const addGstinSchema = z.object({
+  gstin,
+  /*
+   * Optional. A GSTIN is enough to claim input credit, and an invoice can
+   * carry the customer's own name when no company name was given — refusing
+   * the whole thing over a field the website may not collect is how this
+   * feature ends up unused.
+   */
+  companyName: z.string().trim().min(2).max(180).optional(),
+  billingEmail: z.string().trim().toLowerCase().email().max(180).optional(),
+  billingAddress: z.string().trim().min(5).max(500).optional(),
+});
+
 /* ------------------------------------------------------------------ *
  * Customer — admin
  * ------------------------------------------------------------------ */
@@ -188,6 +229,7 @@ module.exports = {
   gstin,
   pan,
   pincode,
+  addGstinSchema,
   updateCustomerSelfSchema,
   updateCustomerAdminSchema,
   listCustomersQuerySchema,

@@ -117,6 +117,42 @@ const createBookingSchema = z
     guestPhone: z.string().trim().min(10).max(20).optional(),
     guestEmail: z.string().trim().email().max(180).optional(),
 
+    /*
+     * ADD GST AT CHECKOUT.
+     *
+     * There was no GSTIN field anywhere in the booking flow — not in this
+     * schema, not on the Booking table. The website's "Add GST" had nothing
+     * to post to at booking time, which is one half of why it did not work.
+     *
+     * Accepted HERE as well as on the profile because a web guest checkout
+     * has no durable account: guest.service creates an isolated throwaway
+     * user per checkout, so a number stored on that profile is gone the
+     * moment the session ends, and the invoice still needs it.
+     *
+     * Empty string is treated as absent — the website clears the field when
+     * the customer removes the number, exactly as it does for promoCode.
+     *
+     * NOTE ON WHAT THIS DOES NOT DO: supplying a GSTIN here records it on the
+     * booking and puts it on the invoice. It does NOT by itself make tax
+     * apply, because gst_config taxes CORPORATE accounts only. A signed-in
+     * customer switches their account with POST /customers/me/gstin; a guest
+     * gets the number on their invoice and no tax line, which is the honest
+     * outcome for an unverified one-off.
+     */
+    gstin: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .optional()
+      .transform((v) => (v ? v : undefined))
+      .refine(
+        (v) =>
+          v === undefined ||
+          /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(v),
+        'Enter a valid GSTIN (e.g. 29AABCU9603R1ZM)',
+      ),
+    gstCompanyName: z.string().trim().min(2).max(180).optional(),
+
     // Staff booking on behalf of a customer. Ignored for self-service callers —
     // the service uses actor.id unless the caller holds BOOKING_MANAGE.
     customerId: uuid.optional(),

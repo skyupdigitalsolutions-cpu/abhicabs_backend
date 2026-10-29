@@ -71,10 +71,43 @@ async function geocode(address) {
     // SERVICEABLE one by default. Put a state name in the address string to
     // exercise the out-of-area path: geocode('Chennai, Tamil Nadu').
     state: 'Karnataka',
+    country: 'India',
+    /*
+     * A LOCALITY, so the mock exercises the same local-trip path the real
+     * providers do.
+     *
+     * Taken from the address string when it names a town the dev typed, so
+     * geocode('Hyderabad, Telangana') and geocode('Banjara Hills, Hyderabad')
+     * agree on the city and the switch-to-local branch is reachable without a
+     * maps key. Falls back to Bengaluru, which is what every other field here
+     * already pretends.
+     */
+    city: cityFromAddress(address) || 'Bengaluru',
     placeId: `mock_${seed}`,
     provider: NAME,
     estimated: true,
   };
+}
+
+/**
+ * Crude town-name sniffer for the mock ONLY.
+ *
+ * Looks for a known town anywhere in the string. Nothing real depends on it —
+ * the live providers return a parsed component — but without it every mocked
+ * address is "Bengaluru" and a developer cannot reproduce the Hyderabad case
+ * that this whole local-trip change exists to fix.
+ */
+const MOCK_TOWNS = [
+  'Bengaluru', 'Bangalore', 'Mysuru', 'Mysore', 'Hubballi', 'Hubli',
+  'Mangaluru', 'Mangalore', 'Belagavi', 'Belgaum', 'Kalaburagi', 'Gulbarga',
+  'Shivamogga', 'Shimoga', 'Ballari', 'Bellary', 'Tumakuru', 'Tumkur',
+  'Hyderabad', 'Secunderabad', 'Warangal', 'Vijayawada', 'Visakhapatnam',
+  'Mumbai', 'Pune', 'Nagpur', 'Chennai', 'Hosur',
+];
+
+function cityFromAddress(address) {
+  const haystack = String(address || '').toLowerCase();
+  return MOCK_TOWNS.find((town) => haystack.includes(town.toLowerCase())) || null;
 }
 
 async function reverseGeocode(lat, lng) {
@@ -83,6 +116,8 @@ async function reverseGeocode(lat, lng) {
     lng: Number(lng),
     formattedAddress: `Near ${Number(lat).toFixed(4)}, ${Number(lng).toFixed(4)}, Bengaluru`,
     state: 'Karnataka',
+    country: 'India',
+    city: 'Bengaluru',
     placeId: `mock_rev_${geo.coordKey({ lat, lng })}`,
     provider: NAME,
     estimated: true,

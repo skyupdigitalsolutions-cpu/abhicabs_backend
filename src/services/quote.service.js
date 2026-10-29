@@ -30,6 +30,13 @@ const { ApiError } = require('../utils/helpers');
 const gst = require('./gst.service');
 const M = require('../lib/money');
 const serviceArea = require('../lib/serviceArea');
+// Decides whether two addresses name the same town, independently of whether
+// that town has a row in `cities`. See the header of lib/locality.js.
+const locality = require('../lib/locality');
+// Owns the empty-means-all rule for vehicle_catalog.trip_types. Required here
+// rather than reimplemented: a second copy of that rule is a copy that reads
+// an empty list as "bookable for nothing" the first time someone forgets.
+const vehicleCatalog = require('./vehicleCatalog.service');
 const india = require('../lib/india');
 const { normaliseReturnDate, returnDateIsValid } = require('../lib/returnDate');
 
@@ -201,44 +208,291 @@ function isSameCityTrip(pickupPoint, dropPoint, city) {
   return inside(pickupPoint) && inside(dropPoint);
 }
 
+/* ------------------------------------------------------------------ *
+ * Same-city detection that does not need a `cities` row
+ * ------------------------------------------------------------------ */
+
 /**
- * An outstation request whose drop is inside the pickup city is answered with a
- * LOCAL rental instead of an error.
+ * How far apart two points may be and still count as one town.
+ *
+ * The locality test below compares NAMES, and a name has no size. Google
+ * sometimes answers with administrative_area_level_2 — a district, not a city
+ * — when a village has no locality of its own, and a district can be 150 km
+ * across. Without a ceiling, two villages at opposite ends of one district
+ * would read as a local trip and be sold a four-hour rental that cannot
+ * possibly serve them.
+ *
+ * 60 km is wider than any Indian metro end to end (Bengaluru is ~50 km across
+ * at its longest) and well short of a district. It bounds the NAME test only;
+ * the radius test below has the city's own localRadiusKm to bound it.
+ */
+const MAX_LOCAL_TRIP_KM = 60;
+
+/**
+ * The town a point is in, or null.
+ *
+ * Prefers what resolveLocation already attached, because that came from a
+ * geocode we have already paid for. Falls back to a reverse lookup, which is
+ * Redis-cached for 30 days and is therefore free on every repeat of a popular
+ * pickup.
+ *
+ * NEVER THROWS. A provider outage must degrade local-trip detection to the
+ * radius test, not fail the quote — the rider still has a trip to take.
+ */
+async function localityOf(point) {
+  if (!point) return null;
+  if (point.city) return point.city;
+
+  const reverse = await maps.reverseGeocode(point.lat, point.lng).catch(() => null);
+  // A 'fallback' row is maps.service's synthetic answer for a dead provider.
+  // It carries coordinates as the address and no components, so believing it
+  // would cache a null town against this coordinate for a month.
+  if (!reverse || reverse.provider === 'fallback') return null;
+  return reverse.city || null;
+}
+
+/**
+ * The nearest active city row to a point, whether or not it is priced.
+ *
+ * Deliberately NOT resolveOperatingCity. That one answers "whose rate card
+ * applies", and it will happily skip past a nearer city to find a priced one —
+ * correct for pricing, wrong here. The question this answers is geometric:
+ * which configured city, if any, is this point actually in.
+ */
+async function activeCityById(id) {
+  const cities = await cache.getOrSet(
+    cache.keys.citiesActive(),
+    () => prisma.city.findMany({ where: { isActive: true } }),
+    { ttl: cache.TTL.STATIC },
+  );
+  return cities.find((c) => Number(c.id) === Number(id)) || null;
+}
+
+async function nearestActiveCity(point) {
+  const cities = await cache.getOrSet(
+    cache.keys.citiesActive(),
+    () => prisma.city.findMany({ where: { isActive: true } }),
+    { ttl: cache.TTL.STATIC },
+  );
+  if (!cities.length) return null;
+
+  let best = null;
+  let bestKm = Infinity;
+  for (const candidate of cities) {
+    const km = geo.haversineKm(point, {
+      lat: Number(candidate.centreLat),
+      lng: Number(candidate.centreLng),
+    });
+    if (km < bestKm) {
+      bestKm = km;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+/**
+ * Is this outstation request actually a trip within one town?
+ *
+ * TWO INDEPENDENT SIGNALS, NAME FIRST.
+ *
+ * 1. THE LOCALITY NAMES MATCH. Works in any town in India, including one the
+ *    business has never priced and has no row for. This is the signal that
+ *    was missing, and its absence is the whole bug: a Hyderabad pickup with a
+ *    Hyderabad drop fell through to the Bengaluru row — the only row there is
+ *    — sat 500 km outside it, and was sold as an outstation one-way.
+ *
+ * 2. BOTH POINTS INSIDE A CONFIGURED CITY'S LIMITS. The original test, kept
+ *    because it catches what the first one misses: a suburb the geocoder
+ *    names as its own locality. Whitefield and Koramangala come back as
+ *    different localities and are plainly one Bengaluru trip, and only the
+ *    radius knows that.
+ *
+ * Either one is enough. Requiring both would reintroduce the row dependency
+ * through the back door.
+ *
+ * @returns {Promise<{cityName: string, reason: string, apartKm: number}|null>}
+ */
+async function detectSameCityTrip(tripType, pickupPoint, dropPoint, operatingCity) {
+  if (!REQUIRES_OUTSTATION_DROP.has(tripType)) return null;
+  if (!pickupPoint || !dropPoint) return null;
+
+  const apartKm = geo.haversineKm(pickupPoint, dropPoint);
+
+  /* -- signal 1: the geocoder named the same town at both ends -- */
+
+  // Only worth paying for when the trip is short enough to BE local. A
+  // 400 km run cannot be, so there is no reason to reverse-geocode it.
+  if (apartKm <= MAX_LOCAL_TRIP_KM) {
+    const [pickupCity, dropCity] = await Promise.all([
+      localityOf(pickupPoint),
+      localityOf(dropPoint),
+    ]);
+
+    // sameCity returns null — not false — when either name is missing, which
+    // is why this is an explicit `=== true`. An unknown must fall through to
+    // the radius test rather than being read as "different towns".
+    if (locality.sameCity(pickupCity, dropCity) === true) {
+      return {
+        cityName: locality.displayName(pickupCity, dropCity),
+        reason: 'SAME_LOCALITY',
+        apartKm: Number(apartKm.toFixed(1)),
+      };
+    }
+  }
+
+  /* -- signal 2: both ends inside one configured city's limits -- */
+
+  /*
+   * The OPERATING city is tried first, then the geographically nearest row.
+   *
+   * They are usually the same. They differ when resolveOperatingCity skipped
+   * past the nearest city because it had no rate card for this trip type —
+   * and in that case the nearest row is the one that actually knows where the
+   * town ends.
+   */
+  const candidates = [];
+  if (operatingCity) candidates.push(operatingCity);
+  const nearest = await nearestActiveCity(pickupPoint);
+  if (nearest && (!operatingCity || nearest.id !== operatingCity.id)) candidates.push(nearest);
+
+  for (const candidate of candidates) {
+    if (isSameCityTrip(pickupPoint, dropPoint, candidate)) {
+      return {
+        cityName: candidate.name,
+        reason: 'INSIDE_CITY_LIMITS',
+        apartKm: Number(apartKm.toFixed(1)),
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Which city's rental packages can serve a local trip here.
+ *
+ * rental_packages is keyed on cityId with NO statewide fallback, unlike
+ * fare_configs — which fareLookup resolves city-then-state. So a town with a
+ * city row but no packages had nothing to switch to and the quote died with
+ * LOCAL_UNAVAILABLE, and a town with no row at all never got this far.
+ *
+ * Order: the operating city, then the nearest city IN THE SAME STATE that has
+ * packages, then nothing. The state boundary is deliberate — packages encode
+ * local hourly rates and a permit regime, and borrowing Karnataka's package
+ * prices for a Telangana trip would quote a rate nobody set.
+ *
+ * @returns {Promise<object|null>} a city row, or null when nowhere can serve it
+ */
+async function resolveRentalCity(city) {
+  const own = await prisma.rentalPackage.count({
+    where: { cityId: Number(city.id), isActive: true },
+  });
+  if (own > 0) return city;
+
+  if (!city.state) return null;
+
+  const siblings = await prisma.city.findMany({
+    where: {
+      isActive: true,
+      state: city.state,
+      id: { not: Number(city.id) },
+      rentalPackages: { some: { isActive: true } },
+    },
+  });
+  if (!siblings.length) return null;
+
+  const centre = { lat: Number(city.centreLat), lng: Number(city.centreLng) };
+  siblings.sort(
+    (a, b) =>
+      geo.haversineKm(centre, { lat: Number(a.centreLat), lng: Number(a.centreLng) }) -
+      geo.haversineKm(centre, { lat: Number(b.centreLat), lng: Number(b.centreLng) }),
+  );
+  return siblings[0];
+}
+
+/**
+ * An outstation request that never leaves town is answered with a LOCAL
+ * rental instead of an error.
  *
  * Rejecting would be easier and worse. The rider has a real, serviceable
  * journey in mind — they have simply chosen the wrong product for it, usually
- * because Outstation is the tab they happened to land on. An error asks them to
- * work out which tab they should have used; switching answers the question they
- * were actually asking and tells them what changed.
+ * because Outstation is the tab they happened to land on. An error asks them
+ * to work out which tab they should have used; switching answers the question
+ * they were actually asking and tells them what changed.
  *
- * The switch needs terms, because a rental is sold by duration rather than
- * distance. The SHORTEST active package for the city is chosen — the smallest
- * commitment that can serve the trip. Picking a larger one would quietly sell
- * them more hours than they asked for.
+ * ---------------------------------------------------------------------------
+ * THREE OUTCOMES, AND THE THIRD IS THE NEW ONE
+ * ---------------------------------------------------------------------------
+ *   null                      not a local trip. Price what was asked for.
+ *   { applied: true, ... }    switch to HOURLY. Needs a package, or has one.
+ *   { applied: false, ... }   it IS a local trip, but no rental product exists
+ *                             to serve it. Price what was asked for, and SAY
+ *                             SO in the response.
  *
- * Returns null when no switch applies, so callers can treat it as "did anything
- * change?" rather than having to know the rules.
+ * The third case used to throw LOCAL_UNAVAILABLE, and that was the wrong
+ * trade. A town the client genuinely serves but has not yet given rental
+ * packages would have every short trip in it refused outright — a configuration
+ * gap turned into an outage, visible to the rider as "we cannot take you
+ * 8 km". Pricing it as asked is imperfect (an outstation card on a city hop
+ * overcharges) but it is a sale, it is what happens today, and the notice in
+ * the response plus the server-side warning is what gets the packages added.
+ *
+ * ---------------------------------------------------------------------------
+ * THE RIDER CHOOSES THE PACKAGE. WE DO NOT.
+ * ---------------------------------------------------------------------------
+ * This once picked the shortest active package and quoted on it. A rental is
+ * sold by DURATION, and the shortest one is only right if the rider happens to
+ * be done in four hours. Nobody asked them. So with no package chosen the
+ * switch is reported with the available packages attached and the app asks;
+ * the answer comes back as chosenPackageId on the next quote.
  */
 async function resolveLocalSwitch(tripType, pickupPoint, dropPoint, city, chosenPackageId) {
-  if (!REQUIRES_OUTSTATION_DROP.has(tripType)) return null;
-  if (!isSameCityTrip(pickupPoint, dropPoint, city)) return null;
+  const detected = await detectSameCityTrip(tripType, pickupPoint, dropPoint, city);
+  if (!detected) return null;
+
+  const cityName = detected.cityName || city.name;
+
+  /*
+   * WHICH city's packages, which is not necessarily the operating one.
+   *
+   * See resolveRentalCity: packages have no statewide fallback, so a town
+   * priced by a state card can easily have rate cards and no packages.
+   */
+  const rentalCity = await resolveRentalCity(city);
+
+  if (!rentalCity) {
+    console.warn(
+      `[quote] ${cityName} is a local trip (${detected.reason}, ${detected.apartKm} km apart) ` +
+      `but no active rental packages exist for ${city.name}${city.state ? `, ${city.state}` : ''}. ` +
+      `Pricing as ${tripType}. Add rental packages for this city to enable the local product.`,
+    );
+
+    return {
+      applied: false,
+      unavailable: true,
+      from: tripType,
+      to: 'HOURLY',
+      reason: detected.reason,
+      cityName,
+      title: 'Local trip',
+      message:
+        `Both your pickup and drop-off are in ${cityName}. We do not offer a local ` +
+        `rental here yet, so this is priced as an outstation trip.`,
+      packages: [],
+      needsPackage: false,
+      rentalPackageId: null,
+      rentalPackageLabel: null,
+      rentalHours: null,
+    };
+  }
 
   // Distinct labels, cheapest row per label, shortest first — the same shape
   // the rental picker already renders, so the app can show these directly.
   const packages = await prisma.rentalPackage.findMany({
-    where: { cityId: Number(city.id), isActive: true },
+    where: { cityId: Number(rentalCity.id), isActive: true },
     orderBy: [{ includedHours: 'asc' }, { packageFare: 'asc' }],
   });
-
-  if (packages.length === 0) {
-    // A city with no rental packages cannot serve a local trip at all, so there
-    // is nothing to switch TO. Saying so is better than switching to a product
-    // that will fail at the next step.
-    throw ApiError.badRequest(
-      `Pickup and drop are both in ${city.name}, and no local rental is available here yet.`,
-      'LOCAL_UNAVAILABLE'
-    );
-  }
 
   const byLabel = [];
   const seen = new Set();
@@ -253,37 +507,35 @@ async function resolveLocalSwitch(tripType, pickupPoint, dropPoint, city, chosen
     });
   }
 
-  /*
-   * THE RIDER CHOOSES THE PACKAGE. WE DO NOT.
-   *
-   * This used to pick the shortest active package — 4 hrs / 40 km — and quote
-   * on it. The reasoning was "the smallest commitment that can serve the trip",
-   * but a rental is sold by DURATION, and the shortest one is only the right
-   * answer if the rider happens to be done in four hours. Nobody asked them.
-   * They landed on a fare for terms they had never seen, and the only clue was
-   * one line of small print in a notice modal.
-   *
-   * So when no package has been chosen yet, we refuse to guess: the switch is
-   * reported with the available packages attached and the app asks. Once the
-   * rider picks one it comes back on the next quote as chosenPackageId and we
-   * price it.
-   *
-   * `needsPackage` is what the client branches on, rather than having to infer
-   * it from a null id.
-   */
   const chosen = chosenPackageId
     ? byLabel.find((p) => p.rentalPackageId === Number(chosenPackageId)) ?? null
     : null;
 
   const base = {
+    applied: true,
+    unavailable: false,
     from: tripType,
     to: 'HOURLY',
-    reason: 'TRIP_INSIDE_PICKUP_CITY',
-    // Copy for the app to show. Written here rather than in the client so every
-    // surface says the same thing.
+    /*
+     * WHY it switched, not just that it did. SAME_LOCALITY means the geocoder
+     * named one town at both ends; INSIDE_CITY_LIMITS means both pins fell
+     * inside a configured city's radius. When a rider disputes a switch, this
+     * is the field that explains it without re-running the trip.
+     */
+    reason: detected.reason,
+    cityName,
+    /*
+     * The city whose packages and HOURLY rate card price this, which is NOT
+     * always the city the trip is in — see resolveRentalCity. Returned so the
+     * booking call can send it back and the two steps cannot disagree.
+     */
+    rentalCityId: rentalCity.id,
+    rentalCityName: rentalCity.name,
+    // Copy for the app to show. Written here rather than in the client so
+    // every surface says the same thing.
     title: 'Switched to Local',
     message:
-      `Both your pickup and drop-off are inside ${city.name}, so this is a ` +
+      `Both your pickup and drop-off are in ${cityName}, so this is a ` +
       `local trip rather than an outstation one.`,
     packages: byLabel,
   };
@@ -583,6 +835,60 @@ async function resolveOperatingCity(pickupPoint, requestedCity, tripType = null)
   };
 }
 
+/**
+ * Refuse a class that is not offered for this trip type.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE FARE LIST FILTERING IS NOT ENOUGH
+ * ---------------------------------------------------------------------------
+ * quoteAllClasses already hides a restricted class from the picker, so a rider
+ * tapping through the app cannot reach this. That is exactly the argument for
+ * checking here as well: the only requests that CAN reach it are the ones
+ * that did not come from the picker — a stale app screen opened before the
+ * rule changed, a saved deep link, a repeat of yesterday's booking, or
+ * someone posting straight at the API.
+ *
+ * Without this, every one of those books a 33-seat coach for an airport
+ * transfer at a rate card that still exists, and the first anyone knows is a
+ * dispatcher with no vehicle to send.
+ *
+ * A DISTINCT ERROR CODE, not FARE_CONFIG_MISSING. "That vehicle is not
+ * offered for this trip" and "nobody has priced it here" need different
+ * fixes by different people, and conflating them is what sent someone
+ * hunting through rate cards for the airport bug last time.
+ */
+async function assertClassAllowedForTripType(vehicleClass, tripType) {
+  const allowed = await vehicleCatalog.allowedClassesFor(tripType);
+
+  /*
+   * An unknown class passes THROUGH, not out.
+   *
+   * `allowed` only contains classes with an active catalogue row, so a class
+   * that was retired — or one that never had a row, which old rate cards
+   * still have — would be rejected here with a message about trip types that
+   * has nothing to do with why. getFareConfig a few lines later is the right
+   * place for that refusal and already words it correctly.
+   */
+  const known = await vehicleCatalog.list();
+  if (!known.some((v) => v.key === vehicleClass)) return;
+
+  if (!allowed.has(vehicleClass)) {
+    const label = {
+      ONE_WAY: 'one-way',
+      ROUND_TRIP: 'round trip',
+      AIRPORT: 'airport',
+      HOURLY: 'local rental',
+    }[tripType] || String(tripType).toLowerCase();
+
+    const name = known.find((v) => v.key === vehicleClass)?.name || vehicleClass;
+
+    throw ApiError.badRequest(
+      `${name} is not available for ${label} trips. Choose another vehicle.`,
+      'VEHICLE_CLASS_NOT_ALLOWED',
+    );
+  }
+}
+
 async function getFareConfig(cityId, vehicleClass, tripType) {
   /*
    * Reject an unknown class BEFORE a cache key exists for it.
@@ -787,6 +1093,17 @@ async function resolveLocation(input, label) {
     const addressLabel = input.address || null;
     let state = addressLabel ? await serviceArea.canonicalState(addressLabel) : null;
     let formattedAddress = addressLabel;
+    /*
+     * THE TOWN, for local-trip detection.
+     *
+     * Only ever filled by the reverse lookup below, because a coordinate
+     * carries no locality and the label cannot be trusted to be one — "Office"
+     * and "Home" are both valid saved-address labels. Left null when the
+     * reverse call is skipped (the label already named a state) or failed,
+     * and detectSameCityTrip then does its own lookup, which hits the same
+     * 30-day Redis entry.
+     */
+    let city = null;
 
     if (!state) {
       /*
@@ -804,6 +1121,7 @@ async function resolveLocation(input, label) {
       const reverse = await maps.reverseGeocode(point.lat, point.lng).catch(() => null);
       if (reverse && reverse.provider !== 'fallback') {
         state = reverse.state || null;
+        city = reverse.city || null;
         // Only when it is a real address. The fallback's "12.93521, 77.62450"
         // would REPLACE a perfectly good human label with coordinates, and
         // checkPlace's own substring fallback would then have nothing to read.
@@ -817,7 +1135,7 @@ async function resolveLocation(input, label) {
      * bounding box. Inventing a null here changes nothing; claiming a country
      * we did not resolve would.
      */
-    return { ...point, formattedAddress, state, source: 'coordinates' };
+    return { ...point, formattedAddress, state, city, source: 'coordinates' };
   }
 
   if (input.address) {
@@ -841,6 +1159,13 @@ async function resolveLocation(input, label) {
       // assertWithinIndia decide from the component rather than falling back
       // to parsing the address string or, worse, to the bounding box.
       country: g.country || null,
+      /*
+       * THE TOWN, parsed by the provider from the same response and — like
+       * `state` before it — thrown away here for months. Carrying it is what
+       * lets detectSameCityTrip answer "are both ends in one city" without a
+       * second billed lookup.
+       */
+      city: g.city || null,
       source: 'geocoded',
     };
   }
@@ -1114,9 +1439,19 @@ async function getQuote(input) {
     requestedSurge: surge,
   });
 
-  const localSwitch = await resolveLocalSwitch(
+  /*
+   * Three outcomes — see resolveLocalSwitch. `localNotice` carries all of
+   * them; `localSwitch` is only the one that actually changes the product, so
+   * every `if (localSwitch)` below still reads as "did the product change".
+   *
+   * The not-applied case (a local trip in a town with no rental packages) is
+   * deliberately NOT a switch and NOT an error. It prices as asked and says so
+   * in the response.
+   */
+  const localNotice = await resolveLocalSwitch(
     tripType, pickupPoint, dropPoint, city, rentalPackageId,
   );
+  const localSwitch = localNotice && localNotice.applied ? localNotice : null;
 
   // See the matching guard in the fare-list path: a rental with no package has
   // no fare, and inventing one would quote terms the rider never chose.
@@ -1124,6 +1459,21 @@ async function getQuote(input) {
     throw new ApiError(409, 'LOCAL_PACKAGE_REQUIRED', localSwitch.message, {
       switchedToLocal: localSwitch,
     });
+  }
+
+  /*
+   * A SWITCHED TRIP IS PRICED BY THE CITY THAT OWNS THE PACKAGES.
+   *
+   * resolveOperatingCity chose `city` for the REQUESTED trip type, which it
+   * had to — the switch cannot be decided before a city is. Once the product
+   * is HOURLY, the city that matters is the one holding the rental packages
+   * and the HOURLY rate card, and resolveRentalCity has already found it.
+   * Without this reassignment the package lookup below queries a city that
+   * has none and throws RENTAL_PACKAGE_NOT_FOUND on a trip we just told the
+   * rider we could serve.
+   */
+  if (localSwitch && Number(localSwitch.rentalCityId) !== Number(city.id)) {
+    city = (await activeCityById(localSwitch.rentalCityId)) || city;
   }
 
   const effectiveTripType = localSwitch ? localSwitch.to : tripType;
@@ -1165,6 +1515,11 @@ async function getQuote(input) {
    * and charged against another at booking, and nothing in either response
    * says why.
    */
+  // Before the rate card, because "we do not run that vehicle on this trip"
+  // is a different answer from "that vehicle is not priced here" and the
+  // rider should get the one that is true.
+  await assertClassAllowedForTripType(vehicleClass, effectiveTripType);
+
   const config = await getFareConfig(city.id, vehicleClass, effectiveTripType);
 
   /* -- HOURLY: resolve which rental product is actually being bought -- */
@@ -1281,6 +1636,14 @@ async function getQuote(input) {
     // Non-null only when an outstation request was answered with a local ride.
     // Carries the copy for the dialog and the terms the app must adopt.
     switchedToLocal: localSwitch,
+    /*
+     * Set when the trip IS local but no rental product exists to serve it, so
+     * it was priced as the outstation product that was asked for. The app can
+     * show the rider why the fare looks high; ops can see which city needs
+     * rental packages. Null in every other case, including a successful
+     * switch — that one is `switchedToLocal`.
+     */
+    localTripNotice: localNotice && !localNotice.applied ? localNotice : null,
     /**
      * Why the price carries a premium, so the app can say so rather than
      * leaving the rider to notice a number they cannot account for.
@@ -1567,9 +1930,17 @@ async function quoteAllClasses(input) {
     requestedSurge: input.surge,
   });
 
-  const localSwitch = await resolveLocalSwitch(
+  const localNotice = await resolveLocalSwitch(
     input.tripType, pickupPoint, dropPoint, city, input.rentalPackageId,
   );
+  const localSwitch = localNotice && localNotice.applied ? localNotice : null;
+
+  // Same reassignment as getQuote, for the same reason — the two must price
+  // the identical trip against the identical city or the fare changes between
+  // the list screen and the booking.
+  if (localSwitch && Number(localSwitch.rentalCityId) !== Number(city.id)) {
+    city = (await activeCityById(localSwitch.rentalCityId)) || city;
+  }
 
   /*
    * A switch with no package chosen cannot be priced, because a rental's fare
@@ -1651,9 +2022,34 @@ async function quoteAllClasses(input) {
       },
       orderBy: { effectiveFrom: 'desc' },
     }),
-    prisma.vehicleCatalog.findMany({ where: { isActive: true }, select: { key: true } }),
+    prisma.vehicleCatalog.findMany({
+      where: { isActive: true },
+      // tripTypes joins the select so the per-trip-type restriction is applied
+      // in the same pass as the active check. Fetching keys and then asking
+      // the catalogue service separately would be a second query on the
+      // hottest endpoint in the system for data already in hand.
+      select: { key: true, tripTypes: true },
+    }),
   ]);
-  const visibleClasses = new Set(visible.map((v) => v.key));
+
+  /*
+   * VISIBLE *AND* BOOKABLE FOR THIS TRIP TYPE.
+   *
+   * Two different retirements. `isActive` takes a class off every screen —
+   * the generic sedan and SUV placeholders. `tripTypes` takes it off SOME
+   * screens — a 33-seat coach is a real, active, bookable vehicle that has no
+   * business appearing on an airport transfer.
+   *
+   * Filtered on effectiveTripType, not input.tripType: an outstation request
+   * that switched to a local rental must be offered the classes that may be
+   * RENTED, which is the wider list. Filtering on what was asked for would
+   * hide the tempo from a rental it is perfectly suited to.
+   */
+  const visibleClasses = new Set(
+    visible
+      .filter((v) => vehicleCatalog.allowsTripType(v, effectiveTripType))
+      .map((v) => v.key),
+  );
 
   /*
    * One row per class: its own city card if it has one, otherwise the state
@@ -1856,6 +2252,8 @@ async function quoteAllClasses(input) {
     routing: { provider: route.provider, estimated: route.estimated },
     // Non-null only when an outstation request was answered with a local ride.
     switchedToLocal: localSwitch,
+    // See getQuote: a local trip in a city with no rental packages.
+    localTripNotice: localNotice && !localNotice.applied ? localNotice : null,
     /**
      * Why the price carries a premium, so the app can say so rather than
      * leaving the rider to notice a number they cannot account for.

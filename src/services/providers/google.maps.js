@@ -145,6 +145,20 @@ async function reverseGeocode(lat, lng) {
     formattedAddress: result?.formatted_address || `${lat}, ${lng}`,
     placeId: result?.place_id || null,
     state: stateFromComponents(result?.address_components),
+    /*
+     * THE LOCALITY, which this function parsed for free and then discarded.
+     *
+     * forward geocode() has returned `city` since cityFromComponents was
+     * added; reverse never did. That asymmetry is what broke local-trip
+     * detection for a pin dropped on the map: the app sends coordinates, not
+     * an address, so forward geocode never runs and the only chance to learn
+     * the town was here.
+     *
+     * Same parser, same response, no extra call — the components are already
+     * in the payload we paid for.
+     */
+    city: cityFromComponents(result?.address_components),
+    country: countryFromComponents(result?.address_components),
     provider: NAME,
     estimated: false,
   };

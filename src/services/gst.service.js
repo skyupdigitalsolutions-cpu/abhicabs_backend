@@ -26,6 +26,8 @@
 const { prisma } = require('../config/prisma');
 const M = require('../lib/money');
 const cache = require('./cache.service');
+const audit = require('./audit.service');
+const { ApiError } = require('../utils/helpers');
 
 /**
  * Cache TTL. GST rows change about as often as a rate card — rarely, and
@@ -76,12 +78,32 @@ const APPLY_COLUMN = {
  * with no GSTIN" — an invoice without a seller GSTIN is not a valid tax
  * invoice.
  */
+const CACHE_PREFIX = `gst:cfg:${CACHE_VERSION}:`;
+
+/**
+ * Drop every cached registration.
+ *
+ * Called after ANY admin write. The TTL is fifteen minutes, which is fine for
+ * a table that changes twice a year and intolerable the one time it matters:
+ * an admin correcting a placeholder GSTIN, or switching a trip type off,
+ * needs that live on the next quote — not on the next quarter-hour. Without
+ * this, the admin screen shows the new value and every invoice keeps using
+ * the old one, which reads as the save having failed.
+ *
+ * By prefix, not by state: a row's state can itself be edited, so clearing
+ * only the state we just wrote would leave the OLD state's entry pointing at
+ * a registration that has moved.
+ */
+async function invalidate() {
+  await cache.delByPrefix(CACHE_PREFIX);
+}
+
 async function resolveConfig(pickupState) {
   const s = norm(pickupState);
   if (!s) return null;
 
   return cache.getOrSet(
-    `gst:cfg:${CACHE_VERSION}:${s}`,
+    `${CACHE_PREFIX}${s}`,
     async () => {
       const rows = await prisma.gstConfig.findMany({ where: { isActive: true } });
       // Compared in JS rather than SQL so casing and stray whitespace in
@@ -151,11 +173,63 @@ async function resolveRate(tripType, pickupState, accountType) {
  * A trip with no drop (a rental) is always INTRA: it starts and ends in the
  * same place, so there is no second state to compare.
  */
-async function resolveSplitKind(pickupState, dropState) {
+async function resolveSplitKind(pickupState, dropState, recipientGstin = null) {
   const cfg = await resolveConfig(pickupState);
-  if (!cfg || !cfg.interstateByRoute) return 'INTRA';
+  if (!cfg) return 'INTRA';
+
+  /*
+   * B2B: compare against the state in the CUSTOMER's own GSTIN.
+   *
+   * Checked before interstateByRoute, because it is the more specific rule
+   * and the two can disagree — a Karnataka pickup dropping in Karnataka for
+   * a Telangana-registered company is INTRA by route and INTER by recipient.
+   *
+   * Only when a GSTIN was actually supplied. A retail trip has no recipient
+   * registration to compare with and must fall through, or every personal
+   * booking would be forced INTRA by a rule that was never about it.
+   */
+  if (cfg.splitByRecipientGstin && recipientGstin) {
+    const recipientState = stateFromGstin(recipientGstin);
+    // An unrecognised state code reads as "no answer" and falls through,
+    // rather than defaulting to INTER and raising IGST off a typo.
+    if (recipientState) {
+      return norm(cfg.state) === norm(recipientState) ? 'INTRA' : 'INTER';
+    }
+  }
+
+  if (!cfg.interstateByRoute) return 'INTRA';
   if (!dropState) return 'INTRA';
   return norm(pickupState) === norm(dropState) ? 'INTRA' : 'INTER';
+}
+
+/* ------------------------------------------------------------------ *
+ * GSTIN -> state
+ * ------------------------------------------------------------------ */
+
+/**
+ * The first two digits of a GSTIN are the state code.
+ *
+ * A SECOND COPY of the table in corporate.service, and that is deliberate
+ * rather than careless: requiring corporate.service from here would close a
+ * cycle, because corporate.service already reaches billing-side code that
+ * reaches this file. The list is a statutory constant that last changed when
+ * Ladakh was created; the duplication costs nothing and the cycle would cost
+ * a startup crash.
+ */
+const GST_STATE_CODES = Object.freeze({
+  '01': 'Jammu and Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab', '04': 'Chandigarh',
+  '05': 'Uttarakhand', '06': 'Haryana', '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
+  '10': 'Bihar', '11': 'Sikkim', '12': 'Arunachal Pradesh', '13': 'Nagaland', '14': 'Manipur',
+  '15': 'Mizoram', '16': 'Tripura', '17': 'Meghalaya', '18': 'Assam', '19': 'West Bengal',
+  '20': 'Jharkhand', '21': 'Odisha', '22': 'Chhattisgarh', '23': 'Madhya Pradesh',
+  '24': 'Gujarat', '26': 'Dadra and Nagar Haveli and Daman and Diu', '27': 'Maharashtra',
+  '29': 'Karnataka', '30': 'Goa', '31': 'Lakshadweep', '32': 'Kerala', '33': 'Tamil Nadu',
+  '34': 'Puducherry', '35': 'Andaman and Nicobar Islands', '36': 'Telangana',
+  '37': 'Andhra Pradesh', '38': 'Ladakh', '97': 'Other Territory',
+});
+
+function stateFromGstin(gstin) {
+  return GST_STATE_CODES[String(gstin || '').slice(0, 2)] || null;
 }
 
 /* ------------------------------------------------------------------ *
@@ -222,12 +296,15 @@ function applyGst(amount, { ratePct, isInclusive, applies }, splitKind) {
  * the total, so a rider can see what is embedded before booking rather than
  * discovering it on the invoice afterwards.
  */
-async function quoteTax(fareTotal, { tripType, pickupState, dropState, accountType }) {
+async function quoteTax(
+  fareTotal,
+  { tripType, pickupState, dropState, accountType, recipientGstin = null },
+) {
   const [rate, splitKind] = await Promise.all([
     // accountType must be passed through: without it every caller of quoteTax
     // resolves as retail and reports no tax, including for a corporate rider.
     resolveRate(tripType, pickupState, accountType),
-    resolveSplitKind(pickupState, dropState),
+    resolveSplitKind(pickupState, dropState, recipientGstin),
   ]);
 
   const applied = applyGst(fareTotal, rate, splitKind);
@@ -246,11 +323,208 @@ async function quoteTax(fareTotal, { tripType, pickupState, dropState, accountTy
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * Admin
+ * ------------------------------------------------------------------ *
+ *
+ * THERE WAS NO WAY TO EDIT THIS TABLE.
+ *
+ * gst_config shipped with a migration that seeded two placeholder GSTINs and
+ * no API of any kind — no route, no controller, no service write. So the
+ * rate, the registrations, the per-trip-type toggles and the retail/corporate
+ * switches could only be changed with a psql session against production. The
+ * missing Telangana registration sat there for a month for exactly that
+ * reason: nobody could add it without a developer.
+ *
+ * Every write invalidates the cache, because a tax change that takes fifteen
+ * minutes to appear looks like a save that did not work.
+ */
+
+/** Every registration, active first. Admin screens want the retired ones too. */
+async function listConfigs({ includeInactive = true } = {}) {
+  return prisma.gstConfig.findMany({
+    where: includeInactive ? {} : { isActive: true },
+    orderBy: [{ isActive: 'desc' }, { state: 'asc' }],
+  });
+}
+
+async function getConfig(id) {
+  const row = await prisma.gstConfig.findUnique({ where: { id: Number(id) } });
+  if (!row) throw ApiError.notFound('GST registration not found', 'GST_CONFIG_NOT_FOUND');
+  return row;
+}
+
+/**
+ * The GSTIN's own state code must agree with the state on the row.
+ *
+ * REFUSES, where corporate.service only warns, and the asymmetry is the
+ * point. There, a mismatch is a customer's data about their own company and
+ * we are a bystander — a company may legitimately be headquartered in one
+ * state and registered in another. Here it is OUR registration, and the state
+ * on the row is what resolveConfig matches a pickup against. A Karnataka row
+ * carrying a Telangana GSTIN means every Bengaluru pickup raises an invoice
+ * under the wrong registration, which is a filing problem, not a warning.
+ */
+function assertGstinMatchesState(gstin, state) {
+  const encoded = stateFromGstin(gstin);
+  if (!encoded) {
+    throw ApiError.badRequest(
+      `${String(gstin).slice(0, 2)} is not a valid GST state code`,
+      'GSTIN_STATE_UNKNOWN',
+    );
+  }
+  if (norm(encoded) !== norm(state)) {
+    throw ApiError.badRequest(
+      `This GSTIN begins ${String(gstin).slice(0, 2)}, which is ${encoded}, but the ` +
+        `registration is for ${state}. Every invoice raised on it would carry the ` +
+        'wrong place of supply.',
+      'GSTIN_STATE_MISMATCH',
+    );
+  }
+}
+
+async function createConfig(input, actor, meta = {}) {
+  const gstin = String(input.gstin).trim().toUpperCase();
+  assertGstinMatchesState(gstin, input.state);
+
+  /*
+   * One ACTIVE registration per state, enforced by a partial unique index.
+   * Checked here as well so the admin gets a sentence instead of a constraint
+   * name, and so the sentence can say what to do about it.
+   */
+  const clash = await prisma.gstConfig.findFirst({
+    where: { isActive: true, state: input.state },
+    select: { id: true, gstin: true },
+  });
+  if (clash && input.isActive !== false) {
+    throw ApiError.conflict(
+      `An active registration already exists for ${input.state} (${clash.gstin}). ` +
+        'Retire it first, or edit it instead of adding a second.',
+      'GST_CONFIG_STATE_ACTIVE',
+    );
+  }
+
+  const row = await prisma.gstConfig.create({ data: { ...input, gstin } });
+  await invalidate();
+
+  audit.recordAsync({
+    actor,
+    action: 'GST_CONFIG_CREATED',
+    entityType: 'gst_config',
+    entityId: row.id,
+    after: row,
+    meta,
+  });
+
+  return row;
+}
+
+async function updateConfig(id, patch, actor, meta = {}) {
+  const before = await getConfig(id);
+
+  const gstin = patch.gstin ? String(patch.gstin).trim().toUpperCase() : before.gstin;
+  const state = patch.state ?? before.state;
+  // Re-checked whenever EITHER side moves. Validating only when the GSTIN
+  // changes would let an admin edit the state out from under a correct GSTIN
+  // and leave the row mismatched.
+  if (patch.gstin || patch.state) assertGstinMatchesState(gstin, state);
+
+  const row = await prisma.gstConfig.update({
+    where: { id: Number(id) },
+    data: { ...patch, ...(patch.gstin ? { gstin } : {}) },
+  });
+  await invalidate();
+
+  audit.recordAsync({
+    actor,
+    action: 'GST_CONFIG_UPDATED',
+    entityType: 'gst_config',
+    entityId: row.id,
+    before,
+    after: row,
+    meta,
+  });
+
+  return row;
+}
+
+/**
+ * Retire a registration. NEVER deletes.
+ *
+ * Invoices snapshot the seller details at issue, so a deleted row does not
+ * corrupt an invoice already held — but it does destroy the only record of
+ * what the registration was before it was replaced, which is the thing a tax
+ * audit asks for.
+ */
+async function deactivateConfig(id, actor, meta = {}) {
+  const before = await getConfig(id);
+  const row = await prisma.gstConfig.update({
+    where: { id: Number(id) },
+    data: { isActive: false },
+  });
+  await invalidate();
+
+  audit.recordAsync({
+    actor,
+    action: 'GST_CONFIG_DEACTIVATED',
+    entityType: 'gst_config',
+    entityId: row.id,
+    before,
+    after: row,
+    meta,
+  });
+
+  return row;
+}
+
+/**
+ * What the current configuration actually does, as a sentence per state.
+ *
+ * For the admin screen, and for whoever is asked "is GST working?" — which is
+ * a question nobody could answer from this table before, because the
+ * placeholder GSTINs look exactly like real ones at a glance.
+ */
+async function health() {
+  const rows = await prisma.gstConfig.findMany({ orderBy: { state: 'asc' } });
+
+  return rows.map((r) => ({
+    id: r.id,
+    state: r.state,
+    gstin: r.gstin,
+    isActive: r.isActive,
+    ratePct: Number(r.ratePct),
+    isInclusive: r.isInclusive,
+    appliesTo: [r.applyRetail && 'RETAIL', r.applyCorporate && 'CORPORATE'].filter(Boolean),
+    tripTypes: [
+      r.applyOneWay && 'ONE_WAY',
+      r.applyRoundTrip && 'ROUND_TRIP',
+      r.applyAirport && 'AIRPORT',
+      r.applyHourly && 'HOURLY',
+    ].filter(Boolean),
+    /*
+     * The single most useful line on this screen. A placeholder GSTIN is in
+     * the right format and passes every validator, so the only way to notice
+     * one is to recognise the pattern — which is exactly what nobody did for
+     * a month.
+     */
+    placeholderGstin: /^\d{2}AAAAA0000A1Z5$/.test(r.gstin),
+    stateCodeMatches: norm(stateFromGstin(r.gstin) || '') === norm(r.state),
+  }));
+}
+
 module.exports = {
   resolveConfig,
   resolveRate,
   resolveSplitKind,
   applyGst,
   quoteTax,
+  stateFromGstin,
+  invalidate,
+  listConfigs,
+  getConfig,
+  createConfig,
+  updateConfig,
+  deactivateConfig,
+  health,
   NO_TAX,
 };

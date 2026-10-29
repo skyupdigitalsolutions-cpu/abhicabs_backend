@@ -124,15 +124,45 @@ const BILLING_SELECT = {
   meta: true,
   // Read by createInvoice for tax. tripType selects the per-trip-type GST
   // toggle; the trip's state decides CGST+SGST vs IGST.
-  //
-  // NOTE: pickupState/dropState are NOT columns on Booking — they exist only on
-  // BookingRequest. Selecting them here made prisma.booking.findUnique() throw
-  // "Unknown field `pickupState`", which crashed EVERY trip completion (invoice
-  // generation). The place of supply is derived from the operating city's state
-  // instead (createInvoice already falls back to booking.city.state), and
-  // dropState is treated as unknown (→ INTRA-state GST), which is correct for
-  // a same-city trip and the safe default otherwise.
   tripType: true,
+
+  /*
+   * PLACE OF SUPPLY, now that these are real columns.
+   *
+   * The note that used to sit here said pickupState/dropState were not
+   * columns on Booking — true, and the reason selecting them once crashed
+   * every trip completion. They were removed from this select and LEFT IN
+   * createInvoice's reads, so both have been permanently `undefined` since:
+   * place of supply always fell back to the operating city's state, and the
+   * split was always INTRA.
+   *
+   * That is wrong in exactly the case this release is about. A Hyderabad
+   * pickup is priced by the Bengaluru city row today — Hyderabad has no row —
+   * so the invoice named Karnataka as the place of supply for a Telangana
+   * trip and billed it on the Karnataka registration.
+   *
+   * 20261029091000 adds the columns and booking.service records them from the
+   * RESOLVED pickup and drop. The fallback to city.state stays for rows that
+   * predate it.
+   */
+  pickupState: true,
+  dropState: true,
+
+  /*
+   * The GSTIN captured at BOOKING time.
+   *
+   * A snapshot, and preferred over the customer's current profile value when
+   * present: correcting a profile months later must not change what an
+   * invoice already issued says. It is also the only place a web guest
+   * checkout's number can live, since that account is deliberately
+   * throwaway.
+   */
+  gstin: true,
+  gstCompanyName: true,
+
+  // A guest checkout's user row deliberately has no name worth printing
+  // ("Guest"), so the invoice falls back to what they typed on the booking.
+  guestName: true,
   city: { select: { id: true, name: true, state: true, welfareFeePct: true } },
   customer: {
     select: {
@@ -232,6 +262,18 @@ async function createInvoice(tx, booking, fare, isCorporate) {
    */
   const supplierState = booking.pickupState || booking.city?.state || 'Karnataka';
 
+  /*
+   * The RECIPIENT's GSTIN, most specific first.
+   *
+   * booking.gstin is what the customer typed for this trip; the corporate
+   * account's number is the standing one; the customer profile's is the
+   * fallback for a rider who has a GSTIN but no company. Only consulted by
+   * resolveSplitKind when splitByRecipientGstin is switched on for the
+   * registration — off by default, pending CA sign-off.
+   */
+  const recipientGstin =
+    booking.gstin || booking.corporate?.gstin || booking.customer?.gstin || null;
+
   let type;
   let gst;
   let billTo;
@@ -258,7 +300,8 @@ async function createInvoice(tx, booking, fare, isCorporate) {
   );
   const splitKind = await gstService.resolveSplitKind(
     supplierState,
-    booking.dropState || null
+    booking.dropState || null,
+    recipientGstin,
   );
 
   const applied = gstService.applyGst(fare, rate, splitKind);
@@ -282,14 +325,24 @@ async function createInvoice(tx, booking, fare, isCorporate) {
        * corporate rider can now set a GSTIN on their own profile without an
        * admin creating a corporate account for them.
        */
-      gstin: booking.corporate?.gstin || booking.customer?.gstin || null,
+      gstin: recipientGstin,
     };
   } else {
     billTo = {
-      name: booking.customer?.user?.name || 'Customer',
+      /*
+       * gstCompanyName first. A retail-flagged booking that still carries a
+       * GSTIN is a customer who added GST at checkout; the invoice has to be
+       * addressed to the entity claiming the credit, not to the individual
+       * who happened to be in the car.
+       */
+      name:
+        booking.gstCompanyName ||
+        booking.customer?.user?.name ||
+        booking.guestName ||
+        'Customer',
       address: null,
       // A retail customer may still have supplied one.
-      gstin: booking.customer?.gstin || null,
+      gstin: recipientGstin,
     };
   }
 

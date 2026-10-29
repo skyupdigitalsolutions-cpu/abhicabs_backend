@@ -21,7 +21,11 @@ const MODELS_FINGERPRINT = crypto
   .digest('hex')
   .slice(0, 8);
 
-const LIST_KEY = `catalog:vehicles:v4:${MODELS_FINGERPRINT}`;
+// v5: `tripTypes` joined the serialised shape. A cached v4 entry has no such
+// key, and a consumer reading `tripTypes` off it would see undefined and treat
+// the class as unrestricted — the exact rule this release adds, silently
+// disabled for six hours.
+const LIST_KEY = `catalog:vehicles:v5:${MODELS_FINGERPRINT}`;
 const TTL = 6 * 60 * 60; // 6h; writes invalidate, so this is only a backstop
 
 const FOLDER = 'vehicle-catalog';
@@ -47,6 +51,51 @@ function classImagery(row) {
 
   const fromCars = carsFor(row.key).flatMap((c) => usableImages(c.images));
   return { images: fromCars, heroUrl: fromCars[0]?.url || null };
+}
+
+/** Every trip type a class can be restricted to. */
+const TRIP_TYPES = Object.freeze(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']);
+
+/**
+ * The stored restriction, cleaned up for the wire.
+ *
+ * Total and forgiving: the column is JSON, so it can hold anything a bad write
+ * or a hand-run UPDATE put there. Garbage reads as "[]" — unrestricted — which
+ * is the same answer as an empty list and keeps a malformed row bookable
+ * rather than making a vehicle disappear from every screen with no error.
+ */
+function tripTypesOf(row) {
+  const raw = Array.isArray(row?.tripTypes) ? row.tripTypes : [];
+  return raw
+    .map((t) => String(t || '').trim().toUpperCase())
+    .filter((t) => TRIP_TYPES.includes(t));
+}
+
+/**
+ * May this class be booked for this trip type?
+ *
+ * EMPTY LIST MEANS ALL. Said once, here, so the rule cannot be half-remembered
+ * at the three call sites that need it (the fare list, the single quote, and
+ * the public catalogue filter).
+ */
+function allowsTripType(row, tripType) {
+  const allowed = tripTypesOf(row);
+  if (!allowed.length) return true;
+  return allowed.includes(String(tripType || '').toUpperCase());
+}
+
+/**
+ * The set of class keys bookable for a trip type.
+ *
+ * Reads through the same cached list the fare screen uses, so this costs
+ * nothing on the hot path. Returns a Set because every caller is doing
+ * membership tests inside a loop.
+ */
+async function allowedClassesFor(tripType) {
+  const rows = await list();
+  return new Set(
+    rows.filter((r) => allowsTripType(r, tripType)).map((r) => r.key),
+  );
 }
 
 function serialise(row) {
@@ -81,6 +130,12 @@ function serialise(row) {
     variantLabel: row.variantLabel || null,
     rating: row.rating == null ? null : Number(row.rating),
     trips: row.trips,
+    /*
+     * Which trip types this class may be booked for. ALWAYS AN ARRAY for the
+     * client, whatever the column holds, and an empty one means no
+     * restriction — the app must not read `[]` as "bookable for nothing".
+     */
+    tripTypes: tripTypesOf(row),
     heroUrl: imagery.heroUrl,
     // Always an array for the client, whatever the column holds.
     images: imagery.images,
@@ -95,7 +150,13 @@ async function invalidate() {
 }
 
 
-async function list({ includeInactive = false } = {}) {
+async function list({ includeInactive = false, tripType = null } = {}) {
+  const rows = await listAll({ includeInactive });
+  if (!tripType) return rows;
+  return rows.filter((r) => allowsTripType(r, tripType));
+}
+
+async function listAll({ includeInactive = false } = {}) {
   if (includeInactive) {
     const rows = await prisma.vehicleCatalog.findMany({
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
@@ -400,7 +461,10 @@ async function removeImage(key, publicId, actor, meta = {}) {
 }
 
 module.exports = {
+  TRIP_TYPES,
   list,
+  allowsTripType,
+  allowedClassesFor,
   getByKey,
   create,
   update,

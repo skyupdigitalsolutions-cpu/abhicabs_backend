@@ -83,6 +83,24 @@ exports.getMyAccountType = asyncHandler(async (req, res) => {
   res.json({ success: true, data });
 });
 
+/**
+ * POST /customers/me/gstin — the website's "Add GST" button.
+ *
+ * One field in, tax actually applied. See corporateSelfService.addGstin for
+ * why storing the number on its own was never enough: a RETAIL account is
+ * never taxed, so the old path saved a GSTIN and produced no GST anywhere.
+ */
+exports.addGstin = asyncHandler(async (req, res) => {
+  const data = await corporateSelf.addGstin(req.user.id, req.body, meta(req));
+  res.json({ success: true, message: data.message, data });
+});
+
+/** DELETE /customers/me/gstin — back to personal billing. */
+exports.removeGstin = asyncHandler(async (req, res) => {
+  const data = await corporateSelf.removeGstin(req.user.id, meta(req));
+  res.json({ success: true, message: data.message, data });
+});
+
 /** POST /customers/me/corporate — register a company for this customer. */
 exports.registerCorporate = asyncHandler(async (req, res) => {
   const data = await corporateSelf.registerCorporate(req.user.id, req.body, meta(req));

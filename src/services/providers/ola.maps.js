@@ -19,6 +19,17 @@
 
 const axios = require('axios');
 const env = require('../../config/env');
+/*
+ * The SAME component parsers Google's adapter uses. Ola publishes a
+ * Google-shaped `address_components` array, so one parser serves both — and,
+ * more to the point, a second copy of "which type is the state in India" is a
+ * copy that stops agreeing with the first the day either changes.
+ */
+const {
+  stateFromComponents,
+  countryFromComponents,
+  cityFromComponents,
+} = require('../../lib/serviceArea');
 
 const NAME = 'ola';
 const BASE = 'https://api.olamaps.io';
@@ -64,6 +75,19 @@ async function geocode(address) {
     lng: result.geometry.location.lng,
     formattedAddress: result.formatted_address,
     placeId: result.place_id || null,
+    /*
+     * state / country / city were ABSENT from this adapter entirely.
+     *
+     * Google's returns all three and the whole pipeline reads them:
+     * assertPickupWithinServiceStates gates on `state`, assertWithinIndia on
+     * `country`, and local-trip detection on `city`. With MAPS_PROVIDER=ola
+     * every one of those fell back to substring-matching the formatted
+     * address, so a pickup in Koramangala could read as OUTSIDE_SERVICE_STATES
+     * purely because of which provider was configured.
+     */
+    state: stateFromComponents(result.address_components),
+    country: countryFromComponents(result.address_components),
+    city: cityFromComponents(result.address_components),
     provider: NAME,
     estimated: false,
   };
@@ -81,6 +105,11 @@ async function reverseGeocode(lat, lng) {
     lng: Number(lng),
     formattedAddress: result?.formatted_address || `${lat}, ${lng}`,
     placeId: result?.place_id || null,
+    state: stateFromComponents(result?.address_components),
+    country: countryFromComponents(result?.address_components),
+    // Local-trip detection reads this for a pin dropped on the map, where no
+    // forward geocode ever runs. See lib/locality.js.
+    city: cityFromComponents(result?.address_components),
     provider: NAME,
     estimated: false,
   };

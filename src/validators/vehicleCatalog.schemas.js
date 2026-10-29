@@ -50,6 +50,33 @@ const fields = {
    */
   groupKey: key.nullable(),
   variantLabel: z.string().trim().min(1).max(24).nullable(),
+
+  /*
+   * WHICH TRIP TYPES THIS CLASS MAY BE BOOKED FOR. Empty = all.
+   *
+   * An ENUM, not free text, and this is the only gate on the column: it is
+   * JSONB, so Postgres cannot check it against the TripType enum the way it
+   * would a real column. A typo'd "ONEWAY" stored here would restrict the
+   * class to a trip type that never arrives, taking the vehicle off every
+   * screen with nothing to explain why.
+   *
+   * Uppercased before the check so an admin tool sending "one_way" is
+   * accepted rather than being told a value it will consider correct is
+   * invalid.
+   *
+   * Deduplicated, because ["AIRPORT","AIRPORT"] is the same rule written
+   * twice and the admin screen should read it back the way it means it.
+   */
+  tripTypes: z
+    .array(
+      z
+        .string()
+        .trim()
+        .toUpperCase()
+        .pipe(z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY'])),
+    )
+    .max(4)
+    .transform((list) => [...new Set(list)]),
   sortOrder: z.coerce.number().int().min(0).max(9999),
   isActive: z.boolean(),
 };
@@ -99,6 +126,21 @@ const listQuerySchema = z.object({
   includeInactive: z
     .union([z.boolean(), z.enum(['true', 'false'])])
     .transform((v) => v === true || v === 'true')
+    .optional(),
+
+  /*
+   * Narrow the catalogue to the classes bookable for one trip type.
+   *
+   * So the app's Airport tab can ask for exactly what it may show, instead of
+   * fetching everything and re-implementing the empty-means-all rule in the
+   * client — where it would drift from the server's copy the first time
+   * either changed.
+   */
+  tripType: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .pipe(z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']))
     .optional(),
 });
 

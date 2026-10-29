@@ -642,6 +642,42 @@ async function create(input, actor, meta = {}) {
           specialRequests: input.specialRequests || null,
           // Empty for a signed-in rider — see where guestContact is built.
           ...guestContact,
+
+          /*
+           * PLACE OF SUPPLY, from the RESOLVED pickup and drop.
+           *
+           * billing.service.createInvoice has always read booking.pickupState
+           * and booking.dropState; neither was a column, so both were
+           * undefined and the invoice fell back to the operating city's
+           * state. For a Hyderabad pickup priced by the Bengaluru row — which
+           * is what happens today, because Hyderabad has no city row — that
+           * named Karnataka as the place of supply for a Telangana trip and
+           * billed it under the Karnataka GSTIN.
+           *
+           * The quote already paid for these: resolveLocation carries the
+           * state through from the geocode. Recording them here is free and
+           * is the only way the invoice can state where the passenger
+           * actually embarked rather than where the rate card came from.
+           */
+          pickupState: quote.trip.pickup?.state ?? null,
+          dropState: quote.trip.drop?.state ?? null,
+
+          /*
+           * The customer's GSTIN as supplied for THIS trip.
+           *
+           * A snapshot. Correcting a profile months later must not change an
+           * invoice already issued, and a web guest checkout has no durable
+           * profile to hold it on at all — guest.service creates a throwaway
+           * account per checkout by design.
+           *
+           * Recording it does not by itself charge tax: gst_config taxes
+           * CORPORATE accounts only, and a guest is RETAIL. It puts the
+           * number on the invoice, which is what lets the customer claim
+           * input credit, and leaves the account switch to
+           * POST /customers/me/gstin where it belongs.
+           */
+          gstin: input.gstin ?? null,
+          gstCompanyName: input.gstCompanyName ?? null,
           meta: { source: meta.source || 'unknown' },
         },
         select: BOOKING_SELECT,
