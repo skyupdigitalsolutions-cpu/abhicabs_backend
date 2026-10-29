@@ -1319,6 +1319,20 @@ async function getQuote(input) {
     surge = 1,
     rentalPackageId = null,
     rentalHours = null,
+    /*
+     * FROM THE SESSION, never from the request body — see the note in
+     * fare.controller.options. It decides whether GST is charged, so a client
+     * that could name its own account type could name its way out of tax.
+     * The controller reads it off the authenticated customer; anything else
+     * reads as retail, which is the untaxed case.
+     */
+    accountType = null,
+    /*
+     * The recipient's GSTIN, used ONLY by resolveSplitKind and only when a
+     * registration has splitByRecipientGstin switched on. It cannot turn tax
+     * on — that is accountType's job — so accepting it from the body is safe.
+     */
+    gstin = null,
   } = input;
 
   if (tripType === 'ROUND_TRIP' && !returnAt) {
@@ -1619,8 +1633,56 @@ async function getQuote(input) {
     config
   );
 
+  /*
+   * TAX ON THE SINGLE QUOTE TOO.
+   *
+   * quoteAllClasses has attached a per-option `tax` block since GST moved
+   * into gst_config. This function never did — so /fares/estimate, which is
+   * what a checkout screen calls once the vehicle is already chosen, returned
+   * a total with no tax information of any kind. The GST was real and the
+   * customer was billed it; there was simply nothing in the response for the
+   * page to render, which is why adding a GSTIN appears to change nothing.
+   *
+   * Same resolver, same inputs, same supply state as the fare list and as
+   * billing.service, so all three agree by construction rather than by three
+   * copies staying in step.
+   */
+  const supplyState = pickupPoint?.state || city.state;
+  const taxRate = await gst.resolveRate(effectiveTripType, supplyState, accountType);
+  const splitKind = await gst.resolveSplitKind(
+    supplyState,
+    dropPoint?.state || null,
+    gstin || null,
+  );
+  const appliedTax = gst.applyGst(priced.total, taxRate, splitKind);
+
   return {
     quote: priced,
+    /**
+     * What tax is on this fare, and what is therefore payable.
+     *
+     * `applies` false means no tax line at all — a retail account, or a state
+     * with no registration. The app must branch on THAT rather than on the
+     * amount being zero, because a zero-rated registration is a different
+     * thing from an untaxed one and only the first should show a GST row.
+     *
+     * `payable` is the number to put next to "Total". On the live EXCLUSIVE
+     * setting it is fare + rate; were an admin to switch a registration back
+     * to inclusive it equals the fare, and the app needs no change either way.
+     */
+    tax: {
+      ratePct: appliedTax.ratePct,
+      isInclusive: appliedTax.isInclusive,
+      applies: taxRate.applies,
+      splitKind,
+      state: supplyState,
+      amount: M.toStr(appliedTax.tax),
+      taxable: M.toStr(appliedTax.taxable),
+      cgst: M.toStr(appliedTax.cgst),
+      sgst: M.toStr(appliedTax.sgst),
+      igst: M.toStr(appliedTax.igst),
+      payable: M.toStr(appliedTax.total),
+    },
     // The rental package actually applied (resolved to this booking's class), so
     // the caller persists the correct class-specific id, not the raw app input.
     // This is also set when the rider asked for flexible hours that happen to
@@ -2209,8 +2271,32 @@ async function quoteAllClasses(input) {
    * pickup state, neither of which varies across the vehicle list. Only the
    * amount differs, so applyGst is what runs per option.
    */
-  const taxRate = await gst.resolveRate(effectiveTripType, city.state, input.accountType);
-  const splitKind = await gst.resolveSplitKind(city.state, dropPoint?.state || null);
+  /*
+   * THE PICKUP'S STATE, NOT THE PRICING CITY'S.
+   *
+   * This read `city.state`, and `city` is the OPERATING city — the nearest
+   * one with a rate card, which for a pickup in a town with no city row is
+   * somewhere else entirely. A Hyderabad pickup resolves to the Bengaluru
+   * row, so this asked for the KARNATAKA registration on a Telangana trip.
+   * Adding the Telangana row would not have fixed it: nothing would ever
+   * have selected it.
+   *
+   * billing.service already bills on `booking.pickupState`, so the quote and
+   * the invoice were resolving the registration two different ways — the
+   * exact class of mismatch that puts one number on the fare screen and
+   * another on the invoice.
+   *
+   * Falls back to the operating city's state when the geocoder returned no
+   * state, which is what this did for every trip before.
+   */
+  const supplyState = pickupPoint?.state || city.state;
+
+  const taxRate = await gst.resolveRate(effectiveTripType, supplyState, input.accountType);
+  const splitKind = await gst.resolveSplitKind(
+    supplyState,
+    dropPoint?.state || null,
+    input.gstin || null,
+  );
 
   for (const opt of options) {
     const applied = gst.applyGst(opt.total, taxRate, splitKind);

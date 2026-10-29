@@ -68,6 +68,27 @@ const baseQuote = {
   // HOURLY: a fixed package id OR a flexible hours commitment.
   rentalPackageId: z.coerce.number().int().positive().optional().nullable(),
   rentalHours: z.coerce.number().int().min(1).max(24).optional().nullable(),
+
+  /*
+   * The recipient's GSTIN, so a checkout screen can preview the tax split
+   * for the number the customer just typed.
+   *
+   * ZOD STRIPS UNKNOWN KEYS, which is why this has to be declared rather
+   * than simply passed: without it the field is deleted before quote.service
+   * sees it, and the response looks identical whether a GSTIN was sent or
+   * not. That is the same failure mode that silently dropped `stops` above.
+   *
+   * It CANNOT turn tax on. Whether GST applies is decided by the account
+   * type, which the controller reads from the session and never from the
+   * body. This only feeds resolveSplitKind, and only when a registration has
+   * splitByRecipientGstin switched on — so a client sending an arbitrary
+   * GSTIN can at most change CGST+SGST to IGST in the preview, never the
+   * amount payable.
+   *
+   * Loosely validated on purpose: a half-typed number should return a quote
+   * with no split change, not a 400 on every keystroke.
+   */
+  gstin: z.string().trim().toUpperCase().max(15).optional().nullable(),
 };
 
 const estimateSchema = z

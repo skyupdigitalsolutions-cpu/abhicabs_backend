@@ -13,7 +13,16 @@ const { asyncHandler } = require('../utils/helpers');
 
 /** POST /fares/estimate — one trip, one class, one price. */
 exports.estimate = asyncHandler(async (req, res) => {
-  const data = await quote.getQuote(req.body);
+  /*
+   * accountType from the SESSION, exactly as /fares/options does it.
+   *
+   * This endpoint returned no tax information at all until now, so the
+   * omission did not show. It does now: without this every estimate resolves
+   * as retail and reports `applies: false`, including for a corporate rider
+   * who is then billed GST on the invoice they never saw it on.
+   */
+  const accountType = await customerService.accountTypeFor(req.user?.id);
+  const data = await quote.getQuote({ ...req.body, accountType });
   res.json({ success: true, data });
 });
 
