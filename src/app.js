@@ -111,7 +111,33 @@ app.get('/health/ready', async (req, res) => {
 /* ---------------- WhatsApp bot (same backend, same database) ---------------- */
 // MSG91 webhook + the small pages the bot links to. Not under /api/v1, so the
 // load-shedder and API rate limits do not apply; the bot has its own limiters.
-app.use('/', require('./bot').router());
+//
+// ISOLATED ON PURPOSE. This used to be a bare top-level require, which meant a
+// single missing file anywhere in src/bot threw MODULE_NOT_FOUND while app.js
+// was still being evaluated — before server.js had even registered its
+// uncaughtException handler. The whole API died at boot, PM2 restarted it
+// sixteen times and gave up, nginx had no upstream, and every caller saw a 502:
+// the rider app showed "Search is unavailable right now" and the website showed
+// CORS errors on every endpoint, because a 502 carries no Access-Control-Allow-
+// Origin header.
+//
+// The bot is an auxiliary feature. It must never be able to take bookings,
+// fares, auth or place search down with it. If it fails to load we log loudly
+// and serve the API without it.
+try {
+  app.use('/', require('./bot').router());
+} catch (err) {
+  console.error('[bot] DISABLED — failed to load:', err.message);
+  if (err.code === 'MODULE_NOT_FOUND') {
+    console.error('[bot] a file under src/bot is missing from this deploy.');
+    console.error('[bot] run: node scripts/check-bot-files.js');
+  }
+  // The webhook must not silently 404 into the API's handler: MSG91 would read
+  // that as delivered. 503 tells it to retry once the bot is restored.
+  app.use(['/webhook', '/bot-admin', '/calendar', '/route-map', '/place', '/place-map'], (req, res) =>
+    res.status(503).json({ success: false, error: { code: 'BOT_UNAVAILABLE' } })
+  );
+}
 
 app.use('/api/v1', loadShed.middleware);
 

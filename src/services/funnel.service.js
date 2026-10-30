@@ -156,10 +156,37 @@ async function track(customerId, input = {}, meta = {}) {
 async function closeForBooking(customerId, bookingId) {
   if (!customerId) return;
   try {
-    await prisma.bookingAttempt.updateMany({
+    /*
+     * bookingId is @unique on BookingAttempt, so it can be written to exactly
+     * ONE row. The old code set it in an updateMany over every open draft the
+     * rider had — fine for someone with a single draft, a unique-constraint
+     * violation for anyone who had browsed and abandoned before booking:
+     *
+     *   Unique constraint failed on the fields: (`booking_id`)
+     *
+     * updateMany is one statement, so the violation rolled the whole thing
+     * back and NO row was closed. The drafts stayed PENDING and the sweeper
+     * then nudged riders about a booking they had already made.
+     *
+     * Newest draft carries the bookingId; the older ones just get closed out.
+     */
+    const newest = await prisma.bookingAttempt.findFirst({
       where: { customerId, outcome: 'PENDING', bookingId: null },
-      data: { outcome: 'COMPLETED', bookingId },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
     });
+    if (!newest) return;
+
+    await prisma.$transaction([
+      prisma.bookingAttempt.update({
+        where: { id: newest.id },
+        data: { outcome: 'COMPLETED', bookingId },
+      }),
+      prisma.bookingAttempt.updateMany({
+        where: { customerId, outcome: 'PENDING', bookingId: null, id: { not: newest.id } },
+        data: { outcome: 'COMPLETED' },
+      }),
+    ]);
   } catch (err) {
     console.error('[funnel] closeForBooking failed:', err.message);
   }
