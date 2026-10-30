@@ -36,7 +36,7 @@ app.use(
       return callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'x-client-source'],
   })
 );
 
@@ -57,7 +57,13 @@ app.use(
 );
 
 // Bounded body — an unbounded body is a DoS vector.
-app.use(express.json({ limit: '100kb' }));
+app.use(express.json({
+  limit: '100kb',
+  // Meta signs the exact bytes it sends (X-Hub-Signature-256). Keep them, for the Meta webhook path only.
+  verify: (req, res, buf) => {
+    if (req.originalUrl && req.originalUrl.startsWith('/webhook/meta')) req.rawBody = buf;
+  },
+}));
 app.use(express.urlencoded({ extended: false, limit: '100kb' }));
 
 /* ---------------- Health ---------------- */
@@ -102,6 +108,11 @@ app.get('/health/ready', async (req, res) => {
 // the webhook mount, which loadShed exempts) so that when the event loop is
 // saturated, new API work gets a fast 503 instead of piling into a queue that
 // makes everything slower. Health checks and webhooks are never shed.
+/* ---------------- WhatsApp bot (same backend, same database) ---------------- */
+// MSG91 webhook + the small pages the bot links to. Not under /api/v1, so the
+// load-shedder and API rate limits do not apply; the bot has its own limiters.
+app.use('/', require('./bot').router());
+
 app.use('/api/v1', loadShed.middleware);
 
 app.use('/api/v1', require('./routes'));

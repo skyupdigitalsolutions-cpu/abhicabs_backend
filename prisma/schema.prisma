@@ -2063,3 +2063,56 @@ model Setting {
 
   @@map("settings")
 }
+
+// ===========================================================================
+// WHATSAPP BOT — chat state only.
+// Customers, bookings, payments and support use the EXISTING tables
+// (users, customers, bookings, payments, contacts).
+// ===========================================================================
+
+model WhatsappSession {
+  id                    String    @id @default(uuid()) @db.Uuid
+  whatsappNumber        String    @unique @map("whatsapp_number") @db.VarChar(20)
+  customerId            String?   @map("user_id") @db.Uuid
+  language              String?   @db.VarChar(8)
+  state                 String    @default("LANGUAGE_SELECTION") @db.VarChar(60)
+  previousState         String?   @map("previous_state") @db.VarChar(60)
+  draft                 Json      @default("{}")
+  activeBookingId       String?   @map("active_booking_id") @db.Uuid
+  activePaymentId       String?   @map("active_payment_id") @db.Uuid
+  pendingIdempotencyKey String?   @map("pending_idempotency_key")
+  pendingOptionsMap     Json      @default("{}") @map("pending_options_map")
+  humanHandoff          Boolean   @default(false) @map("human_handoff")
+  handoffReason         String?   @map("handoff_reason")
+  lastMessageAt         DateTime  @default(now()) @map("last_message_at")
+  expiresAt             DateTime? @map("expires_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([lastMessageAt])
+  @@index([customerId])
+  @@map("whatsapp_sessions")
+}
+
+model WhatsappProcessedMessage {
+  id                String   @id @default(uuid()) @db.Uuid
+  whatsappMessageId String   @unique @map("whatsapp_message_id") @db.VarChar(160)
+  whatsappNumber    String   @map("whatsapp_number") @db.VarChar(30)
+  processedAt       DateTime @default(now()) @map("processed_at")
+
+  @@index([processedAt])
+  @@map("whatsapp_processed_messages")
+}
+
+model WhatsappAbandonedBooking {
+  id             String    @id @default(uuid()) @db.Uuid
+  whatsappNumber String    @map("whatsapp_number") @db.VarChar(30)
+  sessionId      String    @map("session_id") @db.Uuid
+  snapshot       Json
+  abandonedAt    DateTime  @default(now()) @map("abandoned_at")
+  followUpSentAt DateTime? @map("follow_up_sent_at")
+  recovered      Boolean   @default(false)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@map("whatsapp_abandoned_bookings")
+}

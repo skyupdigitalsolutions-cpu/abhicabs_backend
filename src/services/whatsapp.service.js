@@ -153,7 +153,32 @@ function buildDeepLink(phone, message) {
 
 /** Is programmatic sending configured at all? */
 function canSend() {
-  return Boolean(env.whatsapp.botUrl && env.services.whatsappBotKey);
+  return inProcessEnabled() || Boolean(env.whatsapp.botUrl && env.services.whatsappBotKey);
+}
+
+/**
+ * The bot now runs INSIDE this backend, so the message is sent directly with the bot's own WhatsApp client
+ * (MSG91 or Meta, whichever WHATSAPP_PROVIDER selects). No separate bot service, no HTTP hop.
+ * An old WHATSAPP_BOT_URL still works as a fallback only when in-process sending is not configured.
+ */
+function inProcessEnabled() {
+  if (process.env.BOT_ENABLED === 'false') return false;
+  if (env.whatsapp.botUrl) return false; // an explicit external bot URL wins, so nothing changes until you remove it
+  const msg91 = process.env.MSG91_AUTH_KEY && process.env.MSG91_INTEGRATED_NUMBER;
+  const meta = process.env.META_ACCESS_TOKEN && process.env.META_PHONE_NUMBER_ID;
+  return Boolean(msg91 || meta);
+}
+
+async function sendInProcess(to, message) {
+  try {
+    const { sendMessage } = require('../bot/integrations/whatsapp/client');
+    const data = await sendMessage({ to, type: 'text', text: { body: message, preview_url: true } });
+    const id = (data && ((data.messages && data.messages[0] && data.messages[0].id) || data.request_id || data.id)) || null;
+    return { sent: true, messageId: id };
+  } catch (err) {
+    console.error(`[whatsapp] in-process send failed: ${err.message}`);
+    return { sent: false, reason: 'SEND_FAILED' };
+  }
 }
 
 /**
@@ -169,6 +194,7 @@ async function sendViaBot({ phone, message }) {
   const to = waNumber(phone);
   if (!to) return { sent: false, reason: 'INVALID_PHONE' };
   if (!canSend()) return { sent: false, reason: 'BOT_NOT_CONFIGURED' };
+  if (inProcessEnabled()) return sendInProcess(to, message);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), env.whatsapp.timeoutMs);
