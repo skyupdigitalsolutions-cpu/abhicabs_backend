@@ -153,40 +153,31 @@ async function track(customerId, input = {}, meta = {}) {
  * per-submit attempt row is already COMPLETED (it has a bookingId) by the time
  * this runs. Best-effort: a failure here must not fail the booking.
  */
-async function closeForBooking(customerId, bookingId) {
+async function closeForBooking(customerId) {
   if (!customerId) return;
   try {
     /*
-     * bookingId is @unique on BookingAttempt, so it can be written to exactly
-     * ONE row. The old code set it in an updateMany over every open draft the
-     * rider had — fine for someone with a single draft, a unique-constraint
-     * violation for anyone who had browsed and abandoned before booking:
+     * NO bookingId IS WRITTEN HERE, and that is the whole fix.
+     *
+     * bookingId is @unique on BookingAttempt — exactly one row may hold a
+     * given booking. booking.service.create already gave it to the per-submit
+     * attempt row via settleAttempt(), one line before it calls this. Writing
+     * the same id onto any other row therefore always fails:
      *
      *   Unique constraint failed on the fields: (`booking_id`)
      *
-     * updateMany is one statement, so the violation rolled the whole thing
-     * back and NO row was closed. The drafts stayed PENDING and the sweeper
-     * then nudged riders about a booking they had already made.
+     * It only ever seemed to work when there was no attempt row at all, so
+     * settleAttempt returned early and left the id unclaimed.
      *
-     * Newest draft carries the bookingId; the older ones just get closed out.
+     * This function has one job: stop the abandoned-booking sweeper from
+     * nudging a rider about a form they went on to complete. Closing the
+     * outcome does that. The booking is already linked through the attempt
+     * row settleAttempt settled, so nothing is lost by leaving these null.
      */
-    const newest = await prisma.bookingAttempt.findFirst({
+    await prisma.bookingAttempt.updateMany({
       where: { customerId, outcome: 'PENDING', bookingId: null },
-      orderBy: { createdAt: 'desc' },
-      select: { id: true },
+      data: { outcome: 'COMPLETED' },
     });
-    if (!newest) return;
-
-    await prisma.$transaction([
-      prisma.bookingAttempt.update({
-        where: { id: newest.id },
-        data: { outcome: 'COMPLETED', bookingId },
-      }),
-      prisma.bookingAttempt.updateMany({
-        where: { customerId, outcome: 'PENDING', bookingId: null, id: { not: newest.id } },
-        data: { outcome: 'COMPLETED' },
-      }),
-    ]);
   } catch (err) {
     console.error('[funnel] closeForBooking failed:', err.message);
   }
