@@ -1259,6 +1259,26 @@ const titleCase = (s) =>
   String(s).toLowerCase().split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
 /**
+ * A one-way / round trip with pickup and drop in the same city is a LOCAL trip, priced by the hour. The booking
+ * becomes a Local rental (no drop, no return), exactly as the website and the apps do after their
+ * "Switched to Local" dialog, and the customer is asked for the hours.
+ */
+async function switchToLocalTrip(ctx, err, lead = '') {
+  const { session, language } = ctx;
+  const city = err.cityName || 'the same city';
+  session.draft.tripType = 'HOURLY';
+  session.draft.drop = null;
+  delete session.draft.returnAt;
+  delete session.draft.rentalHours;
+  delete session.draft._vehicleOptions;
+  session.markModified('draft');
+  await session.save();
+  await transition(session, STATES.BOOKING_RENTAL_HOURS);
+  const note = tOr(language, 'local_switch_note', `Both your pickup and drop are in ${city}, so this is a local trip. It is priced by the hour.`);
+  await ctx.send.raw(`${lead}${note}\n\n${t(language, 'ask_rental_hours')}`);
+}
+
+/**
  * Fetches priced cab options for this trip and shows them.
  * minSeats: only offer cabs that seat at least this many (used when the passenger
  * count turned out to be more than the chosen cab holds).
@@ -1304,7 +1324,14 @@ async function showVehicleOptions(ctx, { minSeats = 0 } = {}) {
   try {
     options = early ? await (early.error ? Promise.reject(early.error) : Promise.resolve(early.value)) : await lookup;
   } catch (err) {
-    logger.error({ err: err.message }, '[booking] getFareOptions failed');
+    // The trip stays inside one city, so the backend prices it as a local rental: carry on with the hours question.
+    if (err && err.code === 'LOCAL_SWITCH') {
+      const lead = ctx.listPrefix || '';
+      ctx.listPrefix = null;
+      await switchToLocalTrip(ctx, err, lead);
+      return;
+    }
+    logger.error({ err: err.message, code: err.code }, '[booking] getFareOptions failed');
     const failed = ctx.listPrefix || '';
     ctx.listPrefix = null;
     await ctx.send.raw(`${failed}${t(ctx.language, 'fare_api_failed')}`);

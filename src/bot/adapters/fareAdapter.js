@@ -18,16 +18,34 @@ const loc = (p) => {
 };
 
 async function getFareOptions({ tripType, pickup, drop, pickupAt, returnAt, rentalHours, cityId, accountType }) {
-  const result = await quoteService.quoteAllClasses({
-    cityId: Number(cityId) || Number(process.env.BOT_DEFAULT_CITY_ID) || 1,
-    tripType,
-    pickup: loc(pickup),
-    drop: tripType === 'HOURLY' ? null : loc(drop),
-    pickupAt: new Date(pickupAt).toISOString(),
-    returnAt: tripType === 'ROUND_TRIP' && returnAt ? new Date(returnAt).toISOString() : null,
-    rentalHours: tripType === 'HOURLY' ? Math.round(Number(rentalHours) || 4) : null,
-    accountType: accountType || 'RETAIL',
-  });
+  let result;
+  try {
+    result = await quoteService.quoteAllClasses({
+      cityId: Number(cityId) || Number(process.env.BOT_DEFAULT_CITY_ID) || 1,
+      tripType,
+      pickup: loc(pickup),
+      drop: tripType === 'HOURLY' ? null : loc(drop),
+      pickupAt: new Date(pickupAt).toISOString(),
+      returnAt: tripType === 'ROUND_TRIP' && returnAt ? new Date(returnAt).toISOString() : null,
+      rentalHours: tripType === 'HOURLY' ? Math.round(Number(rentalHours) || 4) : null,
+      accountType: accountType || 'RETAIL',
+    });
+  } catch (err) {
+    /*
+     * A one-way or round trip whose pickup AND drop are both inside one city is not an outstation trip: the backend
+     * turns it into a LOCAL rental and answers 409 LOCAL_PACKAGE_REQUIRED until a rental package or hours are chosen.
+     * The website and the apps show a "Switched to Local" dialog at that point. The bot cannot show a dialog, so it
+     * reports it with its own code and the booking flow moves the customer to the local (hours) question.
+     */
+    if (err && err.code === 'LOCAL_PACKAGE_REQUIRED') {
+      const local = (err.details && err.details.switchedToLocal) || {};
+      const e = new Error('LOCAL_SWITCH');
+      e.code = 'LOCAL_SWITCH';
+      e.cityName = local.cityName || null;
+      throw e;
+    }
+    throw err;
+  }
 
   const distanceKm = result.trip && result.trip.oneWayKm ? Math.round(num(result.trip.oneWayKm) * 10) / 10 : null;
   const out = [];
