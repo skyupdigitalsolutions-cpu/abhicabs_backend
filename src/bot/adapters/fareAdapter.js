@@ -9,6 +9,10 @@ const quoteService = require('../../services/quote.service');
 const { vehicleInfo } = require('./vehicleInfo');
 
 const num = (v) => Number(v || 0);
+const perKmOf = (o) => {
+  const v = o && o.configSnapshot ? Number(o.configSnapshot.perKm) : NaN;
+  return Number.isFinite(v) && v > 0 ? v : null;
+};
 const loc = (p) => {
   if (!p) return null;
   const out = {};
@@ -60,7 +64,10 @@ async function getFareOptions({ tripType, pickup, drop, pickupAt, returnAt, rent
       category: v.category,
       seatingCapacity: v.seatingCapacity,
       ac: v.ac,
-      ratePerKm: null,
+      // The per-km rate of the rate card that priced this vehicle (frozen into the fare's config snapshot). It is what
+      // the vehicle list shows next to each cab ("₹19/km"), the cab-type list shows as "from ₹19/km", and the booking
+      // summary shows as "Rate". A Local (hourly) trip is priced by hours, so it has none.
+      ratePerKm: tripType === 'HOURLY' ? null : perKmOf(o),
       distanceKm,
       fare: {
         baseFare: Math.round(num(o.base) + num(o.distance) + num(o.time) + num(o.returnEmpty) + num(o.minimumFareAdjustment)),
