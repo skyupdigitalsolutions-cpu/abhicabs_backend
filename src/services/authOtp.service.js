@@ -43,6 +43,51 @@ const { prisma } = require('../config/prisma');
 const { ApiError, publicUser } = require('../utils/helpers');
 
 /* ------------------------------------------------------------------ *
+ * App Review / demo login bypass
+ * ------------------------------------------------------------------ *
+ * App Review (Apple/Google) can't receive an SMS OTP, so a reviewer can't sign
+ * in to an SMS-only app. This lets whitelisted demo numbers log in with a FIXED
+ * code and no SMS, so reviewers can access the app (App Store Guideline 2.1(a)).
+ * It is fully inert unless configured, applies only to those exact numbers, and
+ * changes nothing for any real user. Set it only while a store review is in
+ * flight, and clear it afterwards.
+ *
+ * The SAME shared OTP service backs BOTH apps, so configure one number per app:
+ *   - a demo DRIVER (must be an APPROVED driver) for the ABHI CABS Driver app
+ *   - a demo CUSTOMER for the ABHI CABS (rider) app
+ *
+ * Config (either form; both are merged):
+ *   REVIEW_OTP_PHONE / REVIEW_OTP_CODE            single pair (back-compat)
+ *   REVIEW_OTP_ACCOUNTS="9000000000:246810,9000000001:135791"   phone:code list
+ */
+function parseReviewAccounts() {
+  const map = new Map();
+  const add = (phone, code) => {
+    const p = phone ? smsService.indianMobile(phone) : null;
+    const c = code ? String(code).trim() : null;
+    if (p && c) map.set(p, c);
+  };
+  add(process.env.REVIEW_OTP_PHONE, process.env.REVIEW_OTP_CODE);
+  String(process.env.REVIEW_OTP_ACCOUNTS || '')
+    .split(',')
+    .forEach((pair) => {
+      const [phone, code] = pair.split(':');
+      add(phone, code);
+    });
+  return map;
+}
+const REVIEW_ACCOUNTS = parseReviewAccounts();
+
+/** The fixed code for a whitelisted review number, or null if not one. */
+function reviewCodeFor(user) {
+  if (!REVIEW_ACCOUNTS.size || !user || !user.phone) return null;
+  return REVIEW_ACCOUNTS.get(smsService.indianMobile(user.phone)) || null;
+}
+function isReviewAccount(user) {
+  return reviewCodeFor(user) !== null;
+}
+
+/* ------------------------------------------------------------------ *
  * Account lookup
  * ------------------------------------------------------------------ */
 
@@ -140,6 +185,12 @@ async function requestOtp({ phone, email } = {}) {
     throw ApiError.forbidden('Your account has been deactivated', 'ACCOUNT_INACTIVE');
   }
 
+  // App Review demo number: don't send anything; the fixed code is accepted at
+  // verify. Reply looks identical to a normal request so the client proceeds.
+  if (isReviewAccount(existing)) {
+    return { channel: 'review', sentTo: null, message: 'A verification code has been sent' };
+  }
+
   // A phone-first account carries a generated phone_<number>@placeholder.local
   // address. It can never receive mail, so it is never offered as a channel.
   const realEmail = isPlaceholderEmail(existing.email) ? null : existing.email;
@@ -196,8 +247,18 @@ async function verifyAndLogin({ phone, email, code }, meta = {}) {
     throw ApiError.unauthorized('Code is invalid or has expired', 'OTP_INVALID');
   }
 
-  // Throws on wrong/expired/locked. Consumes the code on success.
-  await otpService.verifyOtp(user.id, code);
+  // App Review demo number: accept the fixed code directly (no SMS was sent, so
+  // there is nothing stored in the normal OTP bucket to check). Any other code
+  // fails exactly like a wrong real code.
+  const reviewCode = reviewCodeFor(user);
+  if (reviewCode !== null) {
+    if (String(code).trim() !== reviewCode) {
+      throw ApiError.unauthorized('Code is invalid or has expired', 'OTP_INVALID');
+    }
+  } else {
+    // Throws on wrong/expired/locked. Consumes the code on success.
+    await otpService.verifyOtp(user.id, code);
+  }
 
   if (!user.isActive) {
     throw ApiError.forbidden('Your account has been deactivated', 'ACCOUNT_INACTIVE');
