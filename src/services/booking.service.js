@@ -438,6 +438,8 @@ async function create(input, actor, meta = {}) {
       // RENTAL_TERMS_REQUIRED.
       rentalPackageId: input.rentalPackageId || null,
       rentalHours: input.rentalHours || null,
+      // Only the WhatsApp bot sends this (the HTTP schema does not accept it): keep the trip type the customer chose.
+      keepTripType: input.keepTripType === true,
     });
 
     /**
