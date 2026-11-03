@@ -1068,6 +1068,11 @@ async function changeTimePage(ctx, answer, { returnTrip = false } = {}) {
   await promptTime(ctx, { returnTrip });
 }
 
+/** The backend refuses a scheduled pickup with less notice than this (BOOKING_MIN_LEAD_MINUTES, default 15). */
+function minLeadMinutes() {
+  try { return Number(require('../../services/booking.service').MIN_LEAD_MINUTES) || 15; } catch (_) { return 15; }
+}
+
 async function handleBookingTime(ctx) {
   const { message, session } = ctx;
   const answer = readTimeAnswer(message);
@@ -1097,7 +1102,9 @@ async function handleBookingTime(ctx) {
       await promptTime(ctx);
       return;
     }
-    combined = dateParser.now().add(1, 'minute').startOf('minute');
+    // The backend needs at least minLeadMinutes() of notice AT THE MOMENT the booking is created, which is a few minutes
+    // after this answer, so "Now" books the pickup 15 minutes beyond that minimum.
+    combined = dateParser.now().add(minLeadMinutes() + 15, 'minute').startOf('minute');
   } else {
     const time = answer.time;
     if (!time) {
@@ -1111,6 +1118,14 @@ async function handleBookingTime(ctx) {
     await ctx.send.raw(tOr(ctx.language, 'time_in_past', 'That time has already passed. Please choose a later date or time.'));
     await transition(session, STATES.BOOKING_DATE);
     await promptDate(ctx);
+    return;
+  }
+
+  // Too soon for a car to reach the pickup: say so now, not after the customer has paid attention to the whole booking.
+  const lead = minLeadMinutes();
+  if (combined.diff(dateParser.now(), 'minute', true) < lead) {
+    await ctx.send.raw(tOr(ctx.language, 'time_too_soon', `Pickups need at least ${lead} minutes' notice. Please choose a later time.`));
+    await promptTime(ctx);
     return;
   }
 
