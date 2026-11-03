@@ -32,6 +32,7 @@ async function createBooking({ idempotencyKey, customerId, cityId, passenger = {
     ...(stops.length ? { stops } : {}),
     pickupAt: new Date(pickupAt).toISOString(),
     scheduled: true,
+    ...(hourly ? {} : { keepTripType: true }), // see fareAdapter: the trip stays the type the customer chose
     paymentMode: MODE[paymentMode] || paymentMode,
     specialRequests: specialRequests ? String(specialRequests).slice(0, 1000) : undefined,
     ...(passenger.name && guestPhone.length >= 10 ? { guestName: String(passenger.name).slice(0, 120), guestPhone: guestPhone.slice(-15) } : {}),
