@@ -447,7 +447,10 @@ async function resolveRentalCity(city) {
  * switch is reported with the available packages attached and the app asks;
  * the answer comes back as chosenPackageId on the next quote.
  */
-async function resolveLocalSwitch(tripType, pickupPoint, dropPoint, city, chosenPackageId) {
+async function resolveLocalSwitch(tripType, pickupPoint, dropPoint, city, chosenPackageId, keepTripType = false) {
+  // OPT-IN, off for every caller that does not ask: the WhatsApp bot asks to keep a one-way / round trip priced as the trip
+  // the customer chose, even when both ends are inside one city. The website and the apps never send this flag.
+  if (keepTripType === true) return null;
   const detected = await detectSameCityTrip(tripType, pickupPoint, dropPoint, city);
   if (!detected) return null;
 
@@ -1463,7 +1466,7 @@ async function getQuote(input) {
    * in the response.
    */
   const localNotice = await resolveLocalSwitch(
-    tripType, pickupPoint, dropPoint, city, rentalPackageId,
+    tripType, pickupPoint, dropPoint, city, rentalPackageId, input.keepTripType === true,
   );
   const localSwitch = localNotice && localNotice.applied ? localNotice : null;
 
@@ -1993,7 +1996,7 @@ async function quoteAllClasses(input) {
   });
 
   const localNotice = await resolveLocalSwitch(
-    input.tripType, pickupPoint, dropPoint, city, input.rentalPackageId,
+    input.tripType, pickupPoint, dropPoint, city, input.rentalPackageId, input.keepTripType === true,
   );
   const localSwitch = localNotice && localNotice.applied ? localNotice : null;
 
