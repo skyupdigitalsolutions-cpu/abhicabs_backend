@@ -201,7 +201,12 @@ async function handlePaymentOption(ctx) {
     try {
       booking = await createBookingWithMode(ctx, choice === 'PAY_LATER' ? 'PAY_LATER' : choice === 'PAY_PARTIAL' ? 'PARTIAL' : 'FULL');
     } catch (err) {
-      logger.error({ err: err.message }, '[booking] createBooking failed');
+      logger.error({ err: err.message, code: err.code }, '[booking] createBooking failed');
+      // A few refusals are the customer's to fix (too little notice, a date in the past): say what it is.
+      if (['INSUFFICIENT_LEAD_TIME', 'PICKUP_IN_PAST', 'TOO_FAR_AHEAD'].includes(err.code)) {
+        await ctx.send.raw(`${err.message}.\n\nPlease start a new booking and choose another time. Type *Hi* for the main menu.`);
+        return;
+      }
       await ctx.send.text('booking_api_failed');
       return;
     }
