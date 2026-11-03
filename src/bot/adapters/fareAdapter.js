@@ -33,6 +33,8 @@ async function getFareOptions({ tripType, pickup, drop, pickupAt, returnAt, rent
       returnAt: tripType === 'ROUND_TRIP' && returnAt ? new Date(returnAt).toISOString() : null,
       rentalHours: tripType === 'HOURLY' ? Math.round(Number(rentalHours) || 4) : null,
       accountType: accountType || 'RETAIL',
+      // A one-way / round trip inside one city stays what the customer chose (priced per km) instead of being switched to Local.
+      keepTripType: tripType !== 'HOURLY',
     });
   } catch (err) {
     /*
