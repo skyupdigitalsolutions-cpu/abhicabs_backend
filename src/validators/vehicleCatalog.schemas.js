@@ -79,6 +79,18 @@ const fields = {
     .transform((list) => [...new Set(list)]),
   sortOrder: z.coerce.number().int().min(0).max(9999),
   isActive: z.boolean(),
+
+  /*
+   * THE BOOKING SWITCH, accepted on create and on the general update too.
+   *
+   * It also has a dedicated endpoint (PATCH /:key/booking) and that is the one
+   * the admin toggle should call, because only that one records WHY and WHEN.
+   * Accepting it here as well is for the bulk-edit form: an admin fixing six
+   * fields at once should not have to make two calls, and silently dropping a
+   * field the form sent is worse than taking it.
+   */
+  bookingEnabled: z.boolean(),
+  bookingDisabledReason: z.string().trim().max(200).nullable(),
 };
 
 const optional = Object.fromEntries(
@@ -142,7 +154,52 @@ const listQuerySchema = z.object({
     .toUpperCase()
     .pipe(z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']))
     .optional(),
+
+  /*
+   * Drop the classes that are switched off for booking.
+   *
+   * OPT-IN, not the default, and the default has to stay "everything": the
+   * admin panel reads this same endpoint, and an admin cannot re-enable a
+   * vehicle that the list has filtered out from under them. The rider app's
+   * browse screen also wants them all, so it can grey the card out and say
+   * why rather than have a car silently disappear from the fleet page.
+   *
+   * When the GLOBAL switch is on this returns an empty list, because nothing
+   * is bookable.
+   */
+  bookableOnly: z
+    .union([z.boolean(), z.enum(['true', 'false'])])
+    .transform((v) => v === true || v === 'true')
+    .optional(),
 });
+
+/**
+ * The per-class booking toggle.
+ *
+ * `enabled` is REQUIRED rather than a toggle-what-it-is-now default, and that
+ * is deliberate for an idempotency reason that bites in practice: an admin
+ * double-taps, or the app retries a request it never saw the response to. A
+ * flip-the-current-value endpoint turns the second call into an undo of the
+ * first and the switch ends up back where it started, with the admin looking
+ * at a green toggle they are sure they turned red. Sending the DESIRED state
+ * makes the call safe to repeat.
+ *
+ * `reason` is optional and only meaningful when switching OFF — it is shown to
+ * a rider who reaches the class through a stale screen. Required reasons are
+ * how a field that needs filling in a hurry ends up holding "asdf".
+ */
+const bookingToggleSchema = z.object({
+  enabled: z.boolean(),
+  reason: z.string().trim().max(200).optional().nullable(),
+});
+
+/**
+ * The global switch. Same shape, same reasoning — but note what is NOT here:
+ * there is no `keys: []` to disable a subset. A subset is what the per-class
+ * endpoint is for, and offering both would leave two ways to express the same
+ * state that can disagree with each other.
+ */
+const bookingToggleAllSchema = bookingToggleSchema;
 
 module.exports = {
   createSchema,
@@ -151,4 +208,6 @@ module.exports = {
   imageParamSchema,
   imageBodySchema,
   listQuerySchema,
+  bookingToggleSchema,
+  bookingToggleAllSchema,
 };

@@ -39,6 +39,25 @@ adminRouter.use(requireAuth);
 
 const PERM = 'VEHICLE_MANAGE';
 
+/* ----------------------- the booking switch ------------------------------ *
+ *
+ * DECLARED BEFORE EVERY '/:key' ROUTE, and that ordering is load-bearing
+ * rather than tidy. Express matches in declaration order, so with these
+ * below, 'PATCH /booking/all' would be matched by 'PATCH /:key' with
+ * key='booking' — which passes the slug validator cleanly and then 404s with
+ * "Vehicle not found", for a route that exists. Same trap for
+ * 'GET /booking/status' against 'GET /:key'.
+ *
+ * Mounted under a '/booking' prefix rather than at '/disable-all' for the
+ * same reason: one reserved segment is easier to keep clear of the key space
+ * than several scattered verbs.
+ * ------------------------------------------------------------------------- */
+
+adminRouter.get('/booking/status', requirePermission(PERM), ctrl.bookingStatus);
+
+adminRouter.patch('/booking/all', requirePermission(PERM),
+  validate({ body: s.bookingToggleAllSchema }), ctrl.setBookingAll);
+
 adminRouter.get('/', requirePermission(PERM),
   validate({ query: s.listQuerySchema }), ctrl.list);
 
@@ -53,6 +72,15 @@ adminRouter.patch('/:key', requirePermission(PERM),
 
 adminRouter.patch('/:key/activate', requirePermission(PERM),
   validate({ params: s.keyParamSchema }), ctrl.activate);
+
+/*
+ * Switch booking on or off for ONE class, leaving its catalogue entry, its
+ * photos and its rate cards exactly where they are. This is the route an
+ * admin on/off toggle should call — NOT the DELETE below, which retires the
+ * class and refuses while live rate cards still price it.
+ */
+adminRouter.patch('/:key/booking', requirePermission(PERM),
+  validate({ params: s.keyParamSchema, body: s.bookingToggleSchema }), ctrl.setBooking);
 
 // DELETE retires rather than removes — see the service for why.
 adminRouter.delete('/:key', requirePermission(PERM),

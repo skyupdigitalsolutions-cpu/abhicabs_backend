@@ -892,6 +892,60 @@ async function assertClassAllowedForTripType(vehicleClass, tripType) {
   }
 }
 
+/**
+ * Refuse a fare LIST when nothing at all can be booked.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS NOT LEFT TO THE EMPTY-OPTIONS CHECK AT THE BOTTOM
+ * ---------------------------------------------------------------------------
+ * It would produce the right status code and completely the wrong sentence.
+ * With every class switched off, the catalogue filter removes all of them,
+ * `options` comes back empty, and the rider is told "No one-way fares are
+ * configured for Bengaluru, Karnataka. Add a rate card for this city" — a
+ * message about missing configuration, for a system that is configured
+ * perfectly and has simply been switched off on purpose. Whoever is on
+ * support reads that and goes looking at rate cards.
+ *
+ * Checked FIRST, before geocoding and routing, so a closed shop costs no
+ * billable maps calls. That is not a micro-optimisation: the global switch
+ * gets flipped precisely when something is wrong and traffic keeps arriving,
+ * which is the moment a quote-shaped Google bill is least welcome.
+ *
+ * Both reads are cached — the global switch for a minute, the catalogue for
+ * six hours — so this adds nothing to the hot path in normal operation.
+ */
+async function assertAnythingBookable() {
+  const globalSwitch = await vehicleCatalog.readGlobalSwitch();
+
+  if (globalSwitch.allDisabled) {
+    throw new ApiError(
+      409,
+      'BOOKING_DISABLED',
+      globalSwitch.reason
+        ? `We are not taking bookings at the moment. ${globalSwitch.reason}`
+        : 'We are not taking bookings at the moment. Please try again shortly.',
+      {
+        allDisabled: true,
+        reason: globalSwitch.reason,
+        disabledAt: globalSwitch.disabledAt,
+      },
+    );
+  }
+
+  const known = await vehicleCatalog.list();
+  // No catalogue at all is a different problem — a fresh database, say — and
+  // the empty-options error at the bottom describes it properly. This only
+  // fires when there ARE classes and every one of them is switched off.
+  if (known.length && !known.some((v) => vehicleCatalog.isBookable(v))) {
+    throw new ApiError(
+      409,
+      'BOOKING_DISABLED',
+      'We are not taking bookings at the moment. Please try again shortly.',
+      { allDisabled: false, allVehiclesDisabled: true, reason: null },
+    );
+  }
+}
+
 async function getFareConfig(cityId, vehicleClass, tripType) {
   /*
    * Reject an unknown class BEFORE a cache key exists for it.
@@ -1532,6 +1586,31 @@ async function getQuote(input) {
    * and charged against another at booking, and nothing in either response
    * says why.
    */
+  /*
+   * THE BOOKING SWITCH, before anything else refuses.
+   *
+   * Three different "no" answers live within a few lines of each other here,
+   * and they are checked in the order of how much they tell the rider:
+   *
+   *   assertBookable                 the business has switched this off —
+   *                                  either everything, or this one class.
+   *                                  Nothing else is worth saying.
+   *   assertClassAllowedForTripType  we run this car, just not on this kind
+   *                                  of trip.
+   *   getFareConfig                  nobody has priced it here.
+   *
+   * Getting the order wrong is how a rider who hits a vehicle the client
+   * deliberately parked is told "no airport fare configured for innova" — a
+   * sentence that sends an admin hunting through rate cards for a switch that
+   * is sitting in the vehicle screen.
+   *
+   * This runs on BOOKING too, not only on the fare screen: booking.service
+   * and bookingVehicle.service both price through getQuote, so the switch
+   * holds for the rider app, the website, the WhatsApp bot, guest checkout
+   * and the admin ERP from this one line.
+   */
+  await vehicleCatalog.assertBookable(vehicleClass);
+
   // Before the rate card, because "we do not run that vehicle on this trip"
   // is a different answer from "that vehicle is not priced here" and the
   // rider should get the one that is true.
@@ -1779,6 +1858,12 @@ async function getQuote(input) {
  * is identical, only the pricing model differs.
  */
 async function compareTripTypes(input) {
+  // Same gate as the other two entry points. This endpoint does not create a
+  // booking, but it quotes prices for one — showing a rider a one-way and a
+  // round-trip total for a car the client has parked is an offer that cannot
+  // be honoured, and it burns a maps call to make it.
+  await vehicleCatalog.assertBookable(input.vehicleClass);
+
   let city = await getCity(input.cityId);
 
   const [pickupPoint, dropPoint] = await Promise.all([
@@ -1914,6 +1999,11 @@ async function compareTripTypes(input) {
 
 /** Every vehicle class priced for one trip — powers the class picker. */
 async function quoteAllClasses(input) {
+  // Before the city lookup and well before any geocode: if the shop is shut
+  // there is nothing to price, and saying so here costs no maps quota and
+  // gives the rider a true sentence instead of one about rate cards.
+  await assertAnythingBookable();
+
   let city = await getCity(input.cityId);
 
   const isHourly = input.tripType === 'HOURLY';
@@ -2088,7 +2178,13 @@ async function quoteAllClasses(input) {
       orderBy: { effectiveFrom: 'desc' },
     }),
     prisma.vehicleCatalog.findMany({
-      where: { isActive: true },
+      /*
+       * `bookingEnabled` filtered in SQL alongside `isActive`, not in JS
+       * afterwards. Both answer "may a rider see this on the fare screen",
+       * the composite index covers the pair, and a class the admin has
+       * switched off should never reach the pricing loop at all.
+       */
+      where: { isActive: true, bookingEnabled: true },
       // tripTypes joins the select so the per-trip-type restriction is applied
       // in the same pass as the active check. Fetching keys and then asking
       // the catalogue service separately would be a second query on the

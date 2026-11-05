@@ -1556,10 +1556,54 @@ model VehicleCatalog {
   sortOrder Int     @default(0) @map("sort_order")
   isActive  Boolean @default(true) @map("is_active")
 
+  /// CAN THIS CLASS BE BOOKED RIGHT NOW.
+  ///
+  /// SEPARATE FROM isActive ON PURPOSE, and the distinction is the whole
+  /// reason this column exists rather than reusing the one next to it:
+  ///
+  ///   isActive        the class is RETIRED. It leaves every screen, it is no
+  ///                   longer part of what the business sells, and the service
+  ///                   REFUSES to set it while live rate cards still price the
+  ///                   class — see vehicleCatalog.deactivate. Retiring is a
+  ///                   catalogue decision and it is rare.
+  ///   bookingEnabled  the class is TEMPORARILY OFF. Every car of that type is
+  ///                   in the workshop, out on a long hire, or the client
+  ///                   simply wants to stop taking bookings for it this
+  ///                   weekend. The rate cards stay, the photos stay, the
+  ///                   catalogue entry stays, and flipping it back is one
+  ///                   click with no rate-card housekeeping first.
+  ///
+  /// Trying to express the second with the first is what makes an admin delete
+  /// rate cards to stop a car being booked — and then rebuild them from memory
+  /// when the car comes back.
+  ///
+  /// WHAT IT ACTUALLY DOES: the class disappears from /fares/options, and any
+  /// attempt to quote or book it is refused with VEHICLE_NOT_BOOKABLE. It is
+  /// still returned by the public catalogue so the app can grey the card out
+  /// rather than have a car silently vanish from the fleet page.
+  ///
+  /// EXISTING BOOKINGS ARE NOT TOUCHED. A trip already agreed for this class
+  /// runs as agreed; this gate is on creating new ones.
+  bookingEnabled Boolean @default(true) @map("booking_enabled")
+
+  /// Shown to the rider when they reach a disabled class through a stale
+  /// screen or a saved deep link ("All our Innovas are booked this weekend").
+  /// Null means the generic message is used — a reason is never mandatory,
+  /// because requiring one is how a switch that needs flipping in a hurry
+  /// ends up with "asdf" typed into it.
+  bookingDisabledReason String? @map("booking_disabled_reason") @db.VarChar(200)
+
+  /// When it was switched off. Answers "has this been off since March and
+  /// nobody noticed", which is the question an ops review actually asks.
+  /// Cleared when booking is re-enabled.
+  bookingDisabledAt DateTime? @map("booking_disabled_at")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([isActive, sortOrder])
+  // The fare screen's hot query is "active AND bookable, in display order".
+  @@index([isActive, bookingEnabled, sortOrder])
   @@index([groupKey, sortOrder])
   @@map("vehicle_catalog")
 }

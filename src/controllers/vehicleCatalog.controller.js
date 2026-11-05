@@ -57,6 +57,75 @@ exports.activate = asyncHandler(async (req, res) => {
   res.json({ success: true, message: `${vehicle.name} is live again`, data: { vehicle } });
 });
 
+/* ------------------------------------------------------------------ *
+ * The booking switch
+ * ------------------------------------------------------------------ */
+
+/**
+ * Switch booking on or off for ONE class.
+ *
+ * PATCH /admin/vehicles/:key/booking   { enabled: false, reason?: "..." }
+ *
+ * Distinct from `deactivate` on a distinct route, because the two are
+ * different decisions with different blast radii: deactivate retires the class
+ * from the catalogue and refuses while rate cards price it, this takes it off
+ * sale for the weekend and leaves everything else alone. An admin UI that
+ * routed its on/off toggle to deactivate would be asking people to delete
+ * rate cards to park a car.
+ */
+exports.setBooking = asyncHandler(async (req, res) => {
+  const vehicle = await service.setBookingEnabled(
+    req.params.key,
+    { enabled: req.body.enabled, reason: req.body.reason ?? null },
+    req.user,
+    auditMeta(req),
+  );
+
+  res.json({
+    success: true,
+    message: vehicle.bookingEnabled
+      ? `${vehicle.name} is open for booking`
+      : `${vehicle.name} is no longer bookable`,
+    data: { vehicle },
+  });
+});
+
+/**
+ * The global switch: stop or resume taking bookings for every vehicle.
+ *
+ * PATCH /admin/vehicles/booking/all   { enabled: false, reason?: "..." }
+ *
+ * Declared BEFORE the '/:key' routes in the router — see the note there. It
+ * does not touch any class's own switch, so turning this back on restores
+ * whatever per-class configuration was in place beforehand rather than
+ * flattening it.
+ */
+exports.setBookingAll = asyncHandler(async (req, res) => {
+  const state = await service.setAllBookingEnabled(
+    { enabled: req.body.enabled, reason: req.body.reason ?? null },
+    req.user,
+    auditMeta(req),
+  );
+
+  res.json({
+    success: true,
+    message: state.allDisabled
+      ? 'Bookings are now switched off for all vehicles'
+      : 'Bookings are open again',
+    data: { booking: state },
+  });
+});
+
+/**
+ * Everything the admin switch panel needs in one call: the global switch, and
+ * every class with its own state plus whether it is EFFECTIVELY bookable once
+ * both switches are taken together.
+ */
+exports.bookingStatus = asyncHandler(async (req, res) => {
+  const status = await service.bookingStatus();
+  res.json({ success: true, data: status });
+});
+
 /**
  * multipart/form-data. multer has already parsed the file into req.file before
  * this runs; the text fields arrive on req.body as strings, which is why

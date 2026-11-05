@@ -60,6 +60,16 @@ const ACTIONS = Object.freeze({
   VEHICLE_CLASS_DEACTIVATED: 'VEHICLE_CLASS_DEACTIVATED',
   VEHICLE_CLASS_IMAGE_ADDED: 'VEHICLE_CLASS_IMAGE_ADDED',
   VEHICLE_CLASS_IMAGE_REMOVED: 'VEHICLE_CLASS_IMAGE_REMOVED',
+  /*
+   * The booking switch. Separate names from ACTIVATED / DEACTIVATED above,
+   * not a reuse of them, because the two mean different things and the audit
+   * trail is read to answer "who took the Innova off sale on Saturday" — a
+   * question four identical-looking action names cannot answer.
+   */
+  VEHICLE_CLASS_BOOKING_ENABLED: 'VEHICLE_CLASS_BOOKING_ENABLED',
+  VEHICLE_CLASS_BOOKING_DISABLED: 'VEHICLE_CLASS_BOOKING_DISABLED',
+  VEHICLE_BOOKING_ENABLED_ALL: 'VEHICLE_BOOKING_ENABLED_ALL',
+  VEHICLE_BOOKING_DISABLED_ALL: 'VEHICLE_BOOKING_DISABLED_ALL',
   CITY_CREATED: 'CITY_CREATED',
   CITY_UPDATED: 'CITY_UPDATED',
   CITY_ACTIVATED: 'CITY_ACTIVATED',
@@ -78,6 +88,9 @@ const ENTITIES = Object.freeze({
   DISCOUNT: 'discount',
   VEHICLE_CATALOG: 'vehicle_catalog',
   CITY: 'city',
+  // The global booking switch lives in `settings`, not in the catalogue —
+  // see vehicleCatalog.service for why it is not a bulk column update.
+  SETTING: 'setting',
 });
 
 /**

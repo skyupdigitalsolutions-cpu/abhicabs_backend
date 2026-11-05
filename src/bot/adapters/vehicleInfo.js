@@ -40,8 +40,29 @@ async function vehicleInfo(key) {
     : { vehicleId: key, name: key, category: categoryFor(key, 4), seatingCapacity: 4, ac: true };
 }
 
+/**
+ * The cab types offered in the bot's "Select Cab Type" list.
+ *
+ * FILTERED BY THE BOOKING SWITCH, so a vehicle the admin has taken off sale
+ * is never offered in the first place. quote.service refuses it anyway — the
+ * bot prices through the same quoteAllClasses the app uses — but a refusal at
+ * that point arrives several messages into the conversation, after the
+ * customer has already typed a pickup, a drop and a date. Offering only what
+ * can be booked is the difference between a picker and a trap.
+ *
+ * `!== false` rather than `=== true`: a row cached by this module before the
+ * column existed has no such key, and reading that as "unavailable" would
+ * empty the cab list for up to five minutes after a deploy.
+ *
+ * `vehicleInfo()` deliberately does NOT filter. It resolves a key to a name
+ * and a seat count for an EXISTING booking or an in-flight conversation, and
+ * a trip already taken for a since-disabled class still has to render with
+ * its real name rather than the raw slug.
+ */
 async function getAvailableVehicles() {
-  return [...(await all()).values()].map((r) => ({ vehicleId: r.key, name: r.name, category: categoryFor(r.key, r.seats), seatingCapacity: r.seats, ac: true }));
+  return [...(await all()).values()]
+    .filter((r) => r.bookingEnabled !== false)
+    .map((r) => ({ vehicleId: r.key, name: r.name, category: categoryFor(r.key, r.seats), seatingCapacity: r.seats, ac: true }));
 }
 
 module.exports = { vehicleInfo, getAvailableVehicles };
