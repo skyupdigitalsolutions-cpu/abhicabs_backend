@@ -2253,6 +2253,17 @@ async function quoteAllClasses(input) {
         })
       : [];
     packagesByClass = new Map(pkgs.map((p) => [p.vehicleClass, p]));
+  } else if (isHourlyNow && effectiveHours) {
+    // Mirror getQuote: an exact hours match is priced as that class's package,
+    // so the list shows the same fare the booking will charge.
+    const pkgs = await prisma.rentalPackage.findMany({
+      where: { cityId: Number(city.id), includedHours: Number(effectiveHours), isActive: true },
+      orderBy: { packageFare: 'asc' }, // cheapest first, same as getQuote
+    });
+    packagesByClass = new Map();
+    for (const p of pkgs) {
+      if (!packagesByClass.has(p.vehicleClass)) packagesByClass.set(p.vehicleClass, p);
+    }
   }
 
   /*
