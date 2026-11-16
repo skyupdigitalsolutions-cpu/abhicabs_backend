@@ -59,6 +59,8 @@ router.use('/payments', apiLimiter, require('./payment.routes'));
 const contactRoutes = require('./contact.routes');
 router.use('/contact', contactLimiter, contactRoutes.publicRoutes);
 router.use('/admin/contacts', apiLimiter, contactRoutes.adminRoutes);
+// The ERP's WhatsApp page (bot stats, conversations, handoffs, WhatsApp tickets) with staff JWT auth.
+router.use('/admin/whatsapp', apiLimiter, require('./whatsappAdmin.routes'));
 
 router.use('/admin', apiLimiter, require('./admin.routes'));
 router.use('/admin/customers', apiLimiter, require('./adminCustomer.routes'));

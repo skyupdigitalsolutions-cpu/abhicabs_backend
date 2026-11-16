@@ -248,10 +248,15 @@ const listBookingsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   status: z
-    .enum(['PENDING','CONFIRMED','ALLOCATED','EN_ROUTE','ONGOING','COMPLETED','CANCELLED','EXPIRED'])
+    // REACHED and ARRIVED are real statuses (enum BookingStatus) and were missing here,
+    // so filtering the trip list by them answered 400.
+    .enum(['PENDING','CONFIRMED','ALLOCATED','EN_ROUTE','REACHED','ONGOING','ARRIVED','COMPLETED','CANCELLED','EXPIRED'])
     .optional(),
   tripType: z.enum(['ONE_WAY', 'ROUND_TRIP', 'AIRPORT', 'HOURLY']).optional(),
   customerId: uuid.optional(),
+  // Trips a driver (users.id) was allocated to — the ERP's driver page. Staff only.
+  driverId: uuid.optional(),
+  vehicleId: uuid.optional(),
   corporateAccountId: uuid.optional(),
   cityId: z.coerce.number().int().positive().optional(),
   from: z.string().datetime().optional(),

@@ -60,7 +60,7 @@ async function list({ page, limit, search, status, vehicleClass, cityId, isActiv
   const where = {};
 
   if (status) where.status = status;
-  if (vehicleClass) where.vehicleClass = vehicleClass;
+  if (vehicleClass) where.vehicleClass = { equals: vehicleClass, mode: 'insensitive' };
   if (cityId) where.cityId = cityId;
   if (isActive !== undefined) where.isActive = isActive;
 

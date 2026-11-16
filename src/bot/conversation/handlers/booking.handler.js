@@ -1070,7 +1070,7 @@ async function changeTimePage(ctx, answer, { returnTrip = false } = {}) {
 
 /** The backend refuses a scheduled pickup with less notice than this (BOOKING_MIN_LEAD_MINUTES, default 15). */
 function minLeadMinutes() {
-  try { return Number(require('../../services/booking.service').MIN_LEAD_MINUTES) || 15; } catch (_) { return 15; }
+  try { return Number(require('../../../services/booking.service').MIN_LEAD_MINUTES) || 15; } catch (_) { return 15; }
 }
 
 async function handleBookingTime(ctx) {

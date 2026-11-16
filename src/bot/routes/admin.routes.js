@@ -1,20 +1,23 @@
 const express = require('express');
 const { requireAdminKey } = require('../middleware/adminAuth');
 const { adminLimiter } = require('../middleware/rateLimiter');
-const {
-  getStats,
-  getHandoffs,
-  getSupportTickets,
-  resolveHandoff,
-} = require('../controllers/admin.controller');
+const ctrl = require('../controllers/admin.controller');
 
-const router = express.Router();
+/** Builds the bot-admin routes. The auth middleware is passed in so the same routes serve two doors. */
+function buildAdminRouter(...auth) {
+  const router = express.Router();
+  router.use(...auth);
+  router.get('/stats', ctrl.getStats);
+  router.get('/conversations', ctrl.getConversations);
+  router.get('/handoffs', ctrl.getHandoffs);
+  router.post('/handoffs/:sessionId/resolve', ctrl.resolveHandoff);
+  router.get('/support-tickets', ctrl.getSupportTickets);
+  router.patch('/support-tickets/:id', ctrl.updateSupportTicket);
+  return router;
+}
 
-router.use(adminLimiter, requireAdminKey);
-
-router.get('/stats', getStats);
-router.get('/handoffs', getHandoffs);
-router.get('/support-tickets', getSupportTickets);
-router.post('/handoffs/:sessionId/resolve', resolveHandoff);
+// /bot-admin/* — x-admin-key, for scripts and monitoring.
+const router = buildAdminRouter(adminLimiter, requireAdminKey);
 
 module.exports = router;
+module.exports.buildAdminRouter = buildAdminRouter;

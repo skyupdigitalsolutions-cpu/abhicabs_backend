@@ -185,6 +185,16 @@ const env = {
     10
   ),
 
+  // Approved WhatsApp templates for messages that may go out more than 24 hours after the customer last wrote.
+  // WhatsApp silently refuses plain text outside that window, so without a template such a message is skipped
+  // (and logged) instead of being "sent" and never arriving. Body variables, in order, are listed beside each.
+  BOOKING_CONFIRMED_TEMPLATE: required('BOOKING_CONFIRMED_TEMPLATE', ''), // {{1}} booking no, {{2}} pickup time
+  DRIVER_ASSIGNED_TEMPLATE: required('DRIVER_ASSIGNED_TEMPLATE', ''),     // {{1}} booking no, {{2}} driver, {{3}} driver phone, {{4}} vehicle, {{5}} start code
+  BOOKING_CANCELLED_TEMPLATE: required('BOOKING_CANCELLED_TEMPLATE', ''), // {{1}} booking no, {{2}} refund text
+  PAYMENT_LINK_TEMPLATE: required('PAYMENT_LINK_TEMPLATE', ''),           // {{1}} name, {{2}} amount, {{3}} purpose, {{4}} link
+  TEMPLATE_LANGUAGE: required('TEMPLATE_LANGUAGE', 'en'),
+  TEMPLATE_NAMESPACE: required('TEMPLATE_NAMESPACE', ''),
+
   REDIS_URL: required('REDIS_URL'),
   ADMIN_API_KEY: required('ADMIN_API_KEY'), // no default: an unset key disables the admin API
 

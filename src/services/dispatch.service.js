@@ -96,7 +96,7 @@ async function availableVehicles(cityId = null, vehicleClass = null) {
         status: 'AVAILABLE',
         isActive: true,
         ...(cityId ? { cityId: Number(cityId) } : {}),
-        ...(vehicleClass ? { vehicleClass } : {}),
+        ...(vehicleClass ? { vehicleClass: { equals: vehicleClass, mode: 'insensitive' } } : {}),
       },
       orderBy: { odometerKm: 'asc' },
       select: {

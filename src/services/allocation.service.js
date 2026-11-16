@@ -26,6 +26,7 @@
  */
 
 const { prisma, isUniqueViolation, isExclusionViolation } = require('../config/prisma');
+const { sameClass } = require('../utils/vehicleClass');
 const { ApiError } = require('../utils/helpers');
 const env = require('../config/env');
 const audit = require('./audit.service');
@@ -96,7 +97,7 @@ async function allocate(bookingId, { vehicleId, driverId = null }, actor = null,
   // Class match is a business rule, not a safety one — a sedan booking must not
   // be served by a hatchback. Checked up front so the caller gets a clear
   // reason rather than a successful-but-wrong assignment.
-  if (vehicle.vehicleClass !== booking.vehicleClass) {
+  if (!sameClass(vehicle.vehicleClass, booking.vehicleClass)) {
     throw ApiError.conflict(
       `Vehicle is ${vehicle.vehicleClass}, booking needs ${booking.vehicleClass}`,
       'VEHICLE_CLASS_MISMATCH'
@@ -366,7 +367,7 @@ async function reassign(bookingId, { vehicleId, driverId = null }, actor = null,
     select: { id: true, vehicleClass: true, status: true, isActive: true },
   });
   if (!vehicle) throw ApiError.notFound('Vehicle not found');
-  if (vehicle.vehicleClass !== booking.vehicleClass) {
+  if (!sameClass(vehicle.vehicleClass, booking.vehicleClass)) {
     throw ApiError.conflict(
       `Vehicle is ${vehicle.vehicleClass}, booking needs ${booking.vehicleClass}`,
       'VEHICLE_CLASS_MISMATCH'

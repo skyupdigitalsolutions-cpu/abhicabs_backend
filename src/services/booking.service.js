@@ -826,11 +826,27 @@ async function findByNumber(bookingNumber, actor) {
   return booking;
 }
 
+const LATEST_ALLOCATION_SELECT = {
+  where: { status: { in: ['ACTIVE', 'RELEASED'] }, declinedAt: null },
+  orderBy: { createdAt: 'desc' },
+  take: 1,
+  select: {
+    id: true,
+    status: true,
+    driverId: true,
+    vehicleId: true,
+    createdAt: true,
+    vehicle: { select: { registrationNumber: true, vehicleClass: true, makeModel: true } },
+    driver: { select: { userId: true, user: { select: { name: true, phone: true } } } },
+  },
+};
+
 async function list(filters, actor) {
   const {
     page = 1, limit = 20, status, tripType, customerId, corporateAccountId,
-    cityId, from, to, search, sortBy = 'createdAt', order = 'desc',
+    cityId, from, to, search, sortBy = 'createdAt', order = 'desc', driverId, vehicleId,
   } = filters;
+  const isStaff = actor.role !== 'USER';
 
   const where = {};
 
@@ -842,6 +858,20 @@ async function list(filters, actor) {
   if (tripType) where.tripType = tripType;
   if (corporateAccountId) where.corporateAccountId = corporateAccountId;
   if (cityId) where.cityId = Number(cityId);
+
+  // Trip history of one driver / one vehicle. Released allocations count too —
+  // a completed trip's allocation is RELEASED — but a driver who declined is not
+  // "their" trip, and a CANCELLED allocation was never driven.
+  if (isStaff && (driverId || vehicleId)) {
+    where.allocations = {
+      some: {
+        ...(driverId ? { driverId } : {}),
+        ...(vehicleId ? { vehicleId } : {}),
+        declinedAt: null,
+        status: { in: ['ACTIVE', 'RELEASED'] },
+      },
+    };
+  }
 
   // Filters the PICKUP date, not creation date — "show me next week's trips"
   // is the question ops actually asks.
@@ -863,7 +893,9 @@ async function list(filters, actor) {
     prisma.booking.count({ where }),
     prisma.booking.findMany({
       where,
-      select: BOOKING_LIST_SELECT,
+      // Staff lists also carry the CURRENT (latest) allocation, so the ERP can
+      // show who drove a trip without one extra request per row.
+      select: isStaff ? { ...BOOKING_LIST_SELECT, allocations: LATEST_ALLOCATION_SELECT } : BOOKING_LIST_SELECT,
       orderBy: { [sortBy]: order },
       skip: (page - 1) * limit,
       take: limit,

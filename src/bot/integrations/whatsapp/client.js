@@ -88,8 +88,27 @@ async function sendTemplate({ to, name, languageCode = 'en', namespace, componen
   }
 }
 
+/**
+ * An approved template with body variables {{1}}, {{2}}, ... filled from `params` (strings, in order).
+ * Builds the components in whichever format the provider expects, so callers never deal with the difference:
+ *   Meta:  [{ type: 'body', parameters: [{ type: 'text', text }] }]
+ *   MSG91: { body_1: { type: 'text', value }, body_2: ... }
+ */
+async function sendTemplateParams({ to, name, params = [], languageCode = 'en', namespace }) {
+  const values = params.map((p) => String(p == null || p === '' ? '-' : p).slice(0, 1000));
+  if (providerFor(to) === 'meta') {
+    const components = values.length
+      ? [{ type: 'body', parameters: values.map((text) => ({ type: 'text', text })) }]
+      : [];
+    return require('./metaClient').sendTemplate({ to, name, languageCode, components });
+  }
+  const components = {};
+  values.forEach((value, i) => { components[`body_${i + 1}`] = { type: 'text', value }; });
+  return sendTemplate({ to, name, languageCode, namespace, components });
+}
+
 async function markAsRead() {
   return null;
 }
 
-module.exports = { sendMessage, sendTemplate, markAsRead };
+module.exports = { sendMessage, sendTemplate, sendTemplateParams, markAsRead };

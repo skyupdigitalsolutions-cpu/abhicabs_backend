@@ -22,7 +22,8 @@ const registrationNumber = z
   .min(4, 'Registration number is too short')
   .max(16, 'Registration number is too long');
 
-const vehicleClass = z.string().trim().min(1).max(24);
+// Stored lowercase with hyphens, the same spelling bookings and rate cards use ("Swift Dzire" -> "swift-dzire").
+const vehicleClass = z.string().trim().min(1).max(24).transform((v) => v.toLowerCase().replace(/\s+/g, '-').replace(/-+/g, '-'));
 const dateOpt = z.coerce.date().optional().nullable();
 
 /* ------------------------------------------------------------------ *

@@ -21,7 +21,7 @@ const createSchema = z.object({
   name: z.string().trim().min(2).max(120),
   mobile: z.string().trim().min(10).max(20),
   vehicleNumber: z.string().trim().min(6).max(20),
-  vehicleClass: z.string().trim().min(2).max(24),
+  vehicleClass: z.string().trim().min(2).max(24).transform((v) => v.toLowerCase().replace(/\s+/g, '-').replace(/-+/g, '-')),
 
   // Optional, with sensible fallbacks. A hire is usually arranged in a hurry.
   seatingCapacity: z.coerce.number().int().min(1).max(60).optional(),

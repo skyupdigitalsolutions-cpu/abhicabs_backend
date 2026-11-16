@@ -169,12 +169,37 @@ function inProcessEnabled() {
   return Boolean(msg91 || meta);
 }
 
-async function sendInProcess(to, message) {
+/**
+ * WhatsApp only delivers free text within 24 hours of the customer's last
+ * message to us. Outside that window MSG91/Meta still ACCEPT the send, then
+ * WhatsApp drops it — so this used to report `sent: true` for links the
+ * customer never received. Now:
+ *   customer wrote to the bot in the last 23h -> free text
+ *   otherwise, PAYMENT_LINK_TEMPLATE is set   -> that approved template
+ *   otherwise                                 -> sent:false, OUTSIDE_24H_WINDOW
+ *                                               (the admin uses the wa.me link)
+ */
+async function sendInProcess(to, message, templateParams) {
   try {
-    const { sendMessage } = require('../bot/integrations/whatsapp/client');
-    const data = await sendMessage({ to, type: 'text', text: { body: message, preview_url: true } });
+    const { prisma } = require('../config/prisma');
+    const botEnv = require('../bot/config/env');
+    const { deliver } = require('../bot/conversation/serviceWindow');
+    const session = await prisma.whatsappSession
+      .findUnique({ where: { whatsappNumber: to }, select: { lastMessageAt: true } })
+      .catch(() => null);
+
+    const result = await deliver({
+      to,
+      lastMessageAt: session && session.lastMessageAt,
+      text: message,
+      template: templateParams ? botEnv.PAYMENT_LINK_TEMPLATE : '',
+      params: templateParams || [],
+      what: 'payment-link',
+    });
+    if (!result.sent) return { sent: false, reason: result.reason };
+    const data = result.data;
     const id = (data && ((data.messages && data.messages[0] && data.messages[0].id) || data.request_id || data.id)) || null;
-    return { sent: true, messageId: id };
+    return { sent: true, via: result.via, messageId: id };
   } catch (err) {
     console.error(`[whatsapp] in-process send failed: ${err.message}`);
     return { sent: false, reason: 'SEND_FAILED' };
@@ -190,11 +215,11 @@ async function sendInProcess(to, message) {
  * the customer would get two links. The failure is reported in the return
  * value and the deep link covers the gap.
  */
-async function sendViaBot({ phone, message }) {
+async function sendViaBot({ phone, message, templateParams }) {
   const to = waNumber(phone);
   if (!to) return { sent: false, reason: 'INVALID_PHONE' };
   if (!canSend()) return { sent: false, reason: 'BOT_NOT_CONFIGURED' };
-  if (inProcessEnabled()) return sendInProcess(to, message);
+  if (inProcessEnabled()) return sendInProcess(to, message, templateParams);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), env.whatsapp.timeoutMs);
@@ -256,7 +281,13 @@ async function sharePaymentLink({
     return { phone: waNumber(phone), message, whatsappUrl, sent: false, reason: 'NOT_REQUESTED' };
   }
 
-  const result = await sendViaBot({ phone, message });
+  const what = description || (bookingNumber ? `your trip ${bookingNumber}` : `your ${env.whatsapp.businessName} booking`);
+  const result = await sendViaBot({
+    phone,
+    message,
+    // {{1}} name, {{2}} amount, {{3}} purpose, {{4}} link — used only outside the 24-hour window
+    templateParams: [payerName || 'Customer', `₹${amount}`, what, shareUrl],
+  });
   return { phone: waNumber(phone), message, whatsappUrl, ...result };
 }
 
