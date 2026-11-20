@@ -31,6 +31,37 @@
  * The bot deliberately cannot act. It answers questions; it does not book,
  * cancel, or refund. Every one of those has a screen with a confirmation step,
  * and a chat message is not a safe place to lose a booking.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY FAILURES ARE NOW CLASSIFIED
+ * ---------------------------------------------------------------------------
+ * The previous version collapsed every upstream failure into one message and
+ * one code, and logged only `err.message`. For an axios 4xx that string is
+ * "Request failed with status code 400" — OpenAI's real reason sits in
+ * `err.response.data.error` and was being discarded. A dead key, an empty
+ * billing account, a bad model name and a blocked egress route all looked
+ * identical from the outside, which meant the only way to tell them apart was
+ * to guess.
+ *
+ * So: the upstream reason is always logged in full, and the thrown error now
+ * carries a code that says WHICH failure it was. The rider-facing text stays
+ * safe and vague — nobody outside the team needs to read "insufficient_quota"
+ * — but the code and the log make it a thirty-second diagnosis instead of an
+ * afternoon.
+ *
+ * ---------------------------------------------------------------------------
+ * NEWER MODELS TAKE DIFFERENT PARAMETERS
+ * ---------------------------------------------------------------------------
+ * The gpt-5 and o-series models rejected the two tuning parameters this file
+ * has always sent: `max_tokens` was renamed `max_completion_tokens`, and
+ * `temperature` only accepts its default. Either one is a hard 400, so simply
+ * setting OPENAI_MODEL to a newer model in the environment broke the bot with
+ * no code change and no obvious cause.
+ *
+ * Rather than make the correct parameter set a thing someone has to know, a
+ * 400 that names one of those parameters is retried once without them. One
+ * extra round trip on a misconfiguration is a good trade for the bot not
+ * breaking the next time the model is changed.
  */
 
 const axios = require('axios');
@@ -38,6 +69,15 @@ const env = require('../config/env');
 const { ApiError } = require('../utils/helpers');
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+
+/**
+ * Include the upstream reason in the API response as well as the log.
+ *
+ * Off unless explicitly switched on, because it leaks model names and billing
+ * state to anyone with an account. Useful for exactly as long as it takes to
+ * find the problem from a phone, then turn it off again.
+ */
+const DEBUG = String(process.env.ASSISTANT_DEBUG || '') === '1';
 
 /**
  * What the bot is, and what it must not do.
@@ -111,6 +151,145 @@ function contextBlock(trip) {
  */
 const OFF_TOPIC = /\b(write|generate|debug)\s+(me\s+)?(a\s+)?(code|program|script|essay|poem|song)\b|\bpython\b|\bjavascript\b|\bwho is the (president|prime minister)\b/i;
 
+/* -------------------------- Upstream error reading ------------------------- */
+
+/**
+ * Pull the one sentence that actually explains the failure out of an axios
+ * error, wherever OpenAI happened to put it.
+ *
+ * Returns a plain object rather than a string so the caller can branch on the
+ * parts. Every field is optional: a DNS failure has a `syscall` and nothing
+ * else, a 401 has a `type` and a `message` and no `syscall`.
+ */
+function readUpstream(err) {
+  const res = err?.response;
+  const body = res?.data;
+  const oai = body?.error || {};
+
+  return {
+    status: res?.status ?? 0,
+    // OpenAI's own machine code: 'invalid_api_key', 'insufficient_quota',
+    // 'model_not_found', 'unsupported_parameter', 'unsupported_value'…
+    code: oai.code || oai.type || err?.code || null,
+    // The sentence a human should read. Falls back through the shapes a
+    // non-JSON error page can arrive in.
+    message:
+      oai.message ||
+      (typeof body === 'string' ? body.slice(0, 300) : null) ||
+      err?.message ||
+      'unknown',
+    // Which request field OpenAI objected to, on a 400. This is what tells a
+    // max_tokens rejection apart from a malformed message array.
+    param: oai.param || null,
+    // Set for transport failures: ECONNREFUSED, ENOTFOUND, ETIMEDOUT…
+    syscall: err?.code && !res ? err.code : null,
+  };
+}
+
+/**
+ * Is this the 400 that means "you sent a parameter this model no longer takes"?
+ *
+ * Narrow on purpose. A retry is only safe when we know exactly which two fields
+ * to drop; any other 400 is a real problem and should surface, not be papered
+ * over by a second attempt that fails the same way.
+ */
+function isParamRejection(u) {
+  if (u.status !== 400) return false;
+  if (u.param === 'max_tokens' || u.param === 'temperature') return true;
+  return /max_tokens|max_completion_tokens|temperature/i.test(u.message || '');
+}
+
+/**
+ * Turn an upstream failure into the error the rider sees and the code we grep
+ * for. The message stays deliberately plain — the diagnosis is in the code and
+ * the log, not in something a rider has to read out over the phone.
+ */
+function classify(u) {
+  const CASES = [
+    {
+      when: () => u.syscall === 'ECONNABORTED' || /timeout/i.test(u.message),
+      code: 'ASSISTANT_TIMEOUT',
+      text: 'That took too long. Please try again, or contact support.',
+    },
+    {
+      // No HTTP response at all: DNS, refused connection, blocked egress.
+      when: () => !u.status,
+      code: 'ASSISTANT_UNREACHABLE',
+      text: "I couldn't reach the help service. Please try again, or contact support.",
+    },
+    {
+      when: () => u.status === 401 || u.code === 'invalid_api_key',
+      code: 'ASSISTANT_AUTH',
+      text: 'Help chat is not configured correctly. Please contact support.',
+    },
+    {
+      when: () => u.code === 'insufficient_quota',
+      code: 'ASSISTANT_QUOTA',
+      text: 'Help chat is unavailable right now. Please contact support.',
+    },
+    {
+      when: () => u.status === 429,
+      code: 'ASSISTANT_BUSY',
+      text: 'Help chat is busy right now. Please try again in a moment.',
+    },
+    {
+      when: () => u.status === 404 || u.code === 'model_not_found',
+      code: 'ASSISTANT_MODEL',
+      text: 'Help chat is not configured correctly. Please contact support.',
+    },
+    {
+      when: () => u.status >= 500,
+      code: 'ASSISTANT_UPSTREAM',
+      text: "I couldn't answer just now. Please try again, or contact support.",
+    },
+  ];
+
+  const hit = CASES.find((c) => c.when());
+  return (
+    hit || {
+      code: 'ASSISTANT_FAILED',
+      text: "I couldn't answer just now. Please try again, or contact support.",
+    }
+  );
+}
+
+/* ------------------------------- The request ------------------------------- */
+
+/**
+ * One POST to OpenAI. `legacyParams` false means the newer parameter set:
+ * max_completion_tokens, and no temperature at all.
+ */
+async function callOpenAI(messages, legacyParams) {
+  const payload = {
+    model: env.assistant.model,
+    messages,
+    ...(legacyParams
+      ? {
+          max_tokens: env.assistant.maxTokens,
+          // Low, not zero: support answers should be consistent between riders
+          // asking the same thing, but not robotic.
+          temperature: 0.3,
+        }
+      : {
+          max_completion_tokens: env.assistant.maxTokens,
+          // Omitted entirely — the newer models accept only the default, and
+          // sending the default explicitly is still a rejected parameter.
+        }),
+  };
+
+  const { data } = await axios.post(OPENAI_URL, payload, {
+    headers: {
+      Authorization: `Bearer ${env.assistant.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    // A rider is watching a typing indicator. Better to fail and offer the
+    // support number than to hold the screen for half a minute.
+    timeout: 20_000,
+  });
+
+  return data;
+}
+
 /**
  * Ask the assistant a question.
  *
@@ -147,7 +326,14 @@ async function ask({ message, history = [], trip = null }) {
      * Reported as unavailable rather than failing obscurely. The app shows a
      * "chat is unavailable, here is the support number" state, which is more
      * use than a spinner that never resolves.
+     *
+     * Logged as well as thrown. This is a deployment mistake, not a rider
+     * mistake, and it should be visible in the logs without a rider having to
+     * report it first.
      */
+    console.error(
+      '[assistant] OPENAI_API_KEY is not set in this process — every question will fail'
+    );
     throw ApiError.badRequest(
       'The assistant is not available right now. Please contact support.',
       'ASSISTANT_UNAVAILABLE'
@@ -161,46 +347,92 @@ async function ask({ message, history = [], trip = null }) {
     .slice(-6)
     .map((m) => ({ role: m.role, content: String(m.content).slice(0, 1000) }));
 
+  const messages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: contextBlock(trip) },
+    ...recent,
+    { role: 'user', content: text },
+  ];
+
+  let data;
   try {
-    const { data } = await axios.post(
-      OPENAI_URL,
-      {
-        model: env.assistant.model,
-        max_tokens: env.assistant.maxTokens,
-        // Low, not zero: support answers should be consistent between riders
-        // asking the same thing, but not robotic.
-        temperature: 0.3,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'system', content: contextBlock(trip) },
-          ...recent,
-          { role: 'user', content: text },
-        ],
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${env.assistant.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        // A rider is watching a typing indicator. Better to fail and offer the
-        // support number than to hold the screen for half a minute.
-        timeout: 20_000,
-      }
-    );
-
-    const reply = data?.choices?.[0]?.message?.content?.trim();
-    if (!reply) throw new Error('empty completion');
-
-    return { reply, offTopic: false };
+    data = await callOpenAI(messages, true);
   } catch (err) {
-    // The upstream error is logged but never returned: it can carry request
-    // details, and a rider can do nothing with "429 rate_limit_exceeded".
-    console.warn('[assistant] failed:', err?.response?.status, err?.message);
+    const u = readUpstream(err);
+
+    if (isParamRejection(u)) {
+      /*
+       * A newer model that does not take max_tokens or temperature. Retry once
+       * with the parameter set it does take, and say so in the log — the fix is
+       * free here, but someone should still know the model was changed.
+       */
+      console.warn(
+        `[assistant] model ${env.assistant.model} rejected a tuning parameter ` +
+          `(${u.param || 'unspecified'}); retrying without it`
+      );
+      try {
+        data = await callOpenAI(messages, false);
+      } catch (retryErr) {
+        throw upstreamFailure(readUpstream(retryErr), 'retry');
+      }
+    } else {
+      throw upstreamFailure(u, 'first attempt');
+    }
+  }
+
+  const reply = data?.choices?.[0]?.message?.content?.trim();
+  if (!reply) {
+    /*
+     * A 200 with nothing usable in it. Almost always a reasoning model that
+     * spent the whole max_completion_tokens budget on hidden reasoning tokens
+     * and had none left for the visible answer — which is why the finish
+     * reason is logged rather than just the emptiness.
+     */
+    const finish = data?.choices?.[0]?.finish_reason || 'unknown';
+    console.warn(
+      `[assistant] empty completion from ${env.assistant.model} ` +
+        `(finish_reason=${finish}, max tokens=${env.assistant.maxTokens})`
+    );
     throw ApiError.badRequest(
       "I couldn't answer just now. Please try again, or contact support.",
-      'ASSISTANT_FAILED'
+      'ASSISTANT_EMPTY'
     );
   }
+
+  return { reply, offTopic: false };
+}
+
+/**
+ * Log the upstream reason in full, then return the error the rider gets.
+ *
+ * The two are deliberately different. The log is for us and holds everything;
+ * the thrown message is for a rider and holds nothing they could not act on.
+ */
+function upstreamFailure(u, stage) {
+  console.warn(
+    `[assistant] ${stage} failed — ` +
+      `status=${u.status || 'none'} ` +
+      `code=${u.code || 'none'} ` +
+      `param=${u.param || 'none'} ` +
+      `model=${env.assistant.model} ` +
+      `reason="${u.message}"`
+  );
+
+  const { code, text } = classify(u);
+  const err = ApiError.badRequest(text, code);
+
+  if (DEBUG) {
+    // Only when someone has deliberately switched this on. See DEBUG above.
+    err.details = {
+      upstreamStatus: u.status,
+      upstreamCode: u.code,
+      upstreamParam: u.param,
+      upstreamMessage: u.message,
+      model: env.assistant.model,
+    };
+  }
+
+  return err;
 }
 
 module.exports = { ask, SYSTEM_PROMPT };
