@@ -13,6 +13,31 @@
  *   after the scheduled pickup time    full cancellation fee
  *   once the trip is ONGOING           cannot be cancelled at all
  *
+ * ---------------------------------------------------------------------------
+ * HIGH-VALUE BOOKINGS GO THROUGH SUPPORT
+ * ---------------------------------------------------------------------------
+ * Above a configured fare — Rs 10,000 by default — the rider cannot cancel
+ * from the app. They are asked to call support, who cancel it for them.
+ *
+ * The reason is commercial, not technical. A large booking is usually a coach
+ * or a multi-day run: the vehicle has been held out of the pool for days, a
+ * driver has been committed, and a tap in a phone app is a very cheap way to
+ * destroy an expensive arrangement. Putting a person in the loop buys the
+ * chance to move the date instead of losing the trip, and to apply the fee
+ * with some judgement rather than arithmetic.
+ *
+ * Two things about how this is enforced matter:
+ *
+ *   It is enforced HERE, not in the app. Hiding a button stops an honest
+ *   rider and nobody else; the endpoint is public and reachable with curl.
+ *   The app's own check exists to show the right screen without a round
+ *   trip, and is not what makes the rule true.
+ *
+ *   It applies to CUSTOMERS ONLY. Support cancelling on the rider's behalf is
+ *   the entire point of the rule, so an admin actor passes straight through.
+ *   Gating everyone would leave an expensive booking that literally nobody
+ *   could cancel.
+ *
  * A trip already in progress is not a cancellation, it is an early completion —
  * a different operation with a different fare, and Day 11 handles it.
  *
@@ -72,6 +97,55 @@ const CANCELLABLE = ['PENDING', 'CONFIRMED', 'ALLOCATED', 'EN_ROUTE'];
  */
 const FREE_MINUTES = Number(process.env.CANCEL_FREE_MINUTES || 60);
 
+/**
+ * The most a booking can be worth and still be cancellable from the app.
+ *
+ * Above this the rider is routed to support. Read from the environment for the
+ * same reason as FREE_MINUTES: it is a commercial number, the client will want
+ * to move it, and moving it should not be a deploy.
+ *
+ * Set it to 0 to disable the rule entirely and let every booking self-cancel.
+ */
+const SELF_SERVICE_MAX = Number(process.env.CANCEL_SELF_SERVICE_MAX || 10000);
+
+/**
+ * Where to send a rider who cannot cancel themselves.
+ *
+ * Sent in the error body rather than hardcoded in the app, so the number can be
+ * changed without an app release — and so the rider is never told to contact
+ * support without being told how.
+ */
+const SUPPORT = {
+  phone: process.env.SUPPORT_PHONE || '+918096000182',
+  email: process.env.SUPPORT_EMAIL || 'contact@abhicab.com',
+  hours: process.env.SUPPORT_HOURS || '24x7',
+};
+
+/**
+ * What the booking is worth, for the purpose of this rule.
+ *
+ * finalFare when it exists, estimatedFare otherwise. A booking repriced upward
+ * past the threshold — a vehicle swapped for a larger one, stops added — should
+ * start needing support from that moment, and reading only the estimate would
+ * leave it self-cancellable at its original quote forever.
+ */
+function fareValue(booking) {
+  const value = booking.finalFare ?? booking.estimatedFare;
+  return Number(value || 0);
+}
+
+/**
+ * Must this cancellation go through a human?
+ *
+ * Only ever true for a customer. See the header: admins are the escape hatch
+ * this rule depends on.
+ */
+function needsSupport(booking, actor) {
+  if (!SELF_SERVICE_MAX) return false;
+  if (!actor || actor.role !== 'USER') return false;
+  return fareValue(booking) > SELF_SERVICE_MAX;
+}
+
 /* ------------------------------------------------------------------ *
  * Quote a cancellation without performing it
  * ------------------------------------------------------------------ */
@@ -93,11 +167,23 @@ async function quoteCancellation(bookingId, actor) {
 
   const assessment = assess(booking, config);
 
+  /*
+   * Reported, not thrown. The quote is the screen that EXPLAINS the situation,
+   * so it has to be able to describe a booking the rider cannot cancel — and
+   * it still shows what the fee would be, because "call support" is a much
+   * easier call to make when you already know the number.
+   */
+  const requiresSupport = needsSupport(booking, actor);
+
   return {
     bookingId: booking.id,
     bookingNumber: booking.bookingNumber,
     status: booking.status,
-    cancellable: CANCELLABLE.includes(booking.status),
+    cancellable: CANCELLABLE.includes(booking.status) && !requiresSupport,
+    requiresSupport,
+    selfServiceMaxFare: SELF_SERVICE_MAX ? String(SELF_SERVICE_MAX) : null,
+    bookingValue: String(fareValue(booking)),
+    support: requiresSupport ? SUPPORT : undefined,
     ...assessment,
     policy: policyText(config),
   };
@@ -174,6 +260,31 @@ function describeSettlement(refund, outstanding) {
  */
 async function cancel(bookingId, actor, body = {}, meta = {}) {
   const booking = await loadCancellable(bookingId, actor);
+
+  /*
+   * The high-value gate, before any work is done.
+   *
+   * Placed after loadCancellable rather than inside it so the 404-for-someone
+   * else's-booking check still runs first — otherwise the error would tell a
+   * stranger that a booking exists and roughly what it is worth.
+   *
+   * The details block is what lets the app put a phone number on screen
+   * instead of a dead end.
+   */
+  if (needsSupport(booking, actor)) {
+    throw new ApiError(
+      409,
+      'CANCEL_REQUIRES_SUPPORT',
+      `Bookings above Rs ${SELF_SERVICE_MAX} are cancelled by our team. ` +
+        `Please call ${SUPPORT.phone} and we will take care of it.`,
+      {
+        bookingNumber: booking.bookingNumber,
+        bookingValue: String(fareValue(booking)),
+        selfServiceMaxFare: String(SELF_SERVICE_MAX),
+        support: SUPPORT,
+      }
+    );
+  }
 
   const config = await fareLookup.findActiveCard({
     cityId: booking.cityId,
@@ -304,6 +415,7 @@ async function loadCancellable(bookingId, actor, { allowTerminal = false } = {})
       status: true,
       pickupAt: true,
       estimatedFare: true,
+      finalFare: true,
       advancePaid: true,
       paymentMode: true,
     },
@@ -361,6 +473,12 @@ function policyText(config) {
       'Any advance paid is kept up to the fee; the remainder is refunded.',
       'If the fee exceeds the advance paid, the difference remains payable.',
       'Bookings are never cancelled automatically — only you or our team can cancel.',
+      ...(SELF_SERVICE_MAX
+        ? [
+            `Bookings above Rs ${SELF_SERVICE_MAX} are cancelled by our team — ` +
+              `call ${SUPPORT.phone} and we will arrange it.`,
+          ]
+        : []),
     ],
   };
 }
@@ -383,6 +501,10 @@ async function getPolicy({ cityId, vehicleClass, tripType }) {
 module.exports = {
   CANCELLABLE,
   FREE_MINUTES,
+  SELF_SERVICE_MAX,
+  SUPPORT,
+  needsSupport,
+  fareValue,
   quoteCancellation,
   cancel,
   assess,
