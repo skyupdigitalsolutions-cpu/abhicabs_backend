@@ -27,6 +27,25 @@ exports.register = asyncHandler(async (req, res) => {
   });
 });
 
+/* ---------------- claim an existing account (public, OTP-verified) -------- */
+
+/**
+ * POST /api/v1/auth/driver/claim
+ *
+ * The rider-already-has-this-number case. /auth/driver/register answers
+ * ACCOUNT_EXISTS; the app then requests an OTP on that number and posts it
+ * here with the licence details. Verifying the code is what stands in for the
+ * session the caller does not have yet.
+ */
+exports.claim = asyncHandler(async (req, res) => {
+  const result = await driverSelfService.claimWithOtp(req.body, meta(req));
+  res.status(201).json({
+    success: true,
+    message: 'Driver profile created. Upload your documents to continue.',
+    data: result,
+  });
+});
+
 /* ---------------- apply to drive (authenticated) ---------------- */
 
 /**

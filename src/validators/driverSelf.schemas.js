@@ -95,6 +95,24 @@ const driverApplySchema = z.object({
   email: email.optional(),
 });
 
+/**
+ * Claim an existing account for driving  (public, but OTP-verified).
+ *
+ * For a number that ALREADY has an account — almost always a rider who now
+ * wants to drive. The code is what makes this safe to expose without a token:
+ * it proves the caller controls the number, which plain /driver/register
+ * cannot, and that endpoint hands back a session.
+ */
+const driverClaimSchema = z.object({
+  phone,
+  code: z
+    .string()
+    .trim()
+    .regex(/^\d{4,8}$/, 'Enter the numeric code we sent you'),
+  licenceNumber,
+  licenceExpiry: dateOpt,
+});
+
 /* ------------------------------------------------------------------ *
  * Profile
  * ------------------------------------------------------------------ */
@@ -156,6 +174,7 @@ module.exports = {
 
   driverRegisterSchema,
   driverApplySchema,
+  driverClaimSchema,
   updateSelfSchema,
   driverDocSchema,
   vehicleDocSchema,

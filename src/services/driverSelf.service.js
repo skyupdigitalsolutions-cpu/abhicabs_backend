@@ -30,6 +30,7 @@ const { prisma, isUniqueViolation, violatedFields } = require('../config/prisma'
 const { ApiError, paginated } = require('../utils/helpers');
 const tokens = require('../utils/tokens');
 const storageService = require('./storage.service');
+const otpService = require('./otp.service');
 const {
   REQUIRED_DRIVER_DOCS,
   REQUIRED_VEHICLE_DOCS,
@@ -245,6 +246,91 @@ async function register({ name, phone, email, licenceNumber, licenceExpiry = nul
 
   const driver = await requireDriver(created.id);
   return { driver, onboarding: await onboardingState(created.id), accessToken, refreshToken };
+}
+
+/* ------------------------------------------------------------------ *
+ * Claim an existing account for driving  (public, OTP-verified)
+ * ------------------------------------------------------------------ */
+
+/**
+ * The rider-becomes-driver path for someone who is NOT signed in.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS ALONGSIDE register() AND applyForUser()
+ * ---------------------------------------------------------------------------
+ * A rider downloading the driver app types the number they already use. That
+ * is the normal case, not an edge case, and sending them away to sign in first
+ * is a dead end in a signup form.
+ *
+ * register() cannot serve them: it is unauthenticated AND returns a session, so
+ * attaching a profile to an existing account there would let anyone who knows a
+ * number log in as its owner. applyForUser() is safe but needs a token they do
+ * not have yet.
+ *
+ * So this endpoint asks for the one thing that closes the gap — the code we
+ * just texted to that number. Verifying it proves control of the handset,
+ * which is exactly the proof a token would have given us. The driver app flow
+ * becomes: register -> ACCOUNT_EXISTS -> request OTP -> claim, all on one
+ * screen, with no sign-in detour.
+ *
+ * The OTP is consumed on success (otp.service deletes it), so the same code
+ * cannot be replayed to claim the account twice.
+ */
+async function claimWithOtp({ phone, code, licenceNumber, licenceExpiry = null }, meta = {}) {
+  const existing = await findUserByMobile(phone);
+
+  if (!existing) {
+    throw ApiError.notFound(
+      'No account found for this mobile number. Please register first.',
+      'NOT_REGISTERED',
+    );
+  }
+  if (existing.driver) {
+    throw ApiError.conflict(
+      'A driver account already exists for this number. Please sign in instead.',
+      'DRIVER_EXISTS',
+    );
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: existing.id },
+    select: { id: true, name: true, email: true, phone: true, role: true, isActive: true },
+  });
+  if (!user.isActive) {
+    throw ApiError.forbidden('Your account has been deactivated', 'ACCOUNT_INACTIVE');
+  }
+  if (isStaffRole(user.role)) {
+    throw ApiError.forbidden(
+      'Staff accounts cannot hold a driver profile',
+      'STAFF_ACCOUNT',
+    );
+  }
+
+  /*
+   * Keyed by ACCOUNT ID, the same subject /auth/otp/request issues under — so
+   * the code the rider just received for this number is the code checked here.
+   * Throws on wrong, expired or locked; consumes it on success.
+   */
+  await otpService.verifyOtp(user.id, code);
+
+  // Reuses the authenticated path, so the two doors cannot drift apart: same
+  // licence-uniqueness handling, same PENDING kycStatus, same role left alone.
+  const { driver, onboarding } = await applyForUser(user.id, { licenceNumber, licenceExpiry });
+
+  const accessToken = tokens.signAccessToken({ userId: user.id, role: user.role });
+  const refreshToken = tokens.signRefreshToken({ userId: user.id });
+
+  await prisma.refreshToken.create({
+    data: {
+      userId: user.id,
+      tokenHash: tokens.hashToken(refreshToken),
+      expiresAt: tokens.refreshExpiryDate(),
+      userAgent: (meta.userAgent || '').slice(0, 255) || null,
+      ip: (meta.ip || '').slice(0, 45) || null,
+    },
+  });
+
+  return { driver, onboarding, accessToken, refreshToken };
 }
 
 /* ------------------------------------------------------------------ *
@@ -665,6 +751,7 @@ async function submitForReview(userId) {
 
 module.exports = {
   register,
+  claimWithOtp,
   applyForUser,
   getMe,
   updateMe,

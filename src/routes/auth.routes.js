@@ -70,6 +70,26 @@ router.post(
   driverSelfCtrl.register
 );
 
+/*
+ * The SAME PERSON, already a rider, signing up to drive.
+ *
+ * /driver/register above refuses a number that already has an account
+ * (ACCOUNT_EXISTS) because it is unauthenticated and returns a session —
+ * attaching a driver profile there would be takeover by phone number. This
+ * route accepts the same signup, plus the OTP we just sent to that number,
+ * which proves the caller owns it.
+ *
+ * otpVerifyLimiter, not authLimiter: this endpoint checks a code, so it is
+ * rate-limited as the code-guessing surface it is. The per-code attempt cap in
+ * otp.service still applies underneath.
+ */
+router.post(
+  '/driver/claim',
+  otpVerifyLimiter,
+  validate({ body: driverSelfSchemas.driverClaimSchema }),
+  driverSelfCtrl.claim
+);
+
 /* ---------------- OTP flow (customers, drivers) ---------------- */
 
 router.post(
