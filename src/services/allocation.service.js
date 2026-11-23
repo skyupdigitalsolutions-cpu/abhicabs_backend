@@ -40,6 +40,41 @@ const {
 } = require('../models/allocation.model');
 
 /* ------------------------------------------------------------------ *
+ * Nobody drives their own booking
+ * ------------------------------------------------------------------ */
+
+/**
+ * One account can now be both a rider and a driver, which creates a case that
+ * could not exist before: the person who booked the trip being assigned to
+ * drive it.
+ *
+ * That must be refused. The trip's whole verification chain assumes two
+ * people — the rider reads out a start OTP the driver cannot see, the driver
+ * photographs an odometer the rider does not control, the rider rates a driver
+ * who is not themselves. With one person on both ends none of it means
+ * anything, and a self-allocated trip is an invoice someone wrote to
+ * themselves.
+ *
+ * Checked HERE rather than in the dispatch controller because this is the only
+ * door: assignManually and reassign both come through allocate(), and the
+ * WhatsApp bot and the admin console share them. A guard on the route would
+ * leave the other callers open.
+ *
+ * Both ids are the users.id — drivers.user_id is the Driver primary key and
+ * bookings.customer_id is the Customer primary key — so this is a direct
+ * comparison with no extra query.
+ */
+function assertNotSelfDrive(booking, driverId) {
+  if (!driverId || !booking?.customerId) return;
+  if (driverId !== booking.customerId) return;
+
+  throw ApiError.conflict(
+    'This booking was made by the same person. A rider cannot be assigned to drive their own trip.',
+    'SELF_ALLOCATION_FORBIDDEN',
+  );
+}
+
+/* ------------------------------------------------------------------ *
  * Core: allocate a specific vehicle to a booking
  * ------------------------------------------------------------------ */
 
@@ -72,9 +107,14 @@ async function allocate(bookingId, { vehicleId, driverId = null }, actor = null,
       returnAt: true,
       durationMinutes: true,
       bookingNumber: true,
+      // Needed by assertNotSelfDrive below. customers.user_id and
+      // drivers.user_id are the same id, so this compares directly to driverId.
+      customerId: true,
     },
   });
   if (!booking) throw ApiError.notFound('Booking not found');
+
+  assertNotSelfDrive(booking, driverId);
 
   if (!ASSIGNABLE_BOOKING_STATUSES.includes(booking.status)) {
     throw ApiError.conflict(
@@ -345,9 +385,14 @@ async function reassign(bookingId, { vehicleId, driverId = null }, actor = null,
     select: {
       id: true, status: true, vehicleClass: true, cityId: true, tripType: true,
       pickupAt: true, returnAt: true, durationMinutes: true, bookingNumber: true,
+      customerId: true,
     },
   });
   if (!booking) throw ApiError.notFound('Booking not found');
+
+  // Reassignment is the other way a driver reaches a booking. Same rule.
+  assertNotSelfDrive(booking, driverId);
+
   if (!REASSIGNABLE_STATUSES.includes(booking.status)) {
     throw ApiError.conflict(`A ${booking.status} booking cannot be reassigned`, 'BOOKING_NOT_REASSIGNABLE');
   }

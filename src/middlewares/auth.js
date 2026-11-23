@@ -1,14 +1,21 @@
 'use strict';
 
 /**
- * src/middlewares/auth.js   — UPDATED for Day 2
+ * src/middlewares/auth.js
  *
- * requireAuth         verifies the Bearer access token, loads the user
- * requireRole         coarse role gate (kept — still right for a few routes)
- * requirePermission   NEW: fine-grained gate backed by role_permissions
- * requireAllPermissions NEW: for genuinely compound operations
- * requireSelfOrAdmin  ownership guard for :id routes
- * attachPermissions   NEW: exposes the caller's permission list to the client
+ * requireAuth           verifies the Bearer access token, loads the user AND
+ *                       their rider/driver profiles
+ * requireRole           coarse role gate (kept — still right for a few routes)
+ * requireDriverProfile  NEW: gate for the driver app. Passes on the PRESENCE
+ *                       of a drivers row, not on users.role, so one account
+ *                       can be both a rider and a driver
+ * requirePermission     fine-grained gate backed by role_permissions
+ * requireAllPermissions for genuinely compound operations
+ * requireSelfOrAdmin    ownership guard for :id routes
+ * attachPermissions     exposes the caller's permission list to the client
+ *
+ * See src/lib/accountRoles.js for why req.user.role is now an EFFECTIVE role
+ * and the stored one lives on req.user.baseRole.
  */
 
 const jwt = require('jsonwebtoken');
@@ -16,6 +23,7 @@ const { verifyAccessToken } = require('../utils/tokens');
 const { prisma } = require('../config/prisma');
 const { ApiError, asyncHandler } = require('../utils/helpers');
 const permissionService = require('../services/permission.service');
+const { isStaffRole, effectiveRole } = require('../lib/accountRoles');
 
 function extractBearer(req) {
   const header = req.get('authorization') || '';
@@ -52,15 +60,52 @@ const requireAuth = asyncHandler(async (req, res, next) => {
     throw ApiError.unauthorized('Invalid access token', 'INVALID_TOKEN');
   }
 
+  /*
+   * The two profile rows ride along on the SAME query — one indexed primary-key
+   * lookup plus two joins, not three round trips. They are what tells us
+   * whether this person can ride, can drive, or both; users.role no longer
+   * answers that question on its own.
+   */
   const user = await prisma.user.findUnique({
     where: { id: payload.sub },
-    select: { id: true, name: true, email: true, phone: true, role: true, isActive: true },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      role: true,
+      isActive: true,
+      customer: { select: { userId: true } },
+      driver: { select: { userId: true, kycStatus: true } },
+    },
   });
 
   if (!user) throw ApiError.unauthorized('Account no longer exists', 'USER_NOT_FOUND');
   if (!user.isActive) throw ApiError.forbidden('Account is deactivated', 'ACCOUNT_INACTIVE');
 
-  req.user = user;
+  req.user = {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    phone: user.phone,
+    isActive: user.isActive,
+
+    /*
+     * EFFECTIVE role. Staff keep theirs; every self-service account reads as
+     * 'USER' so the ownership scoping in booking/payment/review/cancellation
+     * applies to a driver who is browsing as a rider. The driver routers put
+     * 'DRIVER' back for their own requests.
+     */
+    role: effectiveRole(user.role),
+
+    /** What the users table actually stores. Never used for data scoping. */
+    baseRole: user.role,
+
+    hasRiderProfile: !!user.customer,
+    hasDriverProfile: !!user.driver,
+    driverKycStatus: user.driver?.kycStatus || null,
+  };
+
   return next();
 });
 
@@ -77,11 +122,76 @@ function requireRole(...allowed) {
   const permitted = new Set(allowed.flat());
   return function roleGate(req, res, next) {
     if (!req.user) return next(ApiError.unauthorized());
-    if (!permitted.has(req.user.role)) {
+    // baseRole as well as role: requireAuth rewrites `role` to 'USER' for every
+    // self-service account, and a leftover requireRole('DRIVER') somewhere must
+    // not start failing because of that. Prefer requireDriverProfile below.
+    if (!permitted.has(req.user.role) && !permitted.has(req.user.baseRole)) {
       return next(ApiError.forbidden('Insufficient permissions'));
     }
     return next();
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * requireDriverProfile — the driver-app gate
+ * ------------------------------------------------------------------ */
+
+/**
+ * Passes when the caller OWNS A DRIVER PROFILE, whatever their users.role says.
+ *
+ * This is what lets one account be both. A rider who applies to drive keeps
+ * role USER and gains a drivers row; this gate sees the row and lets them into
+ * the driver app, while every rider-facing endpoint keeps treating them as the
+ * ordinary customer they also are.
+ *
+ * It then sets req.user.role = 'DRIVER' FOR THIS REQUEST ONLY. Downstream
+ * services (lifecycle.startTrip, lifecycle.completeTrip) branch on that role to
+ * decide whether the start OTP and the odometer photo are mandatory — rules
+ * that exist for drivers and are waived for ops. Restoring the role here keeps
+ * those rules exactly as they were, without touching a line of lifecycle code.
+ *
+ * Signing up is still not approval: kycStatus is untouched by this gate, and
+ * dispatch remains the only thing that can put a driver on a trip.
+ */
+const requireDriverProfile = asyncHandler(async (req, res, next) => {
+  if (!req.user) throw ApiError.unauthorized();
+
+  // The legacy fallback matters: a handful of older DRIVER-role accounts may
+  // predate their drivers row, and this gate must be no stricter than the
+  // requireRole('DRIVER') it replaces.
+  const isDriver = req.user.hasDriverProfile || req.user.baseRole === 'DRIVER';
+
+  if (!isDriver) {
+    throw ApiError.forbidden(
+      'This account has no driver profile. Apply to drive first.',
+      'NOT_A_DRIVER',
+    );
+  }
+
+  req.user = { ...req.user, role: 'DRIVER' };
+  return next();
+});
+
+/* ------------------------------------------------------------------ *
+ * requireSelfServiceAccount
+ * ------------------------------------------------------------------ */
+
+/**
+ * Blocks staff from the rider/driver self-service surfaces. An ops account
+ * acquiring a driver profile for itself would hold staff permissions AND a
+ * dispatchable identity at once, which is not a combination anyone asked for.
+ */
+function requireSelfServiceAccount(req, res, next) {
+  if (!req.user) return next(ApiError.unauthorized());
+  if (isStaffRole(req.user.baseRole)) {
+    return next(
+      ApiError.forbidden(
+        'Staff accounts cannot hold a rider or driver profile',
+        'STAFF_ACCOUNT',
+      ),
+    );
+  }
+  return next();
 }
 
 /* ------------------------------------------------------------------ *
@@ -118,7 +228,9 @@ function requirePermission(...required) {
   return asyncHandler(async (req, res, next) => {
     if (!req.user) throw ApiError.unauthorized();
 
-    const ok = await permissionService.roleHasAny(req.user.role, list);
+    // Permissions follow the STORED role: requireAuth's effective role is for
+    // data scoping, not for staff capability.
+    const ok = await permissionService.roleHasAny(req.user.baseRole || req.user.role, list);
     if (!ok) {
       // Name the missing permission. This is a staff-facing API, so the extra
       // detail is a support aid, not an information leak — the caller is
@@ -142,7 +254,7 @@ function requireAllPermissions(...required) {
   }
   return asyncHandler(async (req, res, next) => {
     if (!req.user) throw ApiError.unauthorized();
-    const ok = await permissionService.roleHasAll(req.user.role, list);
+    const ok = await permissionService.roleHasAll(req.user.baseRole || req.user.role, list);
     if (!ok) {
       throw ApiError.forbidden(
         `This action requires all of: ${list.join(', ')}`,
@@ -167,7 +279,7 @@ function requireAllPermissions(...required) {
  */
 const attachPermissions = asyncHandler(async (req, res, next) => {
   if (req.user) {
-    const perms = await permissionService.getPermissionsForRole(req.user.role);
+    const perms = await permissionService.getPermissionsForRole(req.user.baseRole || req.user.role);
     req.permissions = [...perms];
   }
   return next();
@@ -189,7 +301,7 @@ const attachPermissions = asyncHandler(async (req, res, next) => {
 function requireSelfOrAdmin(paramName = 'id') {
   return function ownershipGate(req, res, next) {
     if (!req.user) return next(ApiError.unauthorized());
-    if (req.user.role === 'ADMIN') return next();
+    if ((req.user.baseRole || req.user.role) === 'ADMIN') return next();
     if (req.params[paramName] === req.user.id) return next();
     return next(ApiError.notFound());
   };
@@ -198,6 +310,8 @@ function requireSelfOrAdmin(paramName = 'id') {
 module.exports = {
   requireAuth,
   requireRole,
+  requireDriverProfile,
+  requireSelfServiceAccount,
   requirePermission,
   requireAllPermissions,
   requireSelfOrAdmin,

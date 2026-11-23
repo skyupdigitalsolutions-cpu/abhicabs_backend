@@ -29,6 +29,7 @@ const bcrypt = require('bcryptjs');
 
 const { prisma } = require('../config/prisma');
 const { ApiError } = require('../utils/helpers');
+const { isStaffRole } = require('../lib/accountRoles');
 const tokens = require('../utils/tokens');
 const audit = require('./audit.service');
 
@@ -67,14 +68,20 @@ async function resolveCustomerByPhone(phone, profileName) {
     }
 
     /*
-     * A DRIVER or an ADMIN whose phone happens to be messaging the bot must
-     * not be handed a customer session. Roles are not interchangeable: a
-     * driver booking a cab through the bot would be acting as themselves in a
-     * role the booking flow does not expect.
+     * STAFF cannot be handed a customer session: an ops or finance account
+     * acting as a rider over WhatsApp is an identity the booking flow does not
+     * expect, and the account holds powers a chat session should never carry.
+     *
+     * A DRIVER can. That used to be refused alongside staff, on the reasoning
+     * that roles are not interchangeable — but a driver booking a cab for
+     * themselves is now an ordinary thing: one account can hold both a drivers
+     * row and a customers row. They book as the customer they also are, the
+     * customers row is upserted below exactly as for any rider, and
+     * allocation.service refuses to put them on their own trip.
      */
-    if (existing.role !== 'USER') {
+    if (isStaffRole(existing.role)) {
       throw ApiError.forbidden(
-        'This number belongs to a staff or driver account and cannot book over WhatsApp',
+        'This number belongs to a staff account and cannot book over WhatsApp',
         'ROLE_NOT_BOOKABLE',
       );
     }

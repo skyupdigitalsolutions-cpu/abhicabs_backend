@@ -15,13 +15,20 @@ const express = require('express');
 
 const ctrl = require('../controllers/driverBooking.controller');
 const { validate } = require('../middlewares/validate');
-const { requireAuth, requireRole } = require('../middlewares/auth');
+const { requireAuth, requireDriverProfile } = require('../middlewares/auth');
 const { uploadSingle } = require('../middlewares/upload');
 const s = require('../validators/payment.schemas');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('DRIVER'));
+/*
+ * requireDriverProfile, not requireRole('DRIVER'): a rider who also drives keeps
+ * users.role = USER and is recognised by their drivers row instead. The gate
+ * also restores role='DRIVER' on req.user for this request, which is what keeps
+ * the start-OTP and odometer-photo rules in lifecycle.service firing for every
+ * action below.
+ */
+router.use(requireAuth, requireDriverProfile);
 
 /* ---------------- reads ---------------- */
 

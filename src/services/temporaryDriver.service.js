@@ -90,19 +90,25 @@ async function create(input, actor, meta = {}) {
    */
   const phoneOwner = await prisma.user.findUnique({
     where: { phone },
-    select: { id: true, name: true, role: true },
+    // The drivers row, not users.role, is what says "this person drives".
+    // A rider who later applied to drive keeps role USER and would otherwise
+    // read as a plain customer here — blocking a dispatcher from hiring in
+    // someone who is already a registered driver.
+    select: { id: true, name: true, role: true, driver: { select: { userId: true } } },
   });
 
   /*
-   * If the phone belongs to an EXISTING DRIVER, reuse them for this temporary
-   * assignment instead of blocking. This lets dispatch assign any known driver
-   * — whether permanent or temporary — without re-creating their account.
+   * If the phone belongs to someone who ALREADY HAS A DRIVER PROFILE, reuse
+   * them for this temporary assignment instead of blocking. This lets dispatch
+   * hire in any known driver — permanent, temporary, or a rider who applied to
+   * drive — without re-creating their account.
    *
-   * If the phone belongs to a non-driver (customer), still block: silently
-   * converting a customer into a driver would be a security escalation.
+   * If the phone belongs to a rider with no driver profile, still block:
+   * silently converting a customer into a driver would be a security
+   * escalation. They apply through POST /driver/me/apply like anyone else.
    */
   if (phoneOwner) {
-    if (phoneOwner.role === 'DRIVER') {
+    if (phoneOwner.driver) {
       // Reuse the existing driver — just ensure they have a vehicle assigned
       const existingDriver = await prisma.driver.findUnique({
         where: { userId: phoneOwner.id },

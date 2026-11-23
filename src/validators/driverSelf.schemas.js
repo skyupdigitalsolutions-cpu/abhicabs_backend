@@ -80,6 +80,21 @@ const driverRegisterSchema = z.object({
   licenceExpiry: dateOpt,
 });
 
+/**
+ * Apply to drive  (authenticated — a signed-in rider adding a driver profile).
+ *
+ * No phone field: the number is whatever the caller's account already holds,
+ * and accepting one here would let someone claim a licence against a number
+ * they do not own. Name and email are optional gap-fillers — the service only
+ * writes them where the account has none.
+ */
+const driverApplySchema = z.object({
+  licenceNumber,
+  licenceExpiry: dateOpt,
+  name: name.optional(),
+  email: email.optional(),
+});
+
 /* ------------------------------------------------------------------ *
  * Profile
  * ------------------------------------------------------------------ */
@@ -140,6 +155,7 @@ module.exports = {
   REQUIRED_VEHICLE_DOCS,
 
   driverRegisterSchema,
+  driverApplySchema,
   updateSelfSchema,
   driverDocSchema,
   vehicleDocSchema,

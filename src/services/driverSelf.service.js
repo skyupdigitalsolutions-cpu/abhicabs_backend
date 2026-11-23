@@ -34,6 +34,7 @@ const {
   REQUIRED_DRIVER_DOCS,
   REQUIRED_VEHICLE_DOCS,
 } = require('../validators/driverSelf.schemas');
+const { isStaffRole } = require('../lib/accountRoles');
 
 const BCRYPT_ROUNDS = 12;
 
@@ -80,6 +81,10 @@ const VEHICLE_SELF_SELECT = {
 /** Placeholder email keeps users.email UNIQUE satisfiable for phone-first signup. */
 const placeholderEmail = (phone) => `phone_${phone}@placeholder.local`;
 
+/** Generated, undeliverable addresses — safe to replace with a real one. */
+const isPlaceholderEmail = (email) =>
+  /@(placeholder\.local|whatsapp\.invalid|temp-driver\.invalid)$/i.test(String(email || ''));
+
 /** Which of `required` are missing from a documents JSON blob. */
 function missingDocs(documents, required) {
   const docs = documents && typeof documents === 'object' ? documents : {};
@@ -124,17 +129,70 @@ async function requireDriver(userId) {
  * Register
  * ------------------------------------------------------------------ */
 
-async function register({ name, phone, email, licenceNumber, licenceExpiry = null }, meta = {}) {
-  const clash = await prisma.user.findFirst({
-    where: { phone, role: { in: ['USER', 'DRIVER'] } },
-    select: { id: true, role: true },
-  });
-  if (clash) {
+/**
+ * Find the account that owns a mobile number, comparing the LAST TEN DIGITS of
+ * what is stored rather than the exact string.
+ *
+ * Same reasoning as authOtp.findAccountByPhone: older rows stored numbers as
+ * typed, so "+91 98765 43210" and "9876543210" are one person and an exact
+ * match would miss. Missing the match here is the dangerous direction — it
+ * would create a SECOND account for someone who already has one, and then
+ * neither can sign in by SMS.
+ */
+async function findUserByMobile(rawPhone) {
+  const mobile = String(rawPhone || '').replace(/\D/g, '').slice(-10);
+  if (mobile.length !== 10) return null;
+
+  const rows = await prisma.$queryRaw`
+    SELECT id FROM users
+    WHERE phone IS NOT NULL
+      AND right(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ${mobile}
+    LIMIT 2
+  `;
+
+  if (rows.length === 0) return null;
+  if (rows.length > 1) {
     throw ApiError.conflict(
-      clash.role === 'DRIVER'
-        ? 'A driver account already exists for this number. Please sign in instead.'
-        : 'This number is already registered as a rider. Please use a different number for your driver account.',
-      clash.role === 'DRIVER' ? 'DRIVER_EXISTS' : 'PHONE_TAKEN',
+      'This mobile number is linked to more than one account. Please contact support.',
+      'PHONE_AMBIGUOUS',
+    );
+  }
+
+  return prisma.user.findUnique({
+    where: { id: rows[0].id },
+    select: { id: true, role: true, driver: { select: { userId: true } } },
+  });
+}
+
+/**
+ * PUBLIC driver signup — for a number with no account at all.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY AN EXISTING NUMBER IS REFUSED RATHER THAN UPGRADED
+ * ---------------------------------------------------------------------------
+ * One person CAN now be both a rider and a driver — but not through this
+ * endpoint, which is unauthenticated and hands back a token pair on success.
+ * Attaching a driver profile to an existing account here would mean anyone who
+ * knows a rider's mobile number could type it in and be logged into that
+ * person's account. That is not a signup, it is account takeover.
+ *
+ * So an existing number is told to sign in, and the upgrade happens on
+ * applyForUser() below, behind a verified session. The error code is what the
+ * app keys off to route them to the OTP screen instead of showing a dead end.
+ */
+async function register({ name, phone, email, licenceNumber, licenceExpiry = null }, meta = {}) {
+  const existing = await findUserByMobile(phone);
+
+  if (existing) {
+    if (existing.driver) {
+      throw ApiError.conflict(
+        'A driver account already exists for this number. Please sign in instead.',
+        'DRIVER_EXISTS',
+      );
+    }
+    throw ApiError.conflict(
+      'An account already exists for this number. Sign in, then apply to drive from your profile.',
+      'ACCOUNT_EXISTS',
     );
   }
 
@@ -187,6 +245,88 @@ async function register({ name, phone, email, licenceNumber, licenceExpiry = nul
 
   const driver = await requireDriver(created.id);
   return { driver, onboarding: await onboardingState(created.id), accessToken, refreshToken };
+}
+
+/* ------------------------------------------------------------------ *
+ * Apply to drive  (authenticated — an existing rider adds a driver profile)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Adds a drivers row to an account that already exists, so one person can ride
+ * and drive on the same login, the same number and the same trip history.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THIS DELIBERATELY DOES NOT DO
+ * ---------------------------------------------------------------------------
+ * It does not touch users.role. The rider stays role USER and gains a driver
+ * PROFILE; requireDriverProfile reads the profile, not the role (see
+ * src/lib/accountRoles.js). Flipping the role would re-introduce exactly the
+ * either/or this change exists to remove, and would quietly re-scope every
+ * rider-facing query the moment someone applied.
+ *
+ * It does not touch kycStatus either — the schema default PENDING stands.
+ * Applying is applying. An admin verifying the licence and activating the
+ * vehicle is still the only path to being dispatchable, and allocation.service
+ * will refuse to put this person on their own booking regardless.
+ *
+ * No tokens are issued: the caller already has a live session, which is the
+ * whole point of doing this here rather than on the public endpoint.
+ */
+async function applyForUser(userId, { licenceNumber, licenceExpiry = null, name, email } = {}) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, role: true, name: true, email: true },
+  });
+  if (!user) throw ApiError.notFound('Account not found', 'USER_NOT_FOUND');
+
+  // Belt and braces — the route already runs requireSelfServiceAccount. A
+  // dispatcher who could also be dispatched is not a role combination anyone
+  // designed for.
+  if (isStaffRole(user.role)) {
+    throw ApiError.forbidden(
+      'Staff accounts cannot hold a driver profile',
+      'STAFF_ACCOUNT',
+    );
+  }
+
+  const existing = await prisma.driver.findUnique({
+    where: { userId },
+    select: { userId: true },
+  });
+  if (existing) {
+    throw ApiError.conflict(
+      'You already have a driver profile on this account.',
+      'DRIVER_PROFILE_EXISTS',
+    );
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Only fill gaps. A rider who already gave us a real name and address
+      // should not have them overwritten by whatever the driver form collected.
+      const patch = {};
+      if (name && !user.name) patch.name = name;
+      if (email && isPlaceholderEmail(user.email)) patch.email = email;
+      if (Object.keys(patch).length > 0) {
+        await tx.user.update({ where: { id: userId }, data: patch });
+      }
+
+      await tx.driver.create({
+        data: {
+          userId,
+          licenceNumber,
+          licenceExpiry,
+          // kycStatus omitted on purpose -> schema default PENDING.
+        },
+      });
+    });
+  } catch (err) {
+    if (isUniqueViolation(err)) throw claimConflict(err);
+    throw err;
+  }
+
+  const driver = await requireDriver(userId);
+  return { driver, onboarding: await onboardingState(userId) };
 }
 
 /* ------------------------------------------------------------------ *
@@ -525,6 +665,7 @@ async function submitForReview(userId) {
 
 module.exports = {
   register,
+  applyForUser,
   getMe,
   updateMe,
   saveDriverDocument,

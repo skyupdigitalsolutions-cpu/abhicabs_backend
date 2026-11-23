@@ -12,14 +12,16 @@ const express = require('express');
 
 const ctrl = require('../controllers/location.controller');
 const { validate } = require('../middlewares/validate');
-const { requireAuth, requirePermission, requireRole } = require('../middlewares/auth');
+const { requireAuth, requirePermission, requireDriverProfile } = require('../middlewares/auth');
 const { pingLimiter } = require('../middlewares/rateLimit');
 const s = require('../validators/location.schemas');
 
 /* ---------------- driver: /driver/location ---------------- */
 
 const driver = express.Router();
-driver.use(requireAuth, requireRole('DRIVER'));
+// Gated on the drivers row, not users.role — a rider who also drives pings
+// from the same account. See src/lib/accountRoles.js.
+driver.use(requireAuth, requireDriverProfile);
 
 // THE HOT PATH. A driver posts their position every few seconds. Redis only.
 driver.post('/ping', pingLimiter, validate({ body: s.pingSchema }), ctrl.ping);

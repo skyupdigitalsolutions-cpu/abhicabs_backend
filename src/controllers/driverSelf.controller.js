@@ -27,6 +27,25 @@ exports.register = asyncHandler(async (req, res) => {
   });
 });
 
+/* ---------------- apply to drive (authenticated) ---------------- */
+
+/**
+ * POST /api/v1/driver/me/apply
+ *
+ * An existing rider adding a driver profile to the account they are already
+ * signed in to. The public /auth/driver/register above is only for numbers
+ * with no account at all — see the service for why an unauthenticated upgrade
+ * would be account takeover.
+ */
+exports.apply = asyncHandler(async (req, res) => {
+  const result = await driverSelfService.applyForUser(req.user.id, req.body);
+  res.status(201).json({
+    success: true,
+    message: 'Driver profile created. Upload your documents to continue.',
+    data: result,
+  });
+});
+
 /* ---------------- profile ---------------- */
 
 exports.getMe = asyncHandler(async (req, res) => {
