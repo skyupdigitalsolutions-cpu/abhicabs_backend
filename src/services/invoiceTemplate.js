@@ -501,4 +501,27 @@ function buildInvoiceText({ invoice, booking }) {
   ].join('\n');
 }
 
-module.exports = { buildInvoiceHtml, buildInvoiceText };
+module.exports = {
+  buildInvoiceHtml,
+  buildInvoiceText,
+
+  /*
+   * Shared with bookingConfirmationTemplate so the confirmation and the
+   * invoice are the same document in two states rather than two documents
+   * that happen to look alike today. A change to the box, the fare table or
+   * the words helper reaches both, which is the point — the rider sees one
+   * before the trip and one after, and a mismatch between them reads as a
+   * different company.
+   */
+  esc,
+  money,
+  dmyShort,
+  dmyTime,
+  amountInWords,
+  kv,
+  fareRow,
+  LINE,
+  INK,
+  GREY,
+  GOLD,
+};

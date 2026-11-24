@@ -43,6 +43,20 @@
  * variant exists.
  */
 
+/*
+ * The box, the fare table and the words helper are SHARED with the invoice.
+ * The confirmation and the invoice are the same document in two states — one
+ * before the trip with an estimate, one after with the final fare and the tax
+ * — so they must not be two layouts that merely resemble each other today.
+ */
+const {
+  kv,
+  fareRow,
+  amountInWords,
+  LINE: BOX_LINE,
+  GOLD,
+} = require('./invoiceTemplate');
+
 const AMBER = '#FFC007';
 const INK = '#1a1a1a';
 const MUTED = '#6b6b6b';
@@ -360,94 +374,230 @@ function bulletList(items) {
     .join('');
 }
 
+/**
+ * Render the confirmation in the same ruled box the invoice uses.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT DIFFERS FROM THE INVOICE, AND WHY
+ * ---------------------------------------------------------------------------
+ * The banner reads BOOKING CONFIRMATION, never "TAX INVOICE". This document
+ * is not one: no GST has been charged, no invoice number exists, and the fare
+ * is a quote that can still move. Printing a tax-invoice heading on it would
+ * invite a customer to file it as one.
+ *
+ * For the same reason the total is labelled "Estimated Total" until the trip
+ * settles, and the fare table carries the quote's own breakdown rather than a
+ * CGST/SGST split that has not been computed yet.
+ *
+ * Everything else — the box, the two detail columns, the Particulars/Rate/
+ * Amount table, amount in words, numbered terms, the footer line — is the
+ * invoice's layout, shared from the same module.
+ */
 function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs' }) {
   const m = model({ booking, name, seller });
 
+  /* The quote breakdown, as fare table rows. Notes ride under their label. */
   const fareLines = m.lines
-    .map(
-      (l) => `<tr>
-        <td style="padding:8px 16px;font-size:13px;color:${INK};border-bottom:1px solid ${RULE};">
-          ${esc(l.label)}${l.note ? `<div style="font-size:11px;color:${MUTED};margin-top:2px;">${esc(l.note)}</div>` : ''}
-        </td>
-        <td style="padding:8px 16px;font-size:13px;color:${INK};text-align:right;white-space:nowrap;border-bottom:1px solid ${RULE};">${esc(l.amount)}</td>
-      </tr>`,
+    .map((l) =>
+      fareRow(
+        `${esc(l.label)}${
+          l.note
+            ? `<div style="font-size:8px;color:${MUTED};padding-top:2px;">${esc(l.note)}</div>`
+            : ''
+        }`,
+        '',
+        esc(l.amount),
+      ),
     )
     .join('');
 
-  const discountLine = m.discountRow && m.discountRow.amount
-    ? `<tr>
-        <td style="padding:8px 16px;font-size:13px;color:${INK};border-bottom:1px solid ${RULE};">${esc(m.discountRow.label)}</td>
-        <td style="padding:8px 16px;font-size:13px;color:${INK};text-align:right;white-space:nowrap;border-bottom:1px solid ${RULE};">${esc(m.discountRow.amount)}</td>
-      </tr>`
-    : '';
+  const discountLine =
+    m.discountRow && m.discountRow.amount
+      ? fareRow(esc(m.discountRow.label), '', esc(m.discountRow.amount))
+      : '';
 
   const totalLine = m.total
-    ? `<tr>
-        <td style="padding:12px 16px;font-size:14px;font-weight:700;color:${INK};background:${PANEL};">
-          ${m.isFinal ? 'Total Amount' : 'Estimated Total'}
-          <div style="font-size:11px;font-weight:400;color:${MUTED};margin-top:2px;">Inclusive of taxes</div>
-        </td>
-        <td style="padding:12px 16px;font-size:16px;font-weight:700;color:${INK};text-align:right;white-space:nowrap;background:${PANEL};">${esc(m.total)}</td>
-      </tr>`
+    ? fareRow(
+        m.isFinal ? 'Total Amount' : 'Estimated Total',
+        '',
+        esc(m.total),
+        { bold: true, topRule: true },
+      )
     : '';
 
-  return `<!doctype html>
+  /* Numeric total for the words line. m.total is already formatted. */
+  const totalNum = Number(booking.finalFare ?? booking.estimatedFare ?? 0);
+
+  const customerRows = [
+    ['Customer Name:', name],
+    ['Booking ID:', m.bookingNumber],
+    ['Car Type:', classLabel(booking.vehicleClass)],
+    ['Trip Type:', TRIP_TYPE_LABEL[booking.tripType] || booking.tripType],
+    ['Status:', m.isFinal ? 'Completed' : 'Confirmed'],
+  ].filter((r) => r[1]);
+
+  return `<!DOCTYPE html>
 <html>
-  <body style="margin:0;padding:24px 12px;background:#f4f5f7;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:${INK};">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Booking ${esc(m.bookingNumber)} — ${esc(brand)}</title>
+</head>
+<body style="margin:0;padding:24px 12px;background:#ffffff;">
+<table role="presentation" width="760" align="center" cellpadding="0" cellspacing="0" style="width:760px;max-width:100%;margin:0 auto;">
 
-      <tr><td style="padding:28px 16px 4px;">
-        <p style="margin:0 0 6px;font-size:14px;color:${MUTED};">${esc(m.greeting)}</p>
-        <p style="margin:0;font-size:21px;font-weight:700;color:${INK};">Your booking is confirmed</p>
-        <p style="margin:6px 0 0;font-size:13px;color:${MUTED};">
-          We will share your driver and vehicle details before pickup.
-        </p>
-      </td></tr>
+  <!-- Wordmark. TEXT, not an image: a remote logo is blocked by default in
+       most email clients and would leave a hole where the brand should be. -->
+  <tr>
+    <td align="center" style="padding:0 0 14px;">
+      <div style="font:700 32px/1 Arial,Helvetica,sans-serif;color:${INK};letter-spacing:.02em;">
+        <span style="color:${GOLD};">A</span>BHI<span style="color:${GOLD};">CABS</span>
+      </div>
+      <div style="font:400 8px/1.8 Arial,Helvetica,sans-serif;color:#8a8a8a;letter-spacing:.42em;">RIDE WITH TRUST</div>
+    </td>
+  </tr>
 
-      ${sectionHeader('Booking Details')}
-      <tr><td style="padding:0;">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${detailRows(m.bookingRows)}</table>
-      </td></tr>
+  <tr>
+    <td style="border:1px solid ${BOX_LINE};">
 
-      ${sectionHeader('Billing Details')}
-      <tr><td style="padding:0;">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-          ${fareLines}
-          ${discountLine}
-          ${totalLine}
-        </table>
-      </td></tr>
+      <!-- Banner -->
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td align="center" style="padding:6px 8px;border-bottom:1px solid ${BOX_LINE};font:700 10px/1.4 Arial,Helvetica,sans-serif;color:${INK};letter-spacing:.04em;">
+            BOOKING CONFIRMATION
+          </td>
+        </tr>
+      </table>
 
-      <tr><td style="padding:14px 16px 0;">
-        <p style="margin:0;font-size:13px;color:${INK};line-height:1.55;">
-          <strong style="font-weight:600;">Payment:</strong> ${esc(m.paymentLine)}
-        </p>
-      </td></tr>
+      <!-- Company | Customer -->
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td width="50%" valign="top" style="padding:12px 14px;border-right:1px solid ${BOX_LINE};border-bottom:1px solid ${BOX_LINE};">
+            <div style="font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:6px;">Company Details:</div>
+            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
+              ${kv('Company Name:', esc(brand))}
+              ${m.support.phone ? kv('Phone:', esc(m.support.phone)) : ''}
+              ${m.support.email ? kv('Email:', esc(m.support.email)) : ''}
+              ${m.support.website ? kv('Website:', esc(m.support.website)) : ''}
+            </table>
+          </td>
+          <td width="50%" valign="top" style="padding:12px 14px;border-bottom:1px solid ${BOX_LINE};">
+            <div style="font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:6px;">Customer Details:</div>
+            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
+              ${customerRows.map(([k, v]) => kv(k, esc(v))).join('')}
+            </table>
+          </td>
+        </tr>
+      </table>
 
-      ${sectionHeader('Extra Charges, if applicable')}
-      <tr><td style="padding:12px 0 4px;">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${bulletList(m.extras)}</table>
-      </td></tr>
+      <!-- Trip details -->
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr><td style="padding:10px 14px 4px;font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Trip Details</td></tr>
+        <tr>
+          <td style="padding:0 14px 12px;border-bottom:1px solid ${BOX_LINE};">
+            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
+              ${m.bookingRows.map(([k, v]) => kv(`${esc(k)}:`, esc(v))).join('')}
+            </table>
+          </td>
+        </tr>
+      </table>
 
-      ${sectionHeader('Important Terms')}
-      <tr><td style="padding:12px 0 4px;">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${bulletList(m.terms)}</table>
-      </td></tr>
+      <!-- Fare details -->
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr><td style="padding:10px 14px 6px;font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Fare Details:</td></tr>
+      </table>
 
-      <tr><td style="padding:20px 16px 28px;">
-        <div style="height:1px;background:${RULE};margin:0 0 16px;"></div>
-        <p style="margin:0 0 6px;font-size:13px;color:${INK};">
-          You can view this booking any time in the ${esc(brand)} app.
-        </p>
-        <p style="margin:0;font-size:12px;color:${MUTED};line-height:1.6;">
-          Questions? Call ${esc(m.support.phone)}${m.support.phoneAlt ? ` or ${esc(m.support.phoneAlt)}` : ''}<br>
-          Email ${esc(m.support.email)} &nbsp;&middot;&nbsp; ${esc(m.support.website)}
-        </p>
-      </td></tr>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
+        <tr>
+          <td align="center" style="padding:5px 8px;border-bottom:1px solid ${BOX_LINE};border-right:1px solid ${BOX_LINE};font:700 9.5px/1.4 Arial,Helvetica,sans-serif;color:${INK};">Particulars</td>
+          <td align="center" style="padding:5px 8px;border-bottom:1px solid ${BOX_LINE};border-right:1px solid ${BOX_LINE};font:700 9.5px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:120px;">Rate</td>
+          <td align="center" style="padding:5px 8px;border-bottom:1px solid ${BOX_LINE};font:700 9.5px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:130px;">Amount</td>
+        </tr>
+        ${fareLines}
+        ${discountLine}
+        ${totalLine}
+      </table>
 
-    </table>
-    <p style="max-width:600px;margin:14px auto 0;font-size:11px;color:#9a9a9a;text-align:center;">${esc(brand)}</p>
-  </body>
+      ${
+        totalNum > 0
+          ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
+        <tr>
+          <td style="padding:8px 14px;font:400 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};">
+            <b>Amount in words:</b> ${esc(amountInWords(totalNum))}
+          </td>
+        </tr>
+      </table>`
+          : ''
+      }
+
+      <!-- Payment -->
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
+        <tr>
+          <td style="padding:8px 14px;font:400 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};">
+            <b>Payment:</b> ${esc(m.paymentLine)}
+          </td>
+        </tr>
+      </table>
+
+      ${
+        m.extras.length
+          ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
+        <tr>
+          <td style="padding:10px 14px 12px;">
+            <div style="font:700 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:4px;">Extra Charges, if applicable:</div>
+            ${m.extras
+              .map(
+                (t, i) =>
+                  `<div style="font:400 8.5px/1.7 Arial,Helvetica,sans-serif;color:${MUTED};padding-top:2px;">${i + 1}. ${esc(t)}</div>`,
+              )
+              .join('')}
+          </td>
+        </tr>
+      </table>`
+          : ''
+      }
+
+      ${
+        m.terms.length
+          ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
+        <tr>
+          <td style="padding:10px 14px 12px;">
+            <div style="font:700 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:4px;">Terms &amp; Conditions:</div>
+            ${m.terms
+              .map(
+                (t, i) =>
+                  `<div style="font:400 8.5px/1.7 Arial,Helvetica,sans-serif;color:${MUTED};padding-top:2px;">${i + 1}. ${esc(t)}</div>`,
+              )
+              .join('')}
+            <div style="font:400 8.5px/1.7 Arial,Helvetica,sans-serif;color:${MUTED};padding-top:8px;">
+              Questions? Call ${esc(m.support.phone)}${m.support.phoneAlt ? ` or ${esc(m.support.phoneAlt)}` : ''} &middot; Email ${esc(m.support.email)}
+            </div>
+          </td>
+        </tr>
+      </table>`
+          : ''
+      }
+
+      <!-- Footer -->
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
+        <tr>
+          <td align="center" style="padding:16px 14px;font:700 9.5px/1.5 Arial,Helvetica,sans-serif;color:${INK};">
+            **This is a computer generated confirmation and does not require any signature or stamp**
+          </td>
+        </tr>
+      </table>
+
+    </td>
+  </tr>
+
+  <tr>
+    <td align="center" style="padding:10px 2px 0;font:400 8.5px/1.6 Arial,Helvetica,sans-serif;color:#8a8a8a;">
+      We will share your driver and vehicle details before pickup. You can view this booking any time in the ${esc(brand)} app.
+    </td>
+  </tr>
+
+</table>
+</body>
 </html>`;
 }
 
