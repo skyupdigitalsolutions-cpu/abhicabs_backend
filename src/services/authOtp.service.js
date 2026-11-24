@@ -34,6 +34,26 @@
  * login can only ever authenticate an existing USER or DRIVER. It never creates
  * an account, and staff roles are assigned by an admin — never earned by
  * receiving a message.
+ *
+ * ---------------------------------------------------------------------------
+ * AUDIENCE: WHICH APP IS ASKING
+ * ---------------------------------------------------------------------------
+ * One account can hold a rider profile and a driver profile, so "does this
+ * number have an account" is no longer the whole question — the driver app
+ * needs to know whether it has a DRIVER account.
+ *
+ * Callers may send audience: 'DRIVER'. The login then requires a driver
+ * profile on the account and answers NOT_REGISTERED without one, so the driver
+ * app can send the person to registration instead of handing them a session
+ * that every /driver/* route will reject.
+ *
+ * Checked at REQUEST as well as at verify: refusing before the SMS goes out
+ * saves the message, and means the dead end is caught on the first screen
+ * rather than after the person has typed a code.
+ *
+ * audience never grants anything. It can only narrow which accounts count as
+ * registered; it cannot turn a rider into a driver. That still takes
+ * /auth/driver/claim or /driver/me/apply.
  */
 
 const otpService = require('./otp.service');
@@ -149,6 +169,36 @@ async function findAccountByPhone(rawPhone) {
   return prisma.user.findUnique({ where: { id: rows[0].id } });
 }
 
+/**
+ * Enforce the audience against the account that was found.
+ *
+ * Reported as NOT_REGISTERED rather than a bespoke code because, from the
+ * driver app's point of view, that is exactly what it is: no driver account on
+ * this number. The app already handles NOT_REGISTERED by opening signup, so
+ * this needs no new branch on the client.
+ *
+ * There is deliberately no RIDER counterpart. A driver booking a cab for
+ * themselves is ordinary, the customer row is created on demand at first
+ * booking, and refusing them from the rider app would lock out the very
+ * dual-role case the profile rows exist to support.
+ */
+async function assertAudience(user, audience) {
+  if (!user || audience !== 'DRIVER') return;
+
+  const driver = await prisma.driver.findUnique({
+    where: { userId: user.id },
+    select: { userId: true },
+  });
+
+  // Fallback for any legacy DRIVER-role account whose profile row predates it.
+  if (!driver && user.role !== 'DRIVER') {
+    throw ApiError.notFound(
+      'This number is not registered as a driver. Please register to continue.',
+      'NOT_REGISTERED',
+    );
+  }
+}
+
 /** Phone wins when both are sent — it is the identifier the rider app uses. */
 async function findAccount({ phone, email } = {}) {
   if (phone) return findAccountByPhone(phone);
@@ -168,7 +218,7 @@ async function findAccount({ phone, email } = {}) {
  * here. If that ever changes, return a generic reply the way
  * passwordReset.service.js does.)
  */
-async function requestOtp({ phone, email } = {}) {
+async function requestOtp({ phone, email, audience } = {}) {
   const byPhone = Boolean(phone);
   const existing = await findAccount({ phone, email });
 
@@ -184,6 +234,10 @@ async function requestOtp({ phone, email } = {}) {
   if (!existing.isActive) {
     throw ApiError.forbidden('Your account has been deactivated', 'ACCOUNT_INACTIVE');
   }
+
+  // Before the SMS, not after: no point spending a message on a login that
+  // cannot complete.
+  await assertAudience(existing, audience);
 
   // App Review demo number: don't send anything; the fixed code is accepted at
   // verify. Reply looks identical to a normal request so the client proceeds.
@@ -227,7 +281,7 @@ async function requestOtp({ phone, email } = {}) {
  * Verify → log in
  * ------------------------------------------------------------------ */
 
-async function verifyAndLogin({ phone, email, code }, meta = {}) {
+async function verifyAndLogin({ phone, email, code, audience }, meta = {}) {
   let user;
   try {
     user = await findAccount({ phone, email });
@@ -263,6 +317,11 @@ async function verifyAndLogin({ phone, email, code }, meta = {}) {
   if (!user.isActive) {
     throw ApiError.forbidden('Your account has been deactivated', 'ACCOUNT_INACTIVE');
   }
+
+  // Re-checked here as well as at request: the two calls are independent HTTP
+  // requests, and a client that skipped the audience on the first one must not
+  // be able to collect a driver session on the second.
+  await assertAudience(user, audience);
 
   const accessToken = tokens.signAccessToken({ userId: user.id, role: user.role });
   const refreshToken = tokens.signRefreshToken({ userId: user.id });

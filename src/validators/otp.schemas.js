@@ -52,10 +52,25 @@ const identifierError = {
   path: ['phone'],
 };
 
+/**
+ * WHICH APP IS ASKING.
+ *
+ * The rider app and the driver app share this one login. Without a hint they
+ * are indistinguishable, so a rider typing their number into the DRIVER app
+ * used to be signed in happily and then rejected by every /driver/* call
+ * afterwards with NOT_A_DRIVER — a dead end with no way back to registration.
+ *
+ * Sent as 'DRIVER', the login requires a driver profile and otherwise answers
+ * NOT_REGISTERED, which is the cue for the driver app to open its signup
+ * screen. Omitted, nothing changes: existing clients keep the old behaviour.
+ */
+const audience = z.enum(['RIDER', 'DRIVER']).optional();
+
 const otpRequestSchema = z
   .object({
     phone: indianPhone.optional(),
     email: loginEmail.optional(),
+    audience,
   })
   .refine(oneIdentifier, identifierError);
 
@@ -67,7 +82,10 @@ const otpVerifySchema = z
       .string()
       .trim()
       .regex(/^\d{4,8}$/, 'Enter the numeric code we sent you'),
-    // Note there is deliberately NO role field here.
+    // Note there is deliberately NO role field here — audience says which APP
+    // is asking, never what the account should become. An OTP can authenticate
+    // an existing account; it can never grant it a role.
+    audience,
     name: z.string().trim().min(2).max(120).optional(),
   })
   .refine(oneIdentifier, identifierError);
