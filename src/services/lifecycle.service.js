@@ -823,8 +823,10 @@ async function completeTrip(bookingId, actor, meta, { finalFare = null, odometer
         booking: full,
         customer: full.customer?.user ?? null,
         seller: {
-          address: gstConfig?.address ?? null,
+          address: inv.sellerAddress ?? gstConfig?.address ?? null,
           gstin: inv.sellerGstin ?? gstConfig?.gstin ?? null,
+          legalName: inv.sellerLegalName ?? gstConfig?.legalName ?? null,
+          phone: env.company?.phone || null,
           supportEmail: env.mail?.replyTo || 'support@abhicabs.in',
         },
       });

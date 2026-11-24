@@ -88,6 +88,12 @@ exports.myInvoiceHtml = asyncHandler(async (req, res) => {
     seller: {
       address: invoice.sellerAddress || gstConfig?.address || null,
       gstin: invoice.sellerGstin || gstConfig?.gstin || null,
+      // Printed in the Company Details column. The invoice snapshot has no
+      // phone column, so this is the live config only — an older invoice
+      // re-rendered today shows today's number, which is the one a rider
+      // should call anyway.
+      legalName: invoice.sellerLegalName || gstConfig?.legalName || null,
+      phone: env.company?.phone || null,
       supportEmail: env.mail?.replyTo || 'support@abhicabs.in',
     },
   });

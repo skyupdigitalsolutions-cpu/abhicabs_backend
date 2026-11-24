@@ -218,6 +218,20 @@ const env = {
 
     // SAC for "passenger transport by road". Printed on the tax invoice.
     sacCode: process.env.INVOICE_SAC_CODE || '996412',
+
+    /*
+     * THE HOME REGISTRATION.
+     *
+     * gst_config holds one row per state the company is registered in, and a
+     * pickup in one of those states bills on that state's GSTIN. A pickup
+     * ANYWHERE ELSE has no registration of its own, and is billed on this one
+     * instead — as an interstate supply, so IGST rather than CGST+SGST.
+     *
+     * Must name a state that actually has an active gst_config row. If it
+     * does not, gst.service falls back to the oldest active registration
+     * rather than issuing an invoice with no GSTIN at all.
+     */
+    homeGstState: process.env.GST_HOME_STATE || 'Karnataka',
   },
 
   /* ---------------- Assistant (chatbot) ---------------- */
@@ -266,6 +280,17 @@ const env = {
   },
 
   /* ---------------- Email (login OTP + future transactional mail) ---------------- */
+  /*
+   * Printed on the invoice, in the Company Details column.
+   *
+   * Legal name, address, GSTIN and place of supply all come from the GstConfig
+   * row — they are tax data and must match what was filed. The phone number is
+   * not tax data and has no column there, so it is configured here.
+   */
+  company: {
+    phone: process.env.COMPANY_PHONE || '',
+  },
+
   mail: {
     // console | smtp | brevo
     //

@@ -28,6 +28,7 @@ const M = require('../lib/money');
 const cache = require('./cache.service');
 const audit = require('./audit.service');
 const { ApiError } = require('../utils/helpers');
+const env = require('../config/env');
 
 /**
  * Cache TTL. GST rows change about as often as a rate card — rarely, and
@@ -73,10 +74,13 @@ const APPLY_COLUMN = {
  * The GST row that governs a trip, by PICKUP state.
  *
  * Per the requirement: a Bengaluru pickup bills on the Karnataka registration
- * whatever the destination. Returns null when the client is not registered in
- * that state, which callers must treat as "no tax invoice" rather than "tax
- * with no GSTIN" — an invoice without a seller GSTIN is not a valid tax
- * invoice.
+ * whatever the destination, and a Hyderabad pickup bills on Telangana.
+ *
+ * A pickup in a state with NO registration of its own falls back to the HOME
+ * registration — see resolveRegistration. Returns null only when there is no
+ * active registration anywhere, which callers must treat as "no tax invoice"
+ * rather than "tax with no GSTIN": an invoice without a seller GSTIN is not a
+ * valid tax invoice.
  */
 const CACHE_PREFIX = `gst:cfg:${CACHE_VERSION}:`;
 
@@ -98,20 +102,75 @@ async function invalidate() {
   await cache.delByPrefix(CACHE_PREFIX);
 }
 
-async function resolveConfig(pickupState) {
+/**
+ * Which registration bills this pickup, and whether it is the home fallback.
+ *
+ * ---------------------------------------------------------------------------
+ * THE THREE CASES
+ * ---------------------------------------------------------------------------
+ *   Pickup in a REGISTERED state (Karnataka, Telangana, …)
+ *       -> that state's row. Supplier and place of supply agree, so the
+ *          supply is intra-state and the tax splits CGST + SGST.
+ *
+ *   Pickup ANYWHERE ELSE
+ *       -> the HOME row (env.billing.homeGstState, default Karnataka), with
+ *          isHomeFallback true. The company has no registration where the
+ *          passenger embarked, so it bills under its home GSTIN and the
+ *          supply is INTERSTATE: IGST at the full rate, no CGST/SGST.
+ *
+ *   No active registration at all
+ *       -> null. No tax, and billing.service issues a bill of supply rather
+ *          than an invalid tax invoice.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE FALLBACK IS INTERSTATE AND NOT "NO TAX"
+ * ---------------------------------------------------------------------------
+ * For passenger transport the place of supply is where the passenger gets in.
+ * Billing a Mumbai pickup on the Karnataka GSTIN therefore crosses a state
+ * line by definition, and crossing one is what IGST is for. Returning NO_TAX
+ * instead — the old behaviour — meant every trip starting outside a
+ * registered state went out untaxed on a bill of supply.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE HOME ROW IS RESOLVED, NOT ASSUMED
+ * ---------------------------------------------------------------------------
+ * env names a STATE, not a row. If that state has no active row — renamed,
+ * deactivated, or never created — the oldest active registration is used
+ * instead. An invoice issued under the wrong-but-real GSTIN can be corrected;
+ * one issued with no GSTIN is not a valid tax invoice and cannot.
+ */
+async function resolveRegistration(pickupState) {
   const s = norm(pickupState);
-  if (!s) return null;
 
+  // Keyed on the pickup state including the empty case, so a booking with no
+  // recorded state still resolves to the home registration from cache rather
+  // than hitting the table on every quote.
   return cache.getOrSet(
-    `${CACHE_PREFIX}${s}`,
+    `${CACHE_PREFIX}${s || '_none'}`,
     async () => {
-      const rows = await prisma.gstConfig.findMany({ where: { isActive: true } });
+      const rows = await prisma.gstConfig.findMany({
+        where: { isActive: true },
+        orderBy: { id: 'asc' },
+      });
+      if (rows.length === 0) return { cfg: null, isHomeFallback: false };
+
       // Compared in JS rather than SQL so casing and stray whitespace in
       // cities.state cannot silently miss a registration.
-      return rows.find((r) => norm(r.state) === s) ?? null;
+      const exact = s ? rows.find((r) => norm(r.state) === s) : null;
+      if (exact) return { cfg: exact, isHomeFallback: false };
+
+      const home = norm(env.billing.homeGstState);
+      const homeRow = rows.find((r) => norm(r.state) === home) || rows[0];
+
+      return { cfg: homeRow, isHomeFallback: true };
     },
     { ttl: TTL_SECONDS },
   );
+}
+
+async function resolveConfig(pickupState) {
+  const { cfg } = await resolveRegistration(pickupState);
+  return cfg;
 }
 
 /**
@@ -174,8 +233,19 @@ async function resolveRate(tripType, pickupState, accountType) {
  * same place, so there is no second state to compare.
  */
 async function resolveSplitKind(pickupState, dropState, recipientGstin = null) {
-  const cfg = await resolveConfig(pickupState);
+  const { cfg, isHomeFallback } = await resolveRegistration(pickupState);
   if (!cfg) return 'INTRA';
+
+  /*
+   * Billed on the home registration because the pickup state has none of its
+   * own. The passenger embarked outside the state we are billing from, so the
+   * supply crosses a state line and the tax is IGST.
+   *
+   * Decided BEFORE the recipient-GSTIN and route rules, both of which assume
+   * supplier and place of supply are the same state. Neither can make an
+   * out-of-state pickup intra-state.
+   */
+  if (isHomeFallback) return 'INTER';
 
   /*
    * B2B: compare against the state in the CUSTOMER's own GSTIN.
@@ -513,6 +583,7 @@ async function health() {
 }
 
 module.exports = {
+  resolveRegistration,
   resolveConfig,
   resolveRate,
   resolveSplitKind,
