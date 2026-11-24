@@ -53,8 +53,8 @@ const {
   kv,
   fareRow,
   amountInWords,
+  brandMark,
   LINE: BOX_LINE,
-  GOLD,
 } = require('./invoiceTemplate');
 
 const AMBER = '#FFC007';
@@ -446,16 +446,7 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
 <body style="margin:0;padding:24px 12px;background:#ffffff;">
 <table role="presentation" width="760" align="center" cellpadding="0" cellspacing="0" style="width:760px;max-width:100%;margin:0 auto;">
 
-  <!-- Wordmark. TEXT, not an image: a remote logo is blocked by default in
-       most email clients and would leave a hole where the brand should be. -->
-  <tr>
-    <td align="center" style="padding:0 0 14px;">
-      <div style="font:700 32px/1 Arial,Helvetica,sans-serif;color:${INK};letter-spacing:.02em;">
-        <span style="color:${GOLD};">A</span>BHI<span style="color:${GOLD};">CABS</span>
-      </div>
-      <div style="font:400 8px/1.8 Arial,Helvetica,sans-serif;color:#8a8a8a;letter-spacing:.42em;">RIDE WITH TRUST</div>
-    </td>
-  </tr>
+  ${brandMark()}
 
   <tr>
     <td style="border:1px solid ${BOX_LINE};">

@@ -232,6 +232,26 @@ const env = {
      * rather than issuing an invoice with no GSTIN at all.
      */
     homeGstState: process.env.GST_HOME_STATE || 'Karnataka',
+
+    /*
+     * THE LOGO ON EMAILS, AS AN ABSOLUTE HTTPS URL.
+     *
+     * It has to be a URL the recipient's mail client can fetch. A base64
+     * data: URI is not an option — Gmail strips those outright, which is why
+     * the logo rendered as text.
+     *
+     * Defaults to the file served from this API at /static/abhicabs-logo.png,
+     * derived from PUBLIC_API_URL. Point LOGO_URL somewhere else — a CDN, the
+     * marketing site — and that wins.
+     *
+     * Empty means no image: the templates fall back to the text wordmark
+     * rather than printing a broken-image box.
+     */
+    logoUrl:
+      process.env.LOGO_URL ||
+      (process.env.PUBLIC_API_URL
+        ? `${process.env.PUBLIC_API_URL.replace(/\/+$/, '')}/static/abhicabs-logo.png`
+        : ''),
   },
 
   /* ---------------- Assistant (chatbot) ---------------- */

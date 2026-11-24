@@ -7,6 +7,7 @@
  */
 
 const express = require('express');
+const path = require('node:path');
 const helmet = require('helmet');
 const cors = require('cors');
 const compression = require('compression');
@@ -38,6 +39,32 @@ app.use(
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'x-client-source'],
   })
+);
+
+/*
+ * PUBLIC STATIC ASSETS — the invoice and confirmation logo.
+ *
+ * Email clients cannot render a base64 data: URI (Gmail strips them outright),
+ * so the only way a logo reaches an inbox is as a URL the client can fetch.
+ * Gmail proxies and displays remote images by default; Outlook shows them once
+ * the reader clicks "show images", and falls back to the alt text until then.
+ *
+ * Mounted BEFORE the API routers and outside /api/v1 on purpose: it carries no
+ * auth, no rate limit and no load shedding, because an email client fetching
+ * it is an anonymous request from an address we will never see twice.
+ *
+ * crossOriginResourcePolicy is relaxed for this path only. helmet() sets it to
+ * same-origin globally, which would make Gmail's image proxy refuse the file.
+ */
+app.use(
+  '/static',
+  express.static(path.join(__dirname, 'assets'), {
+    maxAge: '7d',
+    immutable: false,
+    setHeaders(res) {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    },
+  }),
 );
 
 app.use(compression());

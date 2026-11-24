@@ -64,6 +64,8 @@
  * the wordmark is live text.
  */
 
+const env = require('../config/env');
+
 /** HTML-escape. Every interpolated value goes through this. */
 function esc(v) {
   if (v == null) return '';
@@ -233,6 +235,60 @@ const TERMS = [
 ];
 
 /* ------------------------------------------------------------------ *
+ * The brand mark
+ * ------------------------------------------------------------------ */
+
+/**
+ * The logo row that heads both the invoice and the booking confirmation.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY A URL AND NOT AN EMBEDDED IMAGE
+ * ---------------------------------------------------------------------------
+ * An image only reaches an inbox if the mail client can fetch it. A base64
+ * data: URI is the obvious thing to reach for and it is the one thing that
+ * does NOT work: Gmail strips data: images outright, so the logo silently
+ * disappears for most Indian riders. Gmail does proxy and display remote
+ * images by default, so an absolute HTTPS URL is what actually renders.
+ *
+ * Outlook blocks remote images until the reader clicks "show images". That is
+ * what the alt text is for — it reads ABHICABS, so a blocked image degrades
+ * to the wordmark rather than to an empty box.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE TEXT FALLBACK STAYS
+ * ---------------------------------------------------------------------------
+ * With no logoUrl configured there is no image to point at, and an <img> with
+ * an empty src renders as a broken-image icon in every client. The text
+ * wordmark is the correct output in that case, not a degraded one.
+ *
+ * Width is set in HTML as well as CSS: Outlook ignores the style attribute on
+ * images and would otherwise render the file at its native pixel size.
+ */
+function brandMark() {
+  const url = env.billing?.logoUrl;
+
+  if (url) {
+    return `
+  <tr>
+    <td align="center" style="padding:0 0 14px;">
+      <img src="${esc(url)}" alt="ABHICABS" width="260"
+           style="display:block;width:260px;max-width:70%;height:auto;border:0;outline:none;text-decoration:none;margin:0 auto;">
+    </td>
+  </tr>`;
+  }
+
+  return `
+  <tr>
+    <td align="center" style="padding:0 0 14px;">
+      <div style="font:700 32px/1 Arial,Helvetica,sans-serif;color:${INK};letter-spacing:.02em;">
+        <span style="color:${GOLD};">A</span>BHI<span style="color:${GOLD};">CABS</span>
+      </div>
+      <div style="font:400 8px/1.8 Arial,Helvetica,sans-serif;color:#8a8a8a;letter-spacing:.42em;">RIDE WITH TRUST</div>
+    </td>
+  </tr>`;
+}
+
+/* ------------------------------------------------------------------ *
  * The document
  * ------------------------------------------------------------------ */
 
@@ -306,16 +362,7 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
 <body style="margin:0;padding:24px 12px;background:#ffffff;">
 <table role="presentation" width="760" align="center" cellpadding="0" cellspacing="0" style="width:760px;max-width:100%;margin:0 auto;">
 
-  <!-- Wordmark, above the ruled block. TEXT, not an image: a remote logo is
-       blocked by default in most email clients. -->
-  <tr>
-    <td align="center" style="padding:0 0 14px;">
-      <div style="font:700 32px/1 Arial,Helvetica,sans-serif;color:${INK};letter-spacing:.02em;">
-        <span style="color:${GOLD};">A</span>BHI<span style="color:${GOLD};">CABS</span>
-      </div>
-      <div style="font:400 8px/1.8 Arial,Helvetica,sans-serif;color:#8a8a8a;letter-spacing:.42em;">RIDE WITH TRUST</div>
-    </td>
-  </tr>
+  ${brandMark()}
 
   <!-- Everything below sits inside one ruled box -->
   <tr>
@@ -518,6 +565,7 @@ module.exports = {
   dmyShort,
   dmyTime,
   amountInWords,
+  brandMark,
   kv,
   fareRow,
   LINE,
