@@ -211,9 +211,24 @@ function model({ booking = {}, name, seller }) {
 
   // fare.service already labelled every component. Render its array rather
   // than re-deriving: it is the same list the rider saw on the fare screen.
+  /*
+   * fare.service attaches a "Both ways: X km there + X km back" note to the
+   * distance line on a round trip. It is dropped here.
+   *
+   * Filtered at RENDER rather than removed from fare.service, for two
+   * reasons: bookings already taken have that note frozen inside their
+   * fareBasis snapshot, so only a render-time filter cleans those up too; and
+   * the app's fare screen still wants it, where a rider comparing quotes is
+   * the audience it was written for. The label already states the billed
+   * distance, so nothing is lost on the email.
+   */
   const lines = Array.isArray(quote.breakdown)
     ? quote.breakdown
-        .map((b) => ({ label: b.label, amount: money(b.amount), note: b.note || null }))
+        .map((b) => ({
+          label: b.label,
+          amount: money(b.amount),
+          note: /^both ways\b/i.test(b.note || '') ? null : b.note || null,
+        }))
         .filter((b) => b.label && b.amount)
     : [];
 
@@ -402,7 +417,7 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
       fareRow(
         `${esc(l.label)}${
           l.note
-            ? `<div style="font-size:8px;color:${MUTED};padding-top:2px;">${esc(l.note)}</div>`
+            ? `<div style="font-size:10px;color:${MUTED};padding-top:3px;">${esc(l.note)}</div>`
             : ''
         }`,
         '',
@@ -454,7 +469,7 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
       <!-- Banner -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
         <tr>
-          <td align="center" style="padding:6px 8px;border-bottom:1px solid ${BOX_LINE};font:700 10px/1.4 Arial,Helvetica,sans-serif;color:${INK};letter-spacing:.04em;">
+          <td align="center" style="padding:10px 12px;border-bottom:1px solid ${BOX_LINE};font:700 13px/1.4 Arial,Helvetica,sans-serif;color:${INK};letter-spacing:.04em;">
             BOOKING CONFIRMATION
           </td>
         </tr>
@@ -463,8 +478,8 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
       <!-- Company | Customer -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
         <tr>
-          <td width="50%" valign="top" style="padding:12px 14px;border-right:1px solid ${BOX_LINE};border-bottom:1px solid ${BOX_LINE};">
-            <div style="font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:6px;">Company Details:</div>
+          <td width="50%" valign="top" style="padding:16px 18px;border-right:1px solid ${BOX_LINE};border-bottom:1px solid ${BOX_LINE};">
+            <div style="font:700 13px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:8px;">Company Details:</div>
             <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
               ${kv('Company Name:', esc(brand))}
               ${m.support.phone ? kv('Phone:', esc(m.support.phone)) : ''}
@@ -472,8 +487,8 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
               ${m.support.website ? kv('Website:', esc(m.support.website)) : ''}
             </table>
           </td>
-          <td width="50%" valign="top" style="padding:12px 14px;border-bottom:1px solid ${BOX_LINE};">
-            <div style="font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:6px;">Customer Details:</div>
+          <td width="50%" valign="top" style="padding:16px 18px;border-bottom:1px solid ${BOX_LINE};">
+            <div style="font:700 13px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:8px;">Customer Details:</div>
             <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
               ${customerRows.map(([k, v]) => kv(k, esc(v))).join('')}
             </table>
@@ -483,9 +498,9 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
 
       <!-- Trip details -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-        <tr><td style="padding:10px 14px 4px;font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Trip Details</td></tr>
+        <tr><td style="padding:14px 18px 6px;font:700 13px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Trip Details</td></tr>
         <tr>
-          <td style="padding:0 14px 12px;border-bottom:1px solid ${BOX_LINE};">
+          <td style="padding:0 18px 16px;border-bottom:1px solid ${BOX_LINE};">
             <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
               ${m.bookingRows.map(([k, v]) => kv(`${esc(k)}:`, esc(v))).join('')}
             </table>
@@ -495,14 +510,14 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
 
       <!-- Fare details -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-        <tr><td style="padding:10px 14px 6px;font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Fare Details:</td></tr>
+        <tr><td style="padding:14px 18px 8px;font:700 13px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Fare Details:</td></tr>
       </table>
 
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
         <tr>
-          <td align="center" style="padding:5px 8px;border-bottom:1px solid ${BOX_LINE};border-right:1px solid ${BOX_LINE};font:700 9.5px/1.4 Arial,Helvetica,sans-serif;color:${INK};">Particulars</td>
-          <td align="center" style="padding:5px 8px;border-bottom:1px solid ${BOX_LINE};border-right:1px solid ${BOX_LINE};font:700 9.5px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:120px;">Rate</td>
-          <td align="center" style="padding:5px 8px;border-bottom:1px solid ${BOX_LINE};font:700 9.5px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:130px;">Amount</td>
+          <td align="center" style="padding:9px 12px;border-bottom:1px solid ${BOX_LINE};border-right:1px solid ${BOX_LINE};font:700 12px/1.4 Arial,Helvetica,sans-serif;color:${INK};">Particulars</td>
+          <td align="center" style="padding:9px 12px;border-bottom:1px solid ${BOX_LINE};border-right:1px solid ${BOX_LINE};font:700 12px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:140px;">Rate</td>
+          <td align="center" style="padding:9px 12px;border-bottom:1px solid ${BOX_LINE};font:700 12px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:150px;">Amount</td>
         </tr>
         ${fareLines}
         ${discountLine}
@@ -513,7 +528,7 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
         totalNum > 0
           ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
         <tr>
-          <td style="padding:8px 14px;font:400 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};">
+          <td style="padding:12px 18px;font:400 12px/1.6 Arial,Helvetica,sans-serif;color:${INK};">
             <b>Amount in words:</b> ${esc(amountInWords(totalNum))}
           </td>
         </tr>
@@ -524,7 +539,7 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
       <!-- Payment -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
         <tr>
-          <td style="padding:8px 14px;font:400 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};">
+          <td style="padding:12px 18px;font:400 12px/1.6 Arial,Helvetica,sans-serif;color:${INK};">
             <b>Payment:</b> ${esc(m.paymentLine)}
           </td>
         </tr>
@@ -534,12 +549,12 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
         m.extras.length
           ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
         <tr>
-          <td style="padding:10px 14px 12px;">
-            <div style="font:700 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:4px;">Extra Charges, if applicable:</div>
+          <td style="padding:14px 18px 16px;">
+            <div style="font:700 12px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:6px;">Extra Charges, if applicable:</div>
             ${m.extras
               .map(
                 (t, i) =>
-                  `<div style="font:400 8.5px/1.7 Arial,Helvetica,sans-serif;color:${MUTED};padding-top:2px;">${i + 1}. ${esc(t)}</div>`,
+                  `<div style="font:400 10.5px/1.75 Arial,Helvetica,sans-serif;color:${MUTED};padding-top:4px;">${i + 1}. ${esc(t)}</div>`,
               )
               .join('')}
           </td>
@@ -552,15 +567,15 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
         m.terms.length
           ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
         <tr>
-          <td style="padding:10px 14px 12px;">
-            <div style="font:700 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:4px;">Terms &amp; Conditions:</div>
+          <td style="padding:14px 18px 16px;">
+            <div style="font:700 12px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:6px;">Terms &amp; Conditions:</div>
             ${m.terms
               .map(
                 (t, i) =>
-                  `<div style="font:400 8.5px/1.7 Arial,Helvetica,sans-serif;color:${MUTED};padding-top:2px;">${i + 1}. ${esc(t)}</div>`,
+                  `<div style="font:400 10.5px/1.75 Arial,Helvetica,sans-serif;color:${MUTED};padding-top:4px;">${i + 1}. ${esc(t)}</div>`,
               )
               .join('')}
-            <div style="font:400 8.5px/1.7 Arial,Helvetica,sans-serif;color:${MUTED};padding-top:8px;">
+            <div style="font:400 10.5px/1.75 Arial,Helvetica,sans-serif;color:${MUTED};padding-top:10px;">
               Questions? Call ${esc(m.support.phone)}${m.support.phoneAlt ? ` or ${esc(m.support.phoneAlt)}` : ''} &middot; Email ${esc(m.support.email)}
             </div>
           </td>
@@ -572,7 +587,7 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
       <!-- Footer -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BOX_LINE};">
         <tr>
-          <td align="center" style="padding:16px 14px;font:700 9.5px/1.5 Arial,Helvetica,sans-serif;color:${INK};">
+          <td align="center" style="padding:18px 18px;font:700 11.5px/1.5 Arial,Helvetica,sans-serif;color:${INK};">
             **This is a computer generated confirmation and does not require any signature or stamp**
           </td>
         </tr>
@@ -582,7 +597,7 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
   </tr>
 
   <tr>
-    <td align="center" style="padding:10px 2px 0;font:400 8.5px/1.6 Arial,Helvetica,sans-serif;color:#8a8a8a;">
+    <td align="center" style="padding:12px 2px 0;font:400 10.5px/1.6 Arial,Helvetica,sans-serif;color:#8a8a8a;">
       We will share your driver and vehicle details before pickup. You can view this booking any time in the ${esc(brand)} app.
     </td>
   </tr>

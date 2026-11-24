@@ -199,8 +199,8 @@ const GOLD = '#F5B301';
 function kv(label, value) {
   return `
   <tr>
-    <td valign="top" style="padding:1px 10px 1px 0;font:700 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};white-space:nowrap;">${esc(label)}</td>
-    <td valign="top" style="padding:1px 0;font:400 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};">${value}</td>
+    <td valign="top" style="padding:3px 12px 3px 0;font:700 12px/1.6 Arial,Helvetica,sans-serif;color:${INK};white-space:nowrap;">${esc(label)}</td>
+    <td valign="top" style="padding:3px 0;font:400 12px/1.6 Arial,Helvetica,sans-serif;color:${INK};">${value}</td>
   </tr>`;
 }
 
@@ -210,9 +210,9 @@ function fareRow(particulars, rate, amount, { bold = false, topRule = false } = 
   const rule = topRule ? `border-top:1px solid ${LINE};` : '';
   return `
   <tr>
-    <td style="padding:5px 8px;${rule}font:${weight} 9.5px/1.5 Arial,Helvetica,sans-serif;color:${INK};border-right:1px solid ${LINE};">${particulars}</td>
-    <td align="right" style="padding:5px 8px;${rule}font:${weight} 9.5px/1.5 Arial,Helvetica,sans-serif;color:${INK};border-right:1px solid ${LINE};width:120px;">${rate}</td>
-    <td align="right" style="padding:5px 8px;${rule}font:${weight} 9.5px/1.5 Arial,Helvetica,sans-serif;color:${INK};width:130px;">${amount}</td>
+    <td style="padding:9px 12px;${rule}font:${weight} 12px/1.5 Arial,Helvetica,sans-serif;color:${INK};border-right:1px solid ${LINE};">${particulars}</td>
+    <td align="right" style="padding:9px 12px;${rule}font:${weight} 12px/1.5 Arial,Helvetica,sans-serif;color:${INK};border-right:1px solid ${LINE};width:140px;">${rate}</td>
+    <td align="right" style="padding:9px 12px;${rule}font:${weight} 12px/1.5 Arial,Helvetica,sans-serif;color:${INK};width:150px;">${amount}</td>
   </tr>`;
 }
 
@@ -371,7 +371,7 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
       <!-- Banner -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
         <tr>
-          <td align="center" style="padding:6px 8px;border-bottom:1px solid ${LINE};font:700 10px/1.4 Arial,Helvetica,sans-serif;color:${INK};letter-spacing:.04em;">
+          <td align="center" style="padding:10px 12px;border-bottom:1px solid ${LINE};font:700 13px/1.4 Arial,Helvetica,sans-serif;color:${INK};letter-spacing:.04em;">
             ${esc(title)}
           </td>
         </tr>
@@ -380,8 +380,8 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
       <!-- Company details | Customer details -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
         <tr>
-          <td width="50%" valign="top" style="padding:12px 14px;border-right:1px solid ${LINE};border-bottom:1px solid ${LINE};">
-            <div style="font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:6px;">Company Details:</div>
+          <td width="50%" valign="top" style="padding:16px 18px;border-right:1px solid ${LINE};border-bottom:1px solid ${LINE};">
+            <div style="font:700 13px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:8px;">Company Details:</div>
             <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
               ${kv('Invoice No:', or(invoice?.invoiceNumber))}
               ${kv('Invoice Date:', dmyShort(invoice?.issuedAt || invoice?.createdAt))}
@@ -392,8 +392,8 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
               ${placeOfSupply ? kv('Place of Supply:', esc(placeOfSupply)) : ''}
             </table>
           </td>
-          <td width="50%" valign="top" style="padding:12px 14px;border-bottom:1px solid ${LINE};">
-            <div style="font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:6px;">Customer Details:</div>
+          <td width="50%" valign="top" style="padding:16px 18px;border-bottom:1px solid ${LINE};">
+            <div style="font:700 13px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:8px;">Customer Details:</div>
             <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
               ${kv('Customer Name:', or(customer?.name || invoice?.billToName))}
               ${kv('Phone:', or(customer?.phone))}
@@ -412,10 +412,10 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
       <!-- Trip details -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
         <tr>
-          <td style="padding:10px 14px 4px;font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Trip Details</td>
+          <td style="padding:14px 18px 6px;font:700 13px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Trip Details</td>
         </tr>
         <tr>
-          <td style="padding:0 14px 12px;border-bottom:1px solid ${LINE};">
+          <td style="padding:0 18px 16px;border-bottom:1px solid ${LINE};">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
               <tr>
                 <td width="50%" valign="top" style="padding-right:12px;">
@@ -439,15 +439,15 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
       <!-- Fare details -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
         <tr>
-          <td style="padding:10px 14px 6px;font:700 10px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Fare Details:</td>
+          <td style="padding:14px 18px 8px;font:700 13px/1.6 Arial,Helvetica,sans-serif;color:${INK};">Fare Details:</td>
         </tr>
       </table>
 
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${LINE};">
         <tr>
-          <td align="center" style="padding:5px 8px;border-bottom:1px solid ${LINE};border-right:1px solid ${LINE};font:700 9.5px/1.4 Arial,Helvetica,sans-serif;color:${INK};">Particulars</td>
-          <td align="center" style="padding:5px 8px;border-bottom:1px solid ${LINE};border-right:1px solid ${LINE};font:700 9.5px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:120px;">Rate</td>
-          <td align="center" style="padding:5px 8px;border-bottom:1px solid ${LINE};font:700 9.5px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:130px;">Amount</td>
+          <td align="center" style="padding:9px 12px;border-bottom:1px solid ${LINE};border-right:1px solid ${LINE};font:700 12px/1.4 Arial,Helvetica,sans-serif;color:${INK};">Particulars</td>
+          <td align="center" style="padding:9px 12px;border-bottom:1px solid ${LINE};border-right:1px solid ${LINE};font:700 12px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:140px;">Rate</td>
+          <td align="center" style="padding:9px 12px;border-bottom:1px solid ${LINE};font:700 12px/1.4 Arial,Helvetica,sans-serif;color:${INK};width:150px;">Amount</td>
         </tr>
 
         ${fareRow(esc(description), `&#8377; ${money(taxable + discount)}`, `&#8377; ${money(taxable + discount)}`)}
@@ -471,7 +471,7 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
       <!-- Amount in words -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${LINE};">
         <tr>
-          <td style="padding:8px 14px;font:400 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};">
+          <td style="padding:12px 18px;font:400 12px/1.6 Arial,Helvetica,sans-serif;color:${INK};">
             <b>Amount in words:</b> ${esc(amountInWords(finalAmount))}
           </td>
         </tr>
@@ -480,15 +480,15 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
       <!-- Terms -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${LINE};">
         <tr>
-          <td style="padding:10px 14px 12px;">
-            <div style="font:700 9.5px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:4px;">Terms &amp; Conditions:</div>
+          <td style="padding:14px 18px 16px;">
+            <div style="font:700 12px/1.6 Arial,Helvetica,sans-serif;color:${INK};padding-bottom:6px;">Terms &amp; Conditions:</div>
             ${TERMS.map(
               (t, i) =>
-                `<div style="font:400 8.5px/1.7 Arial,Helvetica,sans-serif;color:${GREY};padding-top:2px;">${i + 1}. ${esc(t)}</div>`,
+                `<div style="font:400 10.5px/1.75 Arial,Helvetica,sans-serif;color:${GREY};padding-top:4px;">${i + 1}. ${esc(t)}</div>`,
             ).join('')}
             ${
               seller?.supportEmail
-                ? `<div style="font:400 8.5px/1.7 Arial,Helvetica,sans-serif;color:${GREY};padding-top:8px;">For any queries, write to <b>${esc(seller.supportEmail)}</b>.</div>`
+                ? `<div style="font:400 10.5px/1.75 Arial,Helvetica,sans-serif;color:${GREY};padding-top:10px;">For any queries, write to <b>${esc(seller.supportEmail)}</b>.</div>`
                 : ''
             }
           </td>
@@ -498,7 +498,7 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
       <!-- Footer -->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${LINE};">
         <tr>
-          <td align="center" style="padding:16px 14px;font:700 9.5px/1.5 Arial,Helvetica,sans-serif;color:${INK};">
+          <td align="center" style="padding:18px 18px;font:700 11.5px/1.5 Arial,Helvetica,sans-serif;color:${INK};">
             **This is a computer generated receipt and does not require any signature or stamp**
           </td>
         </tr>
@@ -510,7 +510,7 @@ function buildInvoiceHtml({ invoice, booking, customer, seller }) {
   ${
     invoice?.hsnSac
       ? `<tr>
-    <td style="padding:8px 2px 0;font:400 8.5px/1.6 Arial,Helvetica,sans-serif;color:#8a8a8a;">
+    <td style="padding:10px 2px 0;font:400 10.5px/1.6 Arial,Helvetica,sans-serif;color:#8a8a8a;">
       Service: Transport of passengers &middot; HSN/SAC ${esc(invoice.hsnSac)}
     </td>
   </tr>`
