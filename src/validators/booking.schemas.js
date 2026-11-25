@@ -242,6 +242,28 @@ const changeVehicleSchema = z.object({
   // Goes onto the audit entry. Optional, but the first thing anyone asks when
   // they find a fare that changed after booking is "who, and why".
   reason: z.string().trim().max(500).optional().nullable(),
+  // How the new fare is set — see FARE_MODES in bookingVehicle.service. keep /
+  // custom are checked against FARE_EDIT in the service, and need a reason.
+  fareMode: z.enum(['requote', 'keep', 'custom']).default('requote'),
+  customFare: z.coerce.number().positive().max(10000000).optional().nullable(),
+}).refine((b) => b.fareMode !== 'custom' || (b.customFare != null && b.customFare > 0), {
+  message: 'customFare is required when fareMode is custom',
+  path: ['customFare'],
+});
+
+/**
+ * Staff-set fare. Accepted ONLY on POST /admin/bookings (lifted out of the body
+ * before createBookingSchema runs) and on PATCH /admin/bookings/:id/fare.
+ * FARE_EDIT is enforced in the service, and a reason is mandatory.
+ */
+const manualFareSchema = z.object({
+  total: z.coerce.number().positive('Fare must be more than zero').max(10000000),
+  reason: z.string().trim().min(3, 'Say why the fare is being set by hand').max(500),
+});
+
+const editFareSchema = z.object({
+  fare: z.coerce.number().positive('Fare must be more than zero').max(10000000),
+  reason: z.string().trim().min(3, 'Say why the fare is being changed').max(500),
 });
 
 const listBookingsQuerySchema = z.object({
@@ -311,6 +333,8 @@ module.exports = {
   trackDraftSchema,
   createBookingSchema,
   changeVehicleSchema,
+  manualFareSchema,
+  editFareSchema,
   listBookingsQuerySchema,
   listAttemptsQuerySchema,
   statsQuerySchema,

@@ -28,7 +28,11 @@ exports.create = asyncHandler(async (req, res) => {
     }
   }
 
-  const result = await bookingService.create(body, req.user, meta(req));
+  // req.manualFare is set only by the ADMIN route (see adminBooking.routes.js);
+  // the customer route never carries it.
+  const result = await bookingService.create(body, req.user, meta(req), {
+    manualFare: req.manualFare || null,
+  });
   res.status(201).json({ success: true, message: 'Booking created', data: result });
 });
 
@@ -69,6 +73,15 @@ exports.vehicleOptions = asyncHandler(async (req, res) => {
  * carries the before/after fare and the amount still due, because that is what
  * the admin has to read out to the customer on the phone.
  */
+/**
+ * PATCH /admin/bookings/:id/fare — set the fare by hand, class unchanged.
+ * FARE_EDIT is checked in the service; the change is audited with its reason.
+ */
+exports.editFare = asyncHandler(async (req, res) => {
+  const data = await bookingVehicle.editFare(req.params.id, req.body, req.user, meta(req));
+  res.json({ success: true, message: 'Fare updated', data });
+});
+
 exports.changeVehicle = asyncHandler(async (req, res) => {
   const data = await bookingVehicle.changeVehicleClass(
     req.params.id,

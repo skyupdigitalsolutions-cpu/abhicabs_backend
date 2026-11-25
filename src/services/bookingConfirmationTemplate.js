@@ -242,6 +242,27 @@ function model({ booking = {}, name, seller }) {
       }
     : null;
 
+  /*
+   * A fare set by staff (fareBasis.manualFare — at creation or via Edit fare /
+   * a class change). The breakdown above is still the rate card's, so without
+   * this row the lines would add up to one figure and the total say another.
+   * The gap is shown as one neutral line; staff's internal reason is NOT shown
+   * to the customer.
+   */
+  let adjustmentRow = null;
+  if (!isFinal && fareBasis.manualFare && quote && quote.total != null) {
+    const gross = Number(quote.total);
+    const less = discount ? Number(discount.amount || 0) : 0;
+    const net = Number(booking.estimatedFare ?? 0);
+    const adj = Math.round((net - (gross - less)) * 100) / 100;
+    if (Number.isFinite(adj) && Math.abs(adj) >= 0.01) {
+      adjustmentRow = {
+        label: 'Price adjustment',
+        amount: adj < 0 ? `− ${money(Math.abs(adj))}` : `+ ${money(adj)}`,
+      };
+    }
+  }
+
   /* ---- payment ---- */
 
   let paymentLine;
@@ -346,6 +367,7 @@ function model({ booking = {}, name, seller }) {
     bookingRows,
     lines,
     discountRow,
+    adjustmentRow,
     paymentLine,
     extras,
     terms,
@@ -430,6 +452,9 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
     m.discountRow && m.discountRow.amount
       ? fareRow(esc(m.discountRow.label), '', esc(m.discountRow.amount))
       : '';
+  const adjustmentLine = m.adjustmentRow
+    ? fareRow(esc(m.adjustmentRow.label), '', esc(m.adjustmentRow.amount))
+    : '';
 
   const totalLine = m.total
     ? fareRow(
@@ -521,6 +546,7 @@ function buildBookingConfirmationHtml({ booking, name, seller, brand = 'AbhiCabs
         </tr>
         ${fareLines}
         ${discountLine}
+        ${adjustmentLine}
         ${totalLine}
       </table>
 
@@ -625,6 +651,9 @@ function buildBookingConfirmationText({ booking, name, seller, brand = 'AbhiCabs
   m.lines.forEach((l) => out.push(`  ${l.label}: ${l.amount}`));
   if (m.discountRow && m.discountRow.amount) {
     out.push(`  ${m.discountRow.label}: ${m.discountRow.amount}`);
+  }
+  if (m.adjustmentRow) {
+    out.push(`  ${m.adjustmentRow.label}: ${m.adjustmentRow.amount}`);
   }
   if (m.total) out.push(`  ${m.isFinal ? 'Total Amount' : 'Estimated Total'}: ${m.total} (inclusive of taxes)`);
   out.push('');

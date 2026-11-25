@@ -63,6 +63,20 @@ const push = require('./push.service');
 const M = require('../lib/money');
 const { emit, EVENTS } = require('../lib/events');
 const { BOOKING_SELECT } = require('../models/booking.model');
+const permissionService = require('./permission.service');
+const { sameClass } = require('../utils/vehicleClass');
+
+/**
+ * How the new fare is decided when the class changes.
+ *   requote — the rate card prices the same trip for the new class (default).
+ *   keep    — the class changes, the customer's fare does not (free upgrade,
+ *             or a substitute car of a cheaper class at the agreed price).
+ *   custom  — staff type the fare.
+ * keep / custom put a human in place of the rate card, so they need FARE_EDIT —
+ * the permission that already governs rate cards, GST and promos. BOOKING_MANAGE
+ * alone still gets requote, exactly as before.
+ */
+const FARE_MODES = Object.freeze(['requote', 'keep', 'custom']);
 
 /**
  * Up to and including ALLOCATED. EN_ROUTE is deliberately excluded: pulling a
@@ -251,9 +265,33 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
     throw ApiError.badRequest('A vehicle class is required', 'VEHICLE_CLASS_REQUIRED');
   }
 
+  const fareMode = FARE_MODES.includes(payload.fareMode) ? payload.fareMode : 'requote';
+  const manualFare = fareMode !== 'requote';
+  if (manualFare) {
+    const allowed = await permissionService.roleHasAny(actor?.baseRole || actor?.role, ['FARE_EDIT']);
+    if (!allowed) {
+      throw ApiError.forbidden(
+        'Keeping or typing the fare requires: FARE_EDIT. Use the re-quoted fare instead.',
+        'PERMISSION_DENIED',
+      );
+    }
+    if (!payload.reason || !String(payload.reason).trim()) {
+      throw ApiError.badRequest('Give a reason when setting the fare by hand', 'FARE_REASON_REQUIRED');
+    }
+  }
+  if (fareMode === 'custom') {
+    const n = Number(payload.customFare);
+    if (!Number.isFinite(n) || n <= 0) {
+      throw ApiError.badRequest('Enter a fare greater than zero', 'CUSTOM_FARE_INVALID');
+    }
+  }
+
   const booking = await loadForReprice(bookingId);
 
-  if (booking.vehicleClass === nextClass) {
+  // Same class + a typed fare is a plain FARE EDIT (see editFare below).
+  // Same class with any other mode would change nothing.
+  const fareOnly = booking.vehicleClass === nextClass;
+  if (fareOnly && fareMode !== 'custom') {
     throw ApiError.badRequest(
       `This booking is already ${nextClass}`,
       'VEHICLE_CLASS_UNCHANGED',
@@ -303,7 +341,7 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
   });
 
   const allocationBlocks =
-    allocation && allocation.vehicle && allocation.vehicle.vehicleClass !== nextClass;
+    allocation && allocation.vehicle && !sameClass(allocation.vehicle.vehicleClass, nextClass);
 
   if (allocationBlocks && !payload.releaseAllocation) {
     throw ApiError.conflict(
@@ -315,7 +353,17 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
 
   /* ---- 1. reprice, SERVER SIDE, same trip, new class ---- */
 
-  const quote = await quoteService.getQuote(quoteInputFor(booking, nextClass));
+  /*
+   * With a manual fare the rate card is not deciding the price, so a class
+   * with no rate card for this city/trip (getQuote throws) is still allowed —
+   * the quote is then only used for its breakdown when there is one.
+   */
+  let quote = null;
+  try {
+    quote = await quoteService.getQuote(quoteInputFor(booking, nextClass));
+  } catch (err) {
+    if (!manualFare) throw err;
+  }
 
   /*
    * The same guard booking.service.create applies. A quote that answered with
@@ -323,14 +371,15 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
    * written onto a booking the rider agreed as something else — changing the
    * car is not permission to change the trip type.
    */
-  if (quote.switchedToLocal) {
-    throw ApiError.conflict(
-      quote.switchedToLocal.message,
-      'SWITCH_TO_LOCAL_REQUIRED',
-    );
+  if (quote && quote.switchedToLocal) {
+    if (!manualFare) {
+      throw ApiError.conflict(
+        quote.switchedToLocal.message,
+        'SWITCH_TO_LOCAL_REQUIRED',
+      );
+    }
+    quote = null; // its figures describe another product; do not store them
   }
-
-  const grossTotal = quote.quote.total;
 
   const previousBasis = booking.fareBasis && typeof booking.fareBasis === 'object'
     ? booking.fareBasis
@@ -339,6 +388,15 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
   const previousClass = booking.vehicleClass;
   const previousTotal = M.toStr(M.round2(booking.estimatedFare));
   const paid = M.round2(booking.advancePaid);
+
+  const quotedTotal = quote ? quote.quote.total : null;
+  const manualTotal =
+    fareMode === 'keep' ? previousTotal
+      : fareMode === 'custom' ? M.toStr(M.round2(M.dec(String(payload.customFare))))
+        : null;
+  // For a manual fare the gross IS the typed / kept total: the promo is not
+  // recomputed (staff set the final number on purpose).
+  const grossTotal = manualFare ? manualTotal : quotedTotal;
 
   /*
    * Declared out here, assigned inside the transaction.
@@ -361,14 +419,19 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
   const updated = await prisma.$transaction(async (tx) => {
     /* -- the promo, recomputed (not re-evaluated — see discount.service) -- */
 
-    promo = await discountService.repriceRedemption(
-      { bookingId, fareTotal: grossTotal },
-      tx,
-    );
+    if (manualFare) {
+      promo = null;
+      total = manualTotal;
+    } else {
+      promo = await discountService.repriceRedemption(
+        { bookingId, fareTotal: grossTotal },
+        tx,
+      );
 
-    total = promo
-      ? M.toStr(M.sub(M.dec(grossTotal), M.dec(promo.amount)))
-      : grossTotal;
+      total = promo
+        ? M.toStr(M.sub(M.dec(grossTotal), M.dec(promo.amount)))
+        : grossTotal;
+    }
 
     const newTotal = M.round2(total);
 
@@ -431,12 +494,16 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
         // The route itself did not change, but the re-quote is what the new
         // fare was computed from; storing its figures keeps the row and its
         // own frozen basis telling the same story.
-        distanceKm: quote.trip.totalKm,
-        durationMinutes: quote.trip.durationMin,
+        ...(quote
+          ? {
+              distanceKm: quote.trip.totalKm,
+              durationMinutes: quote.trip.durationMin,
+              surgeMultiplier: quote.quote.meta.surgeMultiplier,
+            }
+          : {}),
 
         estimatedFare: total,
         balanceDue: M.toStr(balanceDue),
-        surgeMultiplier: quote.quote.meta.surgeMultiplier,
 
         /*
          * RE-FROZEN, with the old basis kept beside it.
@@ -449,8 +516,15 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
         fareBasis: {
           quotedAt: new Date().toISOString(),
           total,
-          components: quote.quote,
-          routing: quote.routing,
+          // The breakdown invoices and extra-km charges read. A manual fare
+          // with no quote for the new class keeps the old frozen breakdown;
+          // billing scales its lines to the stored total either way.
+          components: quote ? quote.quote : (previousBasis.components || null),
+          routing: quote ? quote.routing : (previousBasis.routing || null),
+          fareMode,
+          ...(manualFare
+            ? { manualFare: { mode: fareMode, total, quotedTotal, by: actor?.id || null, reason: payload.reason || null } }
+            : {}),
           billing: previousBasis.billing || null,
           paymentSplit: {
             advanceDue: M.toStr(split.advanceDue),
@@ -465,7 +539,7 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
                 amount: promo.amount,
                 grossTotal,
               }
-            : null,
+            : (manualFare ? (previousBasis.discount || null) : null),
           repriceHistory: [
             ...(Array.isArray(previousBasis.repriceHistory) ? previousBasis.repriceHistory : []),
             {
@@ -474,6 +548,8 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
               reason: payload.reason || null,
               vehicleClass: { from: previousClass, to: nextClass },
               total: { from: previousTotal, to: total },
+              fareMode,
+              quotedTotal,
               previousBasis: {
                 quotedAt: previousBasis.quotedAt || null,
                 total: previousBasis.total || previousTotal,
@@ -495,7 +571,7 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
 
     await audit.record(tx, {
       actor,
-      action: 'BOOKING_VEHICLE_CHANGED',
+      action: fareOnly ? 'BOOKING_FARE_EDITED' : 'BOOKING_VEHICLE_CHANGED',
       entityType: 'booking',
       entityId: bookingId,
       before: {
@@ -511,6 +587,8 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
         refundDue: M.toStr(refundDue),
         allocationReleased: !!allocationBlocks,
         reason: payload.reason || null,
+        fareMode,
+        quotedTotal,
       },
       meta,
     });
@@ -541,9 +619,9 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
    */
   push
     .pushToUser(booking.customerId, {
-      title: 'Your vehicle has been changed',
+      title: fareOnly ? 'Your fare has been updated' : 'Your vehicle has been changed',
       body:
-        `${booking.bookingNumber}: now ${nextClass}. ` +
+        (fareOnly ? `${booking.bookingNumber}: ` : `${booking.bookingNumber}: now ${nextClass}. `) +
         `Fare is now ₹${M.toStr(M.round2(total))}` +
         (Number(balanceDue) > 0 ? `, ₹${M.toStr(balanceDue)} due.` : '.'),
       data: { type: 'BOOKING_VEHICLE_CHANGED', bookingId, vehicleClass: nextClass },
@@ -576,8 +654,28 @@ async function changeVehicleClass(bookingId, payload, actor, meta = {}) {
   };
 }
 
+/**
+ * Set the fare by hand, class unchanged. Same reprice path as a class change —
+ * payment split, refund-due, corporate credit, audit, reprice history, live
+ * events and the rider's push all behave identically. FARE_EDIT + reason are
+ * enforced by changeVehicleClass.
+ */
+async function editFare(bookingId, { fare, reason }, actor, meta = {}) {
+  const booking = await loadForReprice(bookingId);
+  if (M.dec(String(fare)).equals(M.round2(booking.estimatedFare))) {
+    throw ApiError.badRequest('That is already the fare', 'FARE_UNCHANGED');
+  }
+  return changeVehicleClass(
+    bookingId,
+    { vehicleClass: booking.vehicleClass, fareMode: 'custom', customFare: fare, reason },
+    actor,
+    meta,
+  );
+}
+
 module.exports = {
   listOptions,
   changeVehicleClass,
+  editFare,
   CHANGEABLE_STATUSES,
 };

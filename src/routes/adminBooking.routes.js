@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * src/routes/adminBooking.routes.js   — UPDATED for Day 6
+ * src/routes/adminBooking.routes.js
  *   -> /api/v1/admin/bookings
  *
  * Operations view plus every forward transition. Guarded per route by
@@ -38,8 +38,23 @@ router.get('/attempts', requirePermission('BOOKING_MANAGE'),
 router.get('/', requirePermission('BOOKING_MANAGE'),
   validate({ query: s.listBookingsQuerySchema }), ctrl.list);
 
+/**
+ * Lifts an optional `manualFare: { total, reason }` out of the body BEFORE
+ * createBookingSchema runs (which would strip it), validates it, and parks it on
+ * req.manualFare. Only this admin route has it — the customer booking route
+ * shares the controller but never reaches this, so a rider cannot set a price.
+ */
+function takeManualFare(req, _res, next) {
+  try {
+    const raw = req.body && req.body.manualFare;
+    if (req.body) delete req.body.manualFare;
+    req.manualFare = raw == null ? null : s.manualFareSchema.parse(raw);
+    next();
+  } catch (err) { next(err); }
+}
+
 router.post('/', requirePermission('BOOKING_CREATE'), attachPermissions,
-  idempotent('POST /admin/bookings'), validate({ body: s.createBookingSchema }), ctrl.create);
+  idempotent('POST /admin/bookings'), takeManualFare, validate({ body: s.createBookingSchema }), ctrl.create);
 
 // Static segments must precede /:id or they are captured as a uuid parameter.
 // Without this the request falls through to GET /:id, which validates
@@ -81,6 +96,11 @@ router.get('/:id/vehicle-options', requirePermission('BOOKING_MANAGE'),
  * Idempotency-keyed: a double-tapped "Change vehicle" must not reprice twice
  * and must not release a second allocation.
  */
+/** Set the fare by hand, class unchanged. FARE_EDIT checked in the service. */
+router.patch('/:id/fare', requirePermission('FARE_EDIT'),
+  idempotent('PATCH /admin/bookings/:id/fare'),
+  validate({ params: s.idParamSchema, body: s.editFareSchema }), ctrl.editFare);
+
 router.patch('/:id/vehicle', requirePermission('BOOKING_MANAGE'),
   idempotent('PATCH /admin/bookings/:id/vehicle'),
   validate({ params: s.idParamSchema, body: s.changeVehicleSchema }), ctrl.changeVehicle);

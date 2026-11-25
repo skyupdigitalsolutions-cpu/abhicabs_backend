@@ -28,6 +28,7 @@ const { ApiError, paginated } = require('../utils/helpers');
 const quoteService = require('./quote.service');
 const customerService = require('./customer.service');
 const corporateService = require('./corporate.service');
+const permissionService = require('./permission.service');
 const audit = require('./audit.service');
 const funnel = require('./funnel.service');
 const discountService = require('./discount.service');
@@ -308,8 +309,29 @@ function validateTiming({ pickupAt, returnAt, dropAt, tripType, stops, scheduled
  * @param {object} actor   req.user
  * @param {object} meta    ip, userAgent, source
  */
-async function create(input, actor, meta = {}) {
+/**
+ * @param {object} [opts]
+ * @param {{ total: number, reason: string }} [opts.manualFare]
+ *   Staff-set fare (admin route only, FARE_EDIT). Replaces the rate-card total;
+ *   the quote is still run for the route, addresses and breakdown, and its
+ *   figure is kept beside the manual one in fareBasis for the record.
+ */
+async function create(input, actor, meta = {}, opts = {}) {
   const customerId = input.customerId || actor.id;
+
+  const manualFare = opts.manualFare || null;
+  if (manualFare) {
+    const allowed = await permissionService.roleHasAny(actor?.baseRole || actor?.role, ['FARE_EDIT']);
+    if (!allowed) {
+      throw ApiError.forbidden('Setting the fare by hand requires: FARE_EDIT', 'PERMISSION_DENIED');
+    }
+    if (input.promoCode) {
+      throw ApiError.badRequest(
+        'Use either a manual fare or a promo code, not both — the manual fare is the final amount',
+        'MANUAL_FARE_WITH_PROMO',
+      );
+    }
+  }
 
   /*
    * Guest contact is accepted ONLY for a guest customer.
@@ -497,9 +519,11 @@ async function create(input, actor, meta = {}) {
       promo = result;
     }
 
-    const total = promo
-      ? M.toStr(M.sub(M.dec(grossTotal), M.dec(promo.amount)))
-      : grossTotal;
+    const total = manualFare
+      ? M.toStr(M.round2(M.dec(String(manualFare.total))))
+      : promo
+        ? M.toStr(M.sub(M.dec(grossTotal), M.dec(promo.amount)))
+        : grossTotal;
 
     const { advanceDue, balanceDue } = splitPayment(total, input.paymentMode);
 
@@ -638,6 +662,21 @@ async function create(input, actor, meta = {}) {
                   grossTotal,
                 }
               : null,
+            // Staff typed the fare. `total` is theirs; quotedTotal is what the
+            // rate card said, so the difference is always explainable.
+            ...(manualFare
+              ? {
+                  fareMode: 'custom',
+                  manualFare: {
+                    mode: 'custom',
+                    total,
+                    quotedTotal: grossTotal,
+                    by: actor?.id || null,
+                    reason: manualFare.reason,
+                    at: new Date().toISOString(),
+                  },
+                }
+              : {}),
           },
 
           surgeMultiplier: quote.quote.meta.surgeMultiplier,
@@ -708,6 +747,7 @@ async function create(input, actor, meta = {}) {
           tripType: input.tripType,
           billTo: billing.billTo,
           ...(promo ? { promoCode: promo.code, discount: promo.amount, grossTotal } : {}),
+          ...(manualFare ? { manualFare: true, quotedTotal: grossTotal, fareReason: manualFare.reason } : {}),
         },
         meta,
       });
