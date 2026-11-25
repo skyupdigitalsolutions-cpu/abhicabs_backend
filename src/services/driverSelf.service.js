@@ -668,6 +668,7 @@ async function onboardingState(userId) {
     where: { userId },
     select: {
       kycStatus: true,
+      isTemporary: true,
       documents: true,
       assignedVehicleId: true,
       assignedVehicle: { select: VEHICLE_SELF_SELECT },
@@ -684,10 +685,15 @@ async function onboardingState(userId) {
     ? missingDocs(vehicle.documents, REQUIRED_VEHICLE_DOCS)
     : [];
 
-  const complete = driverDocsMissing.length === 0 && vehicleDocsMissing.length === 0 && hasVehicle;
+  // Vehicle is optional for submission (see submitForReview) — driver documents
+  // are what gate it. vehicleDocsMissing is already [] when there is no vehicle.
+  const complete = driverDocsMissing.length === 0 && vehicleDocsMissing.length === 0;
 
   return {
     kycStatus: driver.kycStatus,
+    // Manually-added (admin-created) drivers log in directly in the app,
+    // skipping the self-onboarding / KYC verification gate.
+    isTemporary: driver.isTemporary === true,
     submittedAt: meta.submittedAt || null,
     rejectionReason: meta.rejectionReason || null,
     hasVehicle,
@@ -714,9 +720,10 @@ async function submitForReview(userId) {
   if (state.kycStatus === 'SUSPENDED') {
     throw ApiError.forbidden('Your account is suspended. Please contact support.', 'ACCOUNT_SUSPENDED');
   }
-  if (!state.hasVehicle) {
-    throw ApiError.badRequest('Register a vehicle before submitting', 'VEHICLE_REQUIRED');
-  }
+  // Vehicle is OPTIONAL at submission: a driver can submit with their documents
+  // only and get a vehicle later (added from Profile, or assigned by an admin).
+  // They simply can't go online until a vehicle is active. This matches the
+  // app's own message on the KYC screen.
   if (state.missingDriverDocs.length || state.missingVehicleDocs.length) {
     throw ApiError.badRequest(
       `Missing documents: ${[...state.missingDriverDocs, ...state.missingVehicleDocs].join(', ')}`,
