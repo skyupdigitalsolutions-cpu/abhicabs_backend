@@ -2096,6 +2096,17 @@ model BlogUser {
   @@map("blog_users")
 }
 
+// CMS page content (service pages + built-in page overrides), one row per page key.
+// Read publicly by the website (GET /api/v1/blog/pages); written by blog editors/admins.
+model CmsPage {
+  id        String   @id @db.VarChar(120)
+  content   Json
+  updatedBy String?  @map("updated_by") @db.VarChar(180)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("cms_pages")
+}
+
 // ===========================================================================
 // SETTINGS  — key-value store for company profile, notification preferences
 // ===========================================================================

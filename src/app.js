@@ -84,6 +84,9 @@ app.use(
 );
 
 // Bounded body — an unbounded body is a DoS vector.
+// CMS content saves (all service pages / the whole blogs.js file) exceed 100kb; allow 5mb on those
+// two routes only. They run first, so the general 100kb parser below skips the already-parsed body.
+app.use(['/api/v1/blog/pages', '/api/v1/blog/github'], express.json({ limit: '5mb' }));
 app.use(express.json({
   limit: '100kb',
   // Meta signs the exact bytes it sends (X-Hub-Signature-256). Keep them, for the Meta webhook path only.
