@@ -10,19 +10,46 @@
  * is seeded automatically so the builder is usable out of the box.
  */
 
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { prisma } = require('../config/prisma');
 const { asyncHandler } = require('../utils/helpers');
 
 const BCRYPT_ROUNDS = 12;
-const JWT_SECRET = process.env.BLOG_JWT_SECRET || process.env.JWT_SECRET || 'blog-builder-secret-change-me';
 const JWT_EXPIRES = '7d';
+const JWT_ALG = 'HS256';
+const IS_PROD = process.env.NODE_ENV === 'production';
 
-// Default seed admin — created on first login if no blog users exist
+/**
+ * Signing secret for Blog Builder tokens. There is NO hard-coded fallback: a
+ * secret that is written in the source code lets anyone mint an admin token.
+ *   1. BLOG_JWT_SECRET, if set (recommended)
+ *   2. JWT_SECRET, if set and at least 32 characters (kept so existing sessions stay valid)
+ *   3. otherwise derived from the main JWT_ACCESS_SECRET (required by src/config/env.js),
+ *      under a separate label so blog tokens and main-app tokens never verify as each other.
+ */
+function resolveSecret() {
+  if (process.env.BLOG_JWT_SECRET) return process.env.BLOG_JWT_SECRET;
+  if (process.env.JWT_SECRET && process.env.JWT_SECRET.length >= 32) return process.env.JWT_SECRET;
+  const base = process.env.JWT_ACCESS_SECRET || require('../config/env').accessSecret;
+  if (!base) throw new Error('[blog] No secret available to sign Blog Builder tokens (set BLOG_JWT_SECRET).');
+  return crypto.createHmac('sha256', base).update('abhicabs-blog-builder-jwt-v1').digest('hex');
+}
+const JWT_SECRET = resolveSecret();
+
+// Default seed admin — created on first login only if NO blog users exist.
 const SEED_EMAIL = process.env.BLOG_ADMIN_EMAIL || 'blog@abhicabs.in';
-const SEED_PASSWORD = process.env.BLOG_ADMIN_PASSWORD || 'AbhiBlog@2025';
 const SEED_NAME = 'Blog Admin';
+// The password must not be one that is published in the code. In production, when
+// BLOG_ADMIN_PASSWORD is not set, a random one is generated and printed once in the
+// server log. Local development keeps the old default so nothing changes there.
+const LEGACY_DEV_PASSWORD = 'AbhiBlog@2025';
+function seedPassword() {
+  if (process.env.BLOG_ADMIN_PASSWORD) return { password: process.env.BLOG_ADMIN_PASSWORD, generated: false };
+  if (!IS_PROD) return { password: LEGACY_DEV_PASSWORD, generated: false };
+  return { password: crypto.randomBytes(12).toString('base64url'), generated: true };
+}
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
 
@@ -30,7 +57,7 @@ function signToken(user) {
   return jwt.sign(
     { id: user.id, email: user.email, role: user.role },
     JWT_SECRET,
-    { expiresIn: JWT_EXPIRES },
+    { expiresIn: JWT_EXPIRES, algorithm: JWT_ALG },
   );
 }
 
@@ -44,32 +71,64 @@ async function ensureSeedAdmin() {
   const count = await prisma.blogUser.count();
   if (count > 0) return;
 
-  const hash = await bcrypt.hash(SEED_PASSWORD, BCRYPT_ROUNDS);
-  await prisma.blogUser.create({
-    data: {
-      name: SEED_NAME,
-      email: SEED_EMAIL,
-      password: hash,
-      role: 'admin',
-    },
-  });
+  const { password, generated } = seedPassword();
+  const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  try {
+    await prisma.blogUser.create({
+      data: {
+        name: SEED_NAME,
+        email: SEED_EMAIL,
+        password: hash,
+        role: 'admin',
+      },
+    });
+  } catch (err) {
+    if (err?.code === 'P2002') return; // another request seeded it at the same moment
+    throw err;
+  }
   console.log(`[blog] Seeded default blog admin: ${SEED_EMAIL}`);
+  if (generated) {
+    console.warn(`[blog] BLOG_ADMIN_PASSWORD is not set — generated password for ${SEED_EMAIL}: ${password}`);
+    console.warn('[blog] Log in and change it in Blog Builder → Users, or set BLOG_ADMIN_PASSWORD.');
+  }
 }
 
 /* ── Middleware: Blog JWT auth ──────────────────────────────────────────── */
 
-exports.requireBlogAuth = (req, res, next) => {
+/**
+ * Who is calling: verifies the token AND re-reads the user, so a deactivated or
+ * deleted account loses access at once and a role change applies at once
+ * (the token only proves identity; the role always comes from the database).
+ * → { user } or { status, message }
+ */
+async function authenticate(req) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
-    return res.status(401).json({ success: false, message: 'Not authenticated' });
-  }
+  if (!header || !header.startsWith('Bearer ')) return { status: 401, message: 'Not authenticated' };
+  let decoded;
   try {
-    const decoded = jwt.verify(header.slice(7), JWT_SECRET);
-    req.blogUser = decoded;
-    next();
+    decoded = jwt.verify(header.slice(7), JWT_SECRET, { algorithms: [JWT_ALG] });
   } catch {
-    return res.status(401).json({ success: false, message: 'Token expired or invalid' });
+    return { status: 401, message: 'Token expired or invalid' };
   }
+  // ids are UUIDs; anything else would make the database query itself fail
+  if (!decoded?.id || !/^[0-9a-f-]{36}$/i.test(String(decoded.id))) return { status: 401, message: 'Token expired or invalid' };
+  const user = await prisma.blogUser.findUnique({
+    where: { id: String(decoded.id) },
+    select: { id: true, email: true, role: true, isActive: true },
+  });
+  if (!user || !user.isActive) return { status: 401, message: 'Account not found or inactive' };
+  return { user: { id: user.id, email: user.email, role: user.role } };
+}
+exports.authenticateBlogUser = authenticate;
+
+exports.requireBlogAuth = (req, res, next) => {
+  authenticate(req)
+    .then((out) => {
+      if (!out.user) return res.status(out.status).json({ success: false, message: out.message });
+      req.blogUser = out.user;
+      return next();
+    })
+    .catch(next);
 };
 
 exports.requireBlogAdmin = (req, res, next) => {
